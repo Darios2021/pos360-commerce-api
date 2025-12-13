@@ -1,19 +1,8 @@
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
+const sequelize = require('./sequelize.instance');
 
-const { origins } = require('../config/cors');
+async function initSequelize() {
+  await sequelize.authenticate();
+  return sequelize;
+}
 
-module.exports = (app) => {
-  app.use(helmet());
-
-  if (origins === '*') {
-    app.use(cors({ origin: true, credentials: true }));
-  } else {
-    app.use(cors({ origin: origins, credentials: true }));
-  }
-
-  app.use(morgan('dev'));
-  app.use(require('express').json({ limit: '2mb' }));
-  app.use(require('express').urlencoded({ extended: true }));
-};
+module.exports = { initSequelize };
