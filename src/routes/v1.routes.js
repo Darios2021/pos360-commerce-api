@@ -1,5 +1,7 @@
-const router = require('express').Router();
+const express = require('express');
 const routes = require('./index');
+
+const router = express.Router();
 
 router.use('/', routes);
 
