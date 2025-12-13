@@ -1,17 +1,17 @@
-const { NODE_ENV } = require('../config/env');
+function errorMiddleware(err, req, res, next) {
+  // Log fuerte para CapRover
+  console.error('❌ ERROR:', err);
 
-module.exports = (err, req, res, next) => {
-  const status = err.statusCode || 500;
+  const status = err.statusCode || err.status || 500;
 
-  const payload = {
+  // En prod no mostrar stack al cliente (pero sí lo queda en logs)
+  return res.status(status).json({
     ok: false,
     error: {
-      message: err.message || 'Internal Server Error'
-    }
-  };
+      message: err.message || 'Internal Server Error',
+      code: err.code || undefined,
+    },
+  });
+}
 
-  if (err.details) payload.error.details = err.details;
-  if (NODE_ENV !== 'production') payload.error.stack = err.stack;
-
-  res.status(status).json(payload);
-};
+module.exports = { errorMiddleware };
