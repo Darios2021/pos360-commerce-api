@@ -1,10 +1,25 @@
-const { CORS_ORIGINS } = require('./env');
+const cors = require('cors');
 
-const parseOrigins = () => {
-  if (!CORS_ORIGINS || CORS_ORIGINS === '*') return '*';
-  return CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
-};
+function parseOrigins(value) {
+  if (!value || value === '*') return '*';
 
-module.exports = {
-  origins: parseOrigins()
-};
+  // admite "a,b,c" o JSON ["a","b"]
+  try {
+    const maybeJson = JSON.parse(value);
+    if (Array.isArray(maybeJson)) return maybeJson.map((s) => String(s).trim()).filter(Boolean);
+  } catch (_) {}
+
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const origins = parseOrigins(process.env.CORS_ORIGINS);
+
+const corsMiddleware = cors({
+  origin: origins === '*' ? true : origins,
+  credentials: true,
+});
+
+module.exports = corsMiddleware;
