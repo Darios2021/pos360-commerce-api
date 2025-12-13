@@ -1,34 +1,33 @@
-const fs = require('fs');
-const path = require('path');
+const sequelize = require('../loaders/sequelize.instance');
 
-const sequelize = require('../loaders/sequelize.instance'); 
-// 👆 Si vos no tenés este archivo, decime y lo adaptamos.
-// La idea: exportar la misma instancia sequelize que usás para conectarte.
+// Model definers (si ya tenés modelos separados, acá los requireás)
+const User = require('./User')(sequelize);
+const Role = require('./Role')(sequelize);
+const Permission = require('./Permission')(sequelize);
+const Branch = require('./Branch')(sequelize);
 
-const basename = path.basename(__filename);
-const db = {};
+// Pivots
+const UserRole = require('./UserRole')(sequelize);
+const RolePermission = require('./RolePermission')(sequelize);
+const UserBranch = require('./UserBranch')(sequelize);
 
-fs.readdirSync(__dirname)
-  .filter((file) => file.indexOf('.') !== 0 && file !== basename && file.endsWith('.js'))
-  .forEach((file) => {
-    const modelFactory = require(path.join(__dirname, file));
-    const model = modelFactory(sequelize);
-    db[model.name] = model;
-  });
+// Associations (ajustá nombres según tus modelos reales)
+User.belongsToMany(Role, { through: UserRole, foreignKey: 'user_id', otherKey: 'role_id' });
+Role.belongsToMany(User, { through: UserRole, foreignKey: 'role_id', otherKey: 'user_id' });
 
-// Asociaciones
-const { User, Role, Permission } = db;
+Role.belongsToMany(Permission, { through: RolePermission, foreignKey: 'role_id', otherKey: 'permission_id' });
+Permission.belongsToMany(Role, { through: RolePermission, foreignKey: 'permission_id', otherKey: 'role_id' });
 
-if (User && Role) {
-  User.belongsToMany(Role, { through: 'user_roles', foreignKey: 'user_id', otherKey: 'role_id', as: 'roles' });
-  Role.belongsToMany(User, { through: 'user_roles', foreignKey: 'role_id', otherKey: 'user_id', as: 'users' });
-}
+User.belongsToMany(Branch, { through: UserBranch, foreignKey: 'user_id', otherKey: 'branch_id' });
+Branch.belongsToMany(User, { through: UserBranch, foreignKey: 'branch_id', otherKey: 'user_id' });
 
-if (Role && Permission) {
-  Role.belongsToMany(Permission, { through: 'role_permissions', foreignKey: 'role_id', otherKey: 'permission_id', as: 'permissions' });
-  Permission.belongsToMany(Role, { through: 'role_permissions', foreignKey: 'permission_id', otherKey: 'role_id', as: 'roles' });
-}
-
-db.sequelize = sequelize;
-
-module.exports = db;
+module.exports = {
+  sequelize,
+  User,
+  Role,
+  Permission,
+  Branch,
+  UserRole,
+  RolePermission,
+  UserBranch,
+};
