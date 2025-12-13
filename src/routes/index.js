@@ -1,8 +1,11 @@
-const { Router } = require('express');
-const v1Routes = require('./v1.routes');
+const router = require('express').Router();
 
-const router = Router();
+const healthRoutes = require('./health.routes');
+const authRoutes = require('./auth.routes');
+const protectedRoutes = require('./protected.routes');
 
-router.use('/v1', v1Routes);
+router.use('/health', healthRoutes);
+router.use('/auth', authRoutes);
+router.use('/protected', protectedRoutes);
 
 module.exports = router;

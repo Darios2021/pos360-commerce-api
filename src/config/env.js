@@ -1,20 +1,17 @@
-const path = require('path');
-require('dotenv').config({ path: path.resolve(process.cwd(), '.env') });
-
-const env = (key, def = undefined) => {
-  const v = process.env[key];
-  return (v === undefined || v === '') ? def : v;
-};
-
 module.exports = {
-  NODE_ENV: env('NODE_ENV', 'development'),
-  PORT: Number(env('PORT', 3000)),
-  DB: {
-    HOST: env('DB_HOST', 'localhost'),
-    PORT: Number(env('DB_PORT', 3306)),
-    NAME: env('DB_NAME', 'core_suite'),
-    USER: env('DB_USER', 'root'),
-    PASSWORD: env('DB_PASSWORD', '')
-  },
-  CORS_ORIGINS: env('CORS_ORIGINS', '*')
+  NODE_ENV: process.env.NODE_ENV || 'development',
+  PORT: Number(process.env.PORT || 3000),
+
+  DB_HOST: process.env.DB_HOST,
+  DB_PORT: Number(process.env.DB_PORT || 3306),
+  DB_NAME: process.env.DB_NAME,
+  DB_USER: process.env.DB_USER,
+  DB_PASSWORD: process.env.DB_PASSWORD,
+
+  CORS_ORIGINS: process.env.CORS_ORIGINS || '*',
+
+  JWT_SECRET: process.env.JWT_SECRET,
+  JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET,
+  JWT_ACCESS_EXPIRES: process.env.JWT_ACCESS_EXPIRES || '1d',
+  JWT_REFRESH_EXPIRES: process.env.JWT_REFRESH_EXPIRES || '30d',
 };
