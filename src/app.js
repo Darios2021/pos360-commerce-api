@@ -1,22 +1,26 @@
 const express = require('express');
-const loadExpress = require('./loaders/express.loader');
-const routes = require('./routes');
-const errorMiddleware = require('./middlewares/error.middleware');
+const cors = require('cors');
 
-const createApp = () => {
+const { CORS_ORIGINS } = require('./config/env');
+
+function createApp() {
   const app = express();
 
-  loadExpress(app);
+  // middlewares
+  app.use(express.json({ limit: '2mb' }));
+  app.use(cors({ origin: CORS_ORIGINS === '*' ? true : CORS_ORIGINS.split(',') }));
 
-  app.get('/', (req, res) => {
-    res.json({ ok: true, service: 'core-suite-api', api: '/api/v1' });
+  // health
+  app.get('/api/v1/health', (req, res) => {
+    res.json({ status: 'ok', service: 'pos360-commerce-api', ts: new Date().toISOString() });
   });
 
-  app.use('/api', routes);
-
-  app.use(errorMiddleware);
+  // root (para que "/" no tire 502/unknown)
+  app.get('/', (req, res) => {
+    res.json({ name: 'pos360-commerce-api', ok: true });
+  });
 
   return app;
-};
+}
 
 module.exports = { createApp };

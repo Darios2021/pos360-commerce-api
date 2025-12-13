@@ -4,12 +4,13 @@ const { createApp } = require('./app');
 
 (async () => {
   try {
+    // DB: no debe tumbar la API en arranque
     try {
       await initSequelize();
       console.log('✅ Database connected');
-    } catch (dbErr) {
-      console.warn('⚠️ Database NOT connected yet. API will still start.');
-      console.warn(`⚠️ Reason: ${dbErr?.message || dbErr}`);
+    } catch (err) {
+      console.warn('⚠️ DB connection failed. Starting API anyway.');
+      console.warn(err?.message || err);
     }
 
     const app = createApp();
