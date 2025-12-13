@@ -1,8 +1,10 @@
-const router = require('express').Router();
+const express = require('express');
 
-const healthRoutes = require('./health.routes');
 const authRoutes = require('./auth.routes');
+const healthRoutes = require('./health.routes');
 const protectedRoutes = require('./protected.routes');
+
+const router = express.Router();
 
 router.use('/health', healthRoutes);
 router.use('/auth', authRoutes);
