@@ -1,9 +1,6 @@
-const { Router } = require('express');
+const router = require('express').Router();
+const routes = require('./index');
 
-const healthRoutes = require('../modules/health/health.routes');
-
-const router = Router();
-
-router.use('/', healthRoutes);
+router.use('/', routes);
 
 module.exports = router;
