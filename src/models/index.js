@@ -1,25 +1,22 @@
-const { sequelize } = require('../loaders/sequelize.instance');
+const { Sequelize, DataTypes } = require('sequelize');
+const { DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT } = require('../config/env');
 
-const User = require('./User')(sequelize);
-const Role = require('./Role')(sequelize);
-const UserRole = require('./UserRole')(sequelize);
-
-// asociaciones para user.getRoles()
-User.belongsToMany(Role, {
-  through: UserRole,
-  foreignKey: 'user_id',
-  otherKey: 'role_id',
+const sequelize = new Sequelize(DB_NAME, DB_USER, DB_PASSWORD, {
+  host: DB_HOST,
+  port: DB_PORT,
+  dialect: 'mysql',
+  logging: false,
 });
 
-Role.belongsToMany(User, {
-  through: UserRole,
-  foreignKey: 'role_id',
-  otherKey: 'user_id',
-});
+const User = require('./User')(sequelize, DataTypes);
+const Role = require('./Role')(sequelize, DataTypes);
+
+// relaciones
+User.belongsToMany(Role, { through: 'user_roles', foreignKey: 'user_id' });
+Role.belongsToMany(User, { through: 'user_roles', foreignKey: 'role_id' });
 
 module.exports = {
   sequelize,
   User,
   Role,
-  UserRole,
 };
