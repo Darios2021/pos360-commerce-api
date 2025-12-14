@@ -2,9 +2,9 @@
 const express = require("express");
 const env = require("./config/env");
 const { sequelize } = require("./models");
+const { requireAuth, requireRole } = require("./middlewares/auth");
 
 const app = express();
-
 app.use(express.json());
 
 // =====================
@@ -21,18 +21,16 @@ app.get("/health", (req, res) => {
 });
 
 // =====================
-// DEBUG (temporal) - lista TODAS las rutas, incluyendo routers montados
+// DEBUG (temporal) - PROTEGIDOS (solo super_admin)
 // =====================
-app.get("/__routes", (req, res) => {
+app.get("/__routes", requireAuth, requireRole("super_admin"), (req, res) => {
   try {
     const out = [];
-
     const split = (thing) => (thing || "").split("/").filter(Boolean);
 
-    // Convierte layer.regexp a un "path" lo más humano posible
     const getMountPath = (layer) => {
       if (!layer.regexp) return "";
-      let s = layer.regexp.toString(); // ej: "/^\\/api\\/v1\\/?(?=\\/|$)/i"
+      let s = layer.regexp.toString();
       s = s
         .replace("/^\\", "")
         .replace("\\/?(?=\\/|$)/i", "")
@@ -41,7 +39,6 @@ app.get("/__routes", (req, res) => {
         .replace("\\/", "/")
         .replace(/\\\//g, "/");
 
-      // Limpia restos comunes
       s = s.replace(/\(\?:\(\[\^\\\/\]\+\?\)\)/g, "");
       s = s.replace(/\(\?:\[\^\\\/\]\+\?\)/g, "");
       s = s.replace(/\(\?:\[\^\/\]\+\?\)/g, "");
@@ -55,7 +52,6 @@ app.get("/__routes", (req, res) => {
 
     const walk = (stack, prefix = "") => {
       stack.forEach((layer) => {
-        // Ruta directa
         if (layer.route?.path) {
           const methods = Object.keys(layer.route.methods || {}).map((m) => m.toUpperCase());
           const fullPath = "/" + [...split(prefix), ...split(layer.route.path)].join("/");
@@ -63,7 +59,6 @@ app.get("/__routes", (req, res) => {
           return;
         }
 
-        // Router montado
         if (layer.name === "router" && layer.handle?.stack) {
           const mount = getMountPath(layer);
           const newPrefix = "/" + [...split(prefix), ...split(mount)].join("/");
@@ -81,10 +76,7 @@ app.get("/__routes", (req, res) => {
   }
 });
 
-// =====================
-// DEBUG (temporal) - ping DB
-// =====================
-app.get("/__db", async (req, res) => {
+app.get("/__db", requireAuth, requireRole("super_admin"), async (req, res) => {
   try {
     await sequelize.authenticate();
     const [rows] = await sequelize.query("SELECT 1 AS ok");
