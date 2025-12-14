@@ -2,13 +2,25 @@
 const express = require("express");
 const env = require("./config/env");
 const { sequelize } = require("./models");
-const { requireAuth, requireRole } = require("./middlewares/auth");
 
 const app = express();
 app.use(express.json());
 
 // =====================
-// Rutas API (habilitadas)
+// Middlewares (usar los tuyos)
+// =====================
+const authMw = require("./middlewares/auth.middleware");
+const rbacMw = require("./middlewares/rbac.middleware");
+
+// Fallbacks por si tus exports tienen nombres distintos
+const requireAuth =
+  authMw.requireAuth || authMw.authenticate || authMw.auth || authMw;
+
+const requireRole =
+  rbacMw.requireRole || rbacMw.allowRole || rbacMw.rbac || ((role) => (req, res, next) => next());
+
+// =====================
+// Rutas API
 // =====================
 const routes = require("./routes");
 app.use("/api/v1", routes);
@@ -21,7 +33,7 @@ app.get("/health", (req, res) => {
 });
 
 // =====================
-// DEBUG (temporal) - PROTEGIDOS (solo super_admin)
+// DEBUG (protegidos)
 // =====================
 app.get("/__routes", requireAuth, requireRole("super_admin"), (req, res) => {
   try {
@@ -86,6 +98,9 @@ app.get("/__db", requireAuth, requireRole("super_admin"), async (req, res) => {
   }
 });
 
+// =====================
+// Start
+// =====================
 async function start() {
   try {
     await sequelize.authenticate();
