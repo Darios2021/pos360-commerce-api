@@ -1,26 +1,34 @@
+// src/config/env.js
+function required(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env var: ${name}`);
+  return v;
+}
+
+function optional(name, def = undefined) {
+  return process.env[name] ?? def;
+}
+
 const env = {
-  NODE_ENV: process.env.NODE_ENV || 'development',
-  PORT: process.env.PORT || 3000,
+  NODE_ENV: optional("NODE_ENV", "production"),
+  PORT: Number(optional("PORT", "3000")),
 
-  DB_HOST: process.env.DB_HOST,
-  DB_PORT: process.env.DB_PORT || 3306,
-  DB_NAME: process.env.DB_NAME,
-  DB_USER: process.env.DB_USER,
-  DB_PASSWORD: process.env.DB_PASSWORD,
+  DB_HOST: required("DB_HOST"),
+  DB_PORT: Number(optional("DB_PORT", "3306")),
+  DB_NAME: required("DB_NAME"),
+  DB_USER: required("DB_USER"),
+  DB_PASSWORD: required("DB_PASSWORD"),
 
-  CORS_ORIGINS: process.env.CORS_ORIGINS || '*',
+  CORS_ORIGINS: optional("CORS_ORIGINS", "*"),
 
-  JWT_SECRET: process.env.JWT_SECRET,
-  JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET,
-  JWT_ACCESS_EXPIRES: process.env.JWT_ACCESS_EXPIRES || '15m',
-  JWT_REFRESH_EXPIRES: process.env.JWT_REFRESH_EXPIRES || '7d',
+  JWT_SECRET: required("JWT_SECRET"),
+  JWT_REFRESH_SECRET: required("JWT_REFRESH_SECRET"),
+  JWT_ACCESS_EXPIRES: optional("JWT_ACCESS_EXPIRES", "1d"),
+  JWT_REFRESH_EXPIRES: optional("JWT_REFRESH_EXPIRES", "30d"),
 };
 
-// Validación mínima (para que falle con mensaje claro)
-['DB_HOST','DB_NAME','DB_USER','DB_PASSWORD','JWT_SECRET','JWT_REFRESH_SECRET'].forEach((k) => {
-  if (!env[k]) {
-    console.warn(`⚠️ Missing env var: ${k}`);
-  }
-});
+env.CORS_ORIGINS_ARRAY = env.CORS_ORIGINS === "*"
+  ? ["*"]
+  : env.CORS_ORIGINS.split(",").map(s => s.trim()).filter(Boolean);
 
 module.exports = env;

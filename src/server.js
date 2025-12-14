@@ -1,25 +1,33 @@
-const { PORT } = require('./config/env');
-const { initSequelize } = require('./loaders/sequelize.loader');
-const { createApp } = require('./app');
+// src/server.js
+const express = require("express");
+const env = require("./config/env");
+const { sequelize } = require("./models");
 
-(async () => {
+const app = express();
+
+app.use(express.json());
+
+// 👇 tus rutas
+// const routes = require("./routes");
+// app.use("/api/v1", routes);
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, service: "pos360-commerce-api" });
+});
+
+async function start() {
   try {
-    // DB: no debe tumbar la API en arranque
-    try {
-      await initSequelize();
-      console.log('✅ Database connected');
-    } catch (err) {
-      console.warn('⚠️ DB connection failed. Starting API anyway.');
-      console.warn(err?.message || err);
-    }
-
-    const app = createApp();
-
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 API listening on :${PORT}`);
-    });
+    await sequelize.authenticate();
+    console.log("✅ DB connected");
   } catch (err) {
-    console.error('❌ Startup error:', err);
+    console.error("❌ DB connection failed. Exiting.");
+    console.error(err);
     process.exit(1);
   }
-})();
+
+  app.listen(env.PORT, () => {
+    console.log(`🚀 API listening on :${env.PORT}`);
+  });
+}
+
+start();
