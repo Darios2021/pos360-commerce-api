@@ -2,13 +2,15 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// 🔥 Linux es case-sensitive: respetar el nombre real del archivo
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
-const Permission = require("./permission")(sequelize, DataTypes); // este sí existe en minúscula
 
-// ✅ pivotes (estos existen en minúscula)
 const UserRole = require("./user_role")(sequelize, DataTypes);
+
+let Permission = null;
+try {
+  Permission = require("./permission")(sequelize, DataTypes);
+} catch (_) {}
 
 let RolePermission = null;
 try {
@@ -33,7 +35,7 @@ Role.belongsToMany(User, {
   as: "users",
 });
 
-if (RolePermission) {
+if (Permission && RolePermission) {
   Role.belongsToMany(Permission, {
     through: { model: RolePermission, timestamps: false },
     foreignKey: "role_id",
