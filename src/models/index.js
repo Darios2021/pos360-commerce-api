@@ -2,27 +2,23 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-const User = require("./user")(sequelize, DataTypes);
-const Role = require("./role")(sequelize, DataTypes);
-const Permission = require("./permission")(sequelize, DataTypes);
+// 🔥 Linux es case-sensitive: respetar el nombre real del archivo
+const User = require("./User")(sequelize, DataTypes);
+const Role = require("./Role")(sequelize, DataTypes);
+const Permission = require("./permission")(sequelize, DataTypes); // este sí existe en minúscula
 
-// ✅ pivotes
+// ✅ pivotes (estos existen en minúscula)
 const UserRole = require("./user_role")(sequelize, DataTypes);
 
-// Si ya tenés role_permissions como tabla pivote, podés crear su modelo similar.
-// Si NO la necesitás, podés borrar esto.
 let RolePermission = null;
 try {
   RolePermission = require("./role_permission")(sequelize, DataTypes);
-} catch (_) {
-  // si no existe el archivo, no pasa nada
-}
+} catch (_) {}
 
 // =====================
 // Associations
 // =====================
 
-// ✅ User <-> Role con pivote SIN timestamps
 User.belongsToMany(Role, {
   through: { model: UserRole, timestamps: false },
   foreignKey: "user_id",
@@ -37,7 +33,6 @@ Role.belongsToMany(User, {
   as: "users",
 });
 
-// ✅ Role <-> Permission (si aplica)
 if (RolePermission) {
   Role.belongsToMany(Permission, {
     through: { model: RolePermission, timestamps: false },
@@ -56,7 +51,6 @@ if (RolePermission) {
 
 module.exports = {
   sequelize,
-  Sequelize: sequelize.Sequelize,
   User,
   Role,
   Permission,
