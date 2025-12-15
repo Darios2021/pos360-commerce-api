@@ -1,5 +1,7 @@
 // src/server.js
 const express = require("express");
+const cors = require("cors");
+
 const env = require("./config/env");
 const { sequelize } = require("./models");
 
@@ -7,7 +9,38 @@ const app = express();
 app.use(express.json());
 
 // =====================
-// Middlewares (usar los tuyos)
+// CORS (FIX DEFINITIVO)
+// =====================
+const allowedOrigins = (env.CORS_ORIGINS || "http://localhost:5173")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // permitir curl / postman / server-to-server
+      if (!origin) return cb(null, true);
+
+      // permitir wildcard explícito
+      if (allowedOrigins.includes("*")) return cb(null, true);
+
+      // permitir origins declarados
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+
+      return cb(new Error("Not allowed by CORS"));
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  })
+);
+
+// responder preflight
+app.options("*", cors());
+
+// =====================
+// Middlewares (los tuyos)
 // =====================
 const authMw = require("./middlewares/auth.middleware");
 const rbacMw = require("./middlewares/rbac.middleware");
@@ -17,7 +50,10 @@ const requireAuth =
   authMw.requireAuth || authMw.authenticate || authMw.auth || authMw;
 
 const requireRole =
-  rbacMw.requireRole || rbacMw.allowRole || rbacMw.rbac || ((role) => (req, res, next) => next());
+  rbacMw.requireRole ||
+  rbacMw.allowRole ||
+  rbacMw.rbac ||
+  ((role) => (req, res, next) => next());
 
 // =====================
 // Rutas API
@@ -65,15 +101,19 @@ app.get("/__routes", requireAuth, requireRole("super_admin"), (req, res) => {
     const walk = (stack, prefix = "") => {
       stack.forEach((layer) => {
         if (layer.route?.path) {
-          const methods = Object.keys(layer.route.methods || {}).map((m) => m.toUpperCase());
-          const fullPath = "/" + [...split(prefix), ...split(layer.route.path)].join("/");
+          const methods = Object.keys(layer.route.methods || {}).map((m) =>
+            m.toUpperCase()
+          );
+          const fullPath =
+            "/" + [...split(prefix), ...split(layer.route.path)].join("/");
           out.push({ methods, path: fullPath });
           return;
         }
 
         if (layer.name === "router" && layer.handle?.stack) {
           const mount = getMountPath(layer);
-          const newPrefix = "/" + [...split(prefix), ...split(mount)].join("/");
+          const newPrefix =
+            "/" + [...split(prefix), ...split(mount)].join("/");
           walk(layer.handle.stack, newPrefix);
         }
       });
