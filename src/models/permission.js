@@ -1,3 +1,4 @@
+// src/models/permission.js
 module.exports = (sequelize, DataTypes) => {
   return sequelize.define(
     "Permission",
@@ -7,23 +8,27 @@ module.exports = (sequelize, DataTypes) => {
         primaryKey: true,
         autoIncrement: true,
       },
-      name: {
-        type: DataTypes.STRING(120),
+
+      // En tu DB se llama "code" (NO "name")
+      code: {
+        type: DataTypes.STRING(100),
         allowNull: false,
+        unique: true,
       },
+
       description: {
         type: DataTypes.STRING(255),
         allowNull: true,
       },
+
+      created_at: {
+        type: DataTypes.DATE,
+        allowNull: false,
+      },
     },
     {
       tableName: "permissions",
-      timestamps: true,
-      createdAt: "created_at",
-      updatedAt: "updated_at",
-      indexes: [
-        { unique: true, fields: ["name"] },
-      ],
+      timestamps: false, // porque solo tenés created_at
     }
   );
 };
