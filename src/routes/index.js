@@ -1,13 +1,28 @@
-const express = require('express');
+const router = require("express").Router();
 
-const healthRoutes = require('./health.routes');
-const authRoutes = require('./auth.routes');
-const protectedRoutes = require('./protected.routes');
+const authRoutes = require("./auth.routes"); // asumo que ya existe
+const { requireAuth } = (() => {
+  const authMw = require("../middlewares/auth.middleware");
+  return { requireAuth: authMw.requireAuth || authMw.authenticate || authMw.auth || authMw };
+})();
 
-const router = express.Router();
+// Public / base
+router.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "pos360-commerce-api",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
 
-router.use('/health', healthRoutes);
-router.use('/auth', authRoutes);
-router.use('/protected', protectedRoutes);
+// Auth
+router.use("/auth", authRoutes);
+
+// Inventory (protegido)
+router.use("/products", requireAuth, require("./products.routes"));
+router.use("/branches", requireAuth, require("./branches.routes"));
+router.use("/warehouses", requireAuth, require("./warehouses.routes"));
+router.use("/stock", requireAuth, require("./stock.routes"));
 
 module.exports = router;
