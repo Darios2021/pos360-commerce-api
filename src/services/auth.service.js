@@ -1,56 +1,21 @@
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const { Op } = require('sequelize');
+// src/services/auth.service.js
+import axios from "axios";
 
-const { User, Role } = require('../models');
-const {
-  JWT_SECRET,
-  JWT_REFRESH_SECRET,
-  JWT_ACCESS_EXPIRES,
-  JWT_REFRESH_EXPIRES,
-} = require('../config/env');
+const API_BASE = import.meta.env.VITE_API_URL || "https://pos360-commerce-api.cingulado.org";
 
-async function login({ identifier, password }) {
-  // username o email
-  const user = await User.findOne({
-    where: {
-      [Op.or]: [{ email: identifier }, { username: identifier }],
-    },
-  });
+const http = axios.create({
+  baseURL: API_BASE,
+  headers: { "Content-Type": "application/json" },
+});
 
-  if (!user) return { ok: false, code: 'INVALID_CREDENTIALS' };
-  if (user.is_active === false) return { ok: false, code: 'USER_DISABLED' };
-
-  const match = await bcrypt.compare(password, user.password);
-  if (!match) return { ok: false, code: 'INVALID_CREDENTIALS' };
-
-  // roles del usuario
-  const roles = await user.getRoles({ attributes: ['name'] });
-  const roleNames = roles.map((r) => r.name);
-
-  const payload = {
-    sub: String(user.id),
-    email: user.email,
-    username: user.username,
-    roles: roleNames,
-  };
-
-  const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_ACCESS_EXPIRES });
-  const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES });
-
-  return {
-    ok: true,
-    user: {
-      id: user.id,
-      email: user.email,
-      username: user.username,
-      first_name: user.first_name,
-      last_name: user.last_name,
-      roles: roleNames,
-    },
-    accessToken,
-    refreshToken,
-  };
+export async function login(identifier, password) {
+  const { data } = await http.post("/api/v1/auth/login", { identifier, password });
+  return data; // { user, accessToken, refreshToken }
 }
 
-module.exports = { login };
+export async function me(accessToken) {
+  const { data } = await http.get("/api/v1/protected/me", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return data; // { ok, user }
+}
