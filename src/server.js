@@ -9,92 +9,67 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 // =====================
-// CORS (BLINDADO DEV + PROD)
+// CORS (PROD + LOCAL)
 // =====================
 const CORS_ORIGINS =
   process.env.CORS_ORIGINS ??
   env.CORS_ORIGINS ??
-  "http://localhost:5173";
+  "http://localhost:5173,http://127.0.0.1:5173";
 
 const allowedOrigins = String(CORS_ORIGINS)
   .split(",")
   .map((o) => o.trim())
   .filter(Boolean);
 
-// ✅ helpers: permitir localhost/127 en cualquier puerto (dev)
-function isLocalDevOrigin(origin) {
-  if (!origin) return true;
-  return (
-    /^http:\/\/localhost:\d+$/.test(origin) ||
-    /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)
-  );
-}
-
-const corsOptions = {
+const corsMw = cors({
   origin: (origin, cb) => {
     // curl/postman/server-to-server
     if (!origin) return cb(null, true);
 
-    // dev local (cualquier puerto)
-    if (isLocalDevOrigin(origin)) return cb(null, true);
-
-    // wildcard explícito
     if (allowedOrigins.includes("*")) return cb(null, true);
-
-    // lista explícita (prod)
     if (allowedOrigins.includes(origin)) return cb(null, true);
 
     return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
-  credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Requested-With",
-    "Accept",
-    "Origin",
-  ],
-  optionsSuccessStatus: 204,
-};
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
+});
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // ✅ preflight con la misma config
+app.use(corsMw);
+app.options("*", corsMw);
 
 // =====================
-// Middlewares
-// =====================
-const authMw = require("./middlewares/auth.middleware");
-const rbacMw = require("./middlewares/rbac.middleware");
-
-const requireAuth =
-  authMw.requireAuth ||
-  authMw.authenticate ||
-  authMw.auth ||
-  ((req, res, next) => next());
-
-const requireRole =
-  rbacMw.requireRole ||
-  rbacMw.allowRole ||
-  rbacMw.rbac ||
-  (() => (req, res, next) => next());
-
-// =====================
-// Rutas API
+// Routes
 // =====================
 const routes = require("./routes");
 app.use("/api/v1", routes);
 
-// =====================
-// Health
-// =====================
-app.get("/health", (req, res) => {
+// Health (simple)
+app.get("/api/v1/health", (req, res) => {
   res.json({
     ok: true,
     service: "pos360-commerce-api",
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });
+});
+
+// =====================
+// Global error handler
+// (incluye CORS en error)
+// =====================
+app.use((err, req, res, next) => {
+  // si CORS tiró error, igual respondemos JSON prolijo
+  const msg = err?.message || "Internal error";
+  const isCors = msg.includes("Not allowed by CORS");
+
+  if (isCors) {
+    return res.status(403).json({ ok: false, code: "CORS_BLOCKED", message: msg });
+  }
+
+  console.error("❌ ERROR:", err);
+  res.status(500).json({ ok: false, code: "SERVER_ERROR", message: msg });
 });
 
 // =====================
@@ -110,8 +85,9 @@ async function start() {
     process.exit(1);
   }
 
-  app.listen(env.PORT, () => {
-    console.log(`🚀 API listening on :${env.PORT}`);
+  const port = process.env.PORT ?? env.PORT ?? 3000;
+  app.listen(port, () => {
+    console.log(`🚀 API listening on :${port}`);
     console.log("🌐 CORS_ORIGINS =", allowedOrigins);
   });
 }

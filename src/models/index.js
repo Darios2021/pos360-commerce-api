@@ -2,9 +2,7 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// =====================
-// MODELS - AUTH
-// =====================
+// ===== Auth =====
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
 const Permission = require("./permission")(sequelize, DataTypes);
@@ -13,13 +11,9 @@ const UserRole = require("./user_role")(sequelize, DataTypes);
 let RolePermission = null;
 try {
   RolePermission = require("./role_permission")(sequelize, DataTypes);
-} catch (_) {
-  RolePermission = null;
-}
+} catch (_) {}
 
-// =====================
-// MODELS - INVENTORY
-// =====================
+// ===== Inventory =====
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
 const Branch = require("./Branch")(sequelize, DataTypes);
@@ -29,7 +23,7 @@ const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 
 // =====================
-// ASSOCIATIONS - AUTH
+// Associations - AUTH
 // =====================
 User.belongsToMany(Role, {
   through: { model: UserRole, timestamps: false },
@@ -62,14 +56,14 @@ if (RolePermission) {
 }
 
 // =====================
-// ASSOCIATIONS - INVENTORY
+// Associations - INVENTORY
 // =====================
 
 // Category hierarchy
 Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
 Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
 
-// Product -> Category
+// Product -> Category (alias DEFINIDO = "category")
 Product.belongsTo(Category, { foreignKey: "category_id", as: "category" });
 Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
 
