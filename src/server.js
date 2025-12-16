@@ -9,10 +9,8 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 // =====================
-// CORS (FIX DEFINITIVO)
+// CORS (BLINDADO DEV + PROD)
 // =====================
-
-// 👉 Runtime env (CapRover) + fallback local
 const CORS_ORIGINS =
   process.env.CORS_ORIGINS ??
   env.CORS_ORIGINS ??
@@ -23,29 +21,45 @@ const allowedOrigins = String(CORS_ORIGINS)
   .map((o) => o.trim())
   .filter(Boolean);
 
+// ✅ helpers: permitir localhost/127 en cualquier puerto (dev)
+function isLocalDevOrigin(origin) {
+  if (!origin) return true;
+  return (
+    /^http:\/\/localhost:\d+$/.test(origin) ||
+    /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)
+  );
+}
+
 const corsOptions = {
   origin: (origin, cb) => {
-    // curl / postman / server-to-server
+    // curl/postman/server-to-server
     if (!origin) return cb(null, true);
+
+    // dev local (cualquier puerto)
+    if (isLocalDevOrigin(origin)) return cb(null, true);
 
     // wildcard explícito
     if (allowedOrigins.includes("*")) return cb(null, true);
 
-    // origins permitidos
+    // lista explícita (prod)
     if (allowedOrigins.includes(origin)) return cb(null, true);
 
     return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+  ],
   optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
-
-// ✅ responder preflight CON LA MISMA CONFIG
-app.options("*", cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ preflight con la misma config
 
 // =====================
 // Middlewares
@@ -53,7 +67,6 @@ app.options("*", cors(corsOptions));
 const authMw = require("./middlewares/auth.middleware");
 const rbacMw = require("./middlewares/rbac.middleware");
 
-// fallback seguro
 const requireAuth =
   authMw.requireAuth ||
   authMw.authenticate ||
@@ -82,75 +95,6 @@ app.get("/health", (req, res) => {
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });
-});
-
-// =====================
-// DEBUG (protegido)
-// =====================
-app.get("/__routes", requireAuth, requireRole("super_admin"), (req, res) => {
-  try {
-    const out = [];
-    const split = (v) => (v || "").split("/").filter(Boolean);
-
-    const getMountPath = (layer) => {
-      if (!layer.regexp) return "";
-      let s = layer.regexp.toString();
-      s = s
-        .replace("/^\\", "")
-        .replace("\\/?(?=\\/|$)/i", "")
-        .replace("\\/?(?=\\/|$)/", "")
-        .replace("/i", "")
-        .replace("\\/", "/")
-        .replace(/\\\//g, "/")
-        .replace(/\(\?:\(\[\^\\\/\]\+\?\)\)/g, "")
-        .replace(/\(\?:\[\^\\\/\]\+\?\)/g, "")
-        .replace(/\(\?:\[\^\/\]\+\?\)/g, "")
-        .replace(/\(\?:\)\?/g, "")
-        .replace(/\$$/, "");
-
-      if (!s.startsWith("/")) s = "/" + s;
-      if (s === "/") return "";
-      return s;
-    };
-
-    const walk = (stack, prefix = "") => {
-      stack.forEach((layer) => {
-        if (layer.route?.path) {
-          const methods = Object.keys(layer.route.methods || {}).map((m) =>
-            m.toUpperCase()
-          );
-          const fullPath =
-            "/" + [...split(prefix), ...split(layer.route.path)].join("/");
-          out.push({ methods, path: fullPath });
-          return;
-        }
-
-        if (layer.name === "router" && layer.handle?.stack) {
-          const mount = getMountPath(layer);
-          const newPrefix =
-            "/" + [...split(prefix), ...split(mount)].join("/");
-          walk(layer.handle.stack, newPrefix);
-        }
-      });
-    };
-
-    walk(app?._router?.stack || [], "");
-    out.sort((a, b) => a.path.localeCompare(b.path));
-
-    res.json({ ok: true, count: out.length, routes: out });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/__db", requireAuth, requireRole("super_admin"), async (req, res) => {
-  try {
-    await sequelize.authenticate();
-    const [rows] = await sequelize.query("SELECT 1 AS ok");
-    res.json({ ok: true, db: true, rows });
-  } catch (e) {
-    res.status(500).json({ ok: false, db: false, error: e.message });
-  }
 });
 
 // =====================
