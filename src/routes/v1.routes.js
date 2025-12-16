@@ -1,23 +1,20 @@
-const express = require("express");
+// src/routes/v1.routes.js
+const router = require("express").Router();
 
+// routes
 const authRoutes = require("./auth.routes");
 const productsRoutes = require("./products.routes");
 const categoriesRoutes = require("./categories.routes");
+const branchesRoutes = require("./branches.routes");
+const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 
-const router = express.Router();
-
-// Health
-router.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
-
-// Auth
+// mount
 router.use("/auth", authRoutes);
-
-// Core
 router.use("/products", productsRoutes);
 router.use("/categories", categoriesRoutes);
+router.use("/branches", branchesRoutes);
+router.use("/warehouses", warehousesRoutes);
 router.use("/stock", stockRoutes);
 
 module.exports = router;
