@@ -6,12 +6,19 @@ const env = require("./config/env");
 const { sequelize } = require("./models");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 // =====================
 // CORS (FIX DEFINITIVO)
 // =====================
-const allowedOrigins = (env.CORS_ORIGINS || "http://localhost:5173")
+
+// 👉 Runtime env (CapRover) + fallback local
+const CORS_ORIGINS =
+  process.env.CORS_ORIGINS ??
+  env.CORS_ORIGINS ??
+  "http://localhost:5173";
+
+const allowedOrigins = String(CORS_ORIGINS)
   .split(",")
   .map((o) => o.trim())
   .filter(Boolean);
@@ -19,16 +26,16 @@ const allowedOrigins = (env.CORS_ORIGINS || "http://localhost:5173")
 app.use(
   cors({
     origin: (origin, cb) => {
-      // permitir curl / postman / server-to-server
+      // curl / postman / server-to-server
       if (!origin) return cb(null, true);
 
-      // permitir wildcard explícito
+      // wildcard explícito
       if (allowedOrigins.includes("*")) return cb(null, true);
 
-      // permitir origins declarados
+      // origins permitidos
       if (allowedOrigins.includes(origin)) return cb(null, true);
 
-      return cb(new Error("Not allowed by CORS"));
+      return cb(new Error(`Not allowed by CORS: ${origin}`));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -40,20 +47,23 @@ app.use(
 app.options("*", cors());
 
 // =====================
-// Middlewares (los tuyos)
+// Middlewares
 // =====================
 const authMw = require("./middlewares/auth.middleware");
 const rbacMw = require("./middlewares/rbac.middleware");
 
-// Fallbacks por si tus exports tienen nombres distintos
+// fallback seguro
 const requireAuth =
-  authMw.requireAuth || authMw.authenticate || authMw.auth || authMw;
+  authMw.requireAuth ||
+  authMw.authenticate ||
+  authMw.auth ||
+  ((req, res, next) => next());
 
 const requireRole =
   rbacMw.requireRole ||
   rbacMw.allowRole ||
   rbacMw.rbac ||
-  ((role) => (req, res, next) => next());
+  (() => (req, res, next) => next());
 
 // =====================
 // Rutas API
@@ -65,16 +75,21 @@ app.use("/api/v1", routes);
 // Health
 // =====================
 app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "pos360-commerce-api" });
+  res.json({
+    ok: true,
+    service: "pos360-commerce-api",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // =====================
-// DEBUG (protegidos)
+// DEBUG (protegido)
 // =====================
 app.get("/__routes", requireAuth, requireRole("super_admin"), (req, res) => {
   try {
     const out = [];
-    const split = (thing) => (thing || "").split("/").filter(Boolean);
+    const split = (v) => (v || "").split("/").filter(Boolean);
 
     const getMountPath = (layer) => {
       if (!layer.regexp) return "";
@@ -85,13 +100,12 @@ app.get("/__routes", requireAuth, requireRole("super_admin"), (req, res) => {
         .replace("\\/?(?=\\/|$)/", "")
         .replace("/i", "")
         .replace("\\/", "/")
-        .replace(/\\\//g, "/");
-
-      s = s.replace(/\(\?:\(\[\^\\\/\]\+\?\)\)/g, "");
-      s = s.replace(/\(\?:\[\^\\\/\]\+\?\)/g, "");
-      s = s.replace(/\(\?:\[\^\/\]\+\?\)/g, "");
-      s = s.replace(/\(\?:\)\?/g, "");
-      s = s.replace(/\$$/, "");
+        .replace(/\\\//g, "/")
+        .replace(/\(\?:\(\[\^\\\/\]\+\?\)\)/g, "")
+        .replace(/\(\?:\[\^\\\/\]\+\?\)/g, "")
+        .replace(/\(\?:\[\^\/\]\+\?\)/g, "")
+        .replace(/\(\?:\)\?/g, "")
+        .replace(/\$$/, "");
 
       if (!s.startsWith("/")) s = "/" + s;
       if (s === "/") return "";
@@ -146,13 +160,14 @@ async function start() {
     await sequelize.authenticate();
     console.log("✅ DB connected");
   } catch (err) {
-    console.error("❌ DB connection failed. Exiting.");
+    console.error("❌ DB connection failed");
     console.error(err);
     process.exit(1);
   }
 
   app.listen(env.PORT, () => {
     console.log(`🚀 API listening on :${env.PORT}`);
+    console.log("🌐 CORS_ORIGINS =", allowedOrigins);
   });
 }
 
