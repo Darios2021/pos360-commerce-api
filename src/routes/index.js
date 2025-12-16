@@ -1,9 +1,13 @@
+// src/routes/index.js
 const router = require("express").Router();
 
 const authRoutes = require("./auth.routes"); // asumo que ya existe
+
 const { requireAuth } = (() => {
   const authMw = require("../middlewares/auth.middleware");
-  return { requireAuth: authMw.requireAuth || authMw.authenticate || authMw.auth || authMw };
+  return {
+    requireAuth: authMw.requireAuth || authMw.authenticate || authMw.auth || authMw,
+  };
 })();
 
 // Public / base
@@ -21,6 +25,7 @@ router.use("/auth", authRoutes);
 
 // Inventory (protegido)
 router.use("/products", requireAuth, require("./products.routes"));
+router.use("/categories", requireAuth, require("./categories.routes")); // ✅ AGREGADO
 router.use("/branches", requireAuth, require("./branches.routes"));
 router.use("/warehouses", requireAuth, require("./warehouses.routes"));
 router.use("/stock", requireAuth, require("./stock.routes"));
