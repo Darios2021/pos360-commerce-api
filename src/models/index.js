@@ -1,8 +1,7 @@
-// src/models/index.js
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// ===== Auth =====
+// ===== AUTH =====
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
 const Permission = require("./permission")(sequelize, DataTypes);
@@ -13,7 +12,7 @@ try {
   RolePermission = require("./role_permission")(sequelize, DataTypes);
 } catch (_) {}
 
-// ===== Inventory =====
+// ===== INVENTORY =====
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
 const Branch = require("./Branch")(sequelize, DataTypes);
@@ -23,7 +22,7 @@ const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 
 // =====================
-// Associations - AUTH
+// AUTH Associations
 // =====================
 User.belongsToMany(Role, {
   through: { model: UserRole, timestamps: false },
@@ -56,29 +55,62 @@ if (RolePermission) {
 }
 
 // =====================
-// Associations - INVENTORY
+// INVENTORY Associations
 // =====================
 
-// Category hierarchy
-Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
-Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
+// Category jerárquica
+Category.belongsTo(Category, {
+  foreignKey: "parent_id",
+  as: "parent",
+});
+Category.hasMany(Category, {
+  foreignKey: "parent_id",
+  as: "children",
+});
 
-// Product -> Category (alias DEFINIDO = "category")
-Product.belongsTo(Category, { foreignKey: "category_id", as: "category" });
-Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
+// Product → Category (Rubro)
+Product.belongsTo(Category, {
+  foreignKey: "category_id",
+  as: "category",
+});
+Category.hasMany(Product, {
+  foreignKey: "category_id",
+  as: "products",
+});
 
-// Branch -> Warehouses
-Warehouse.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
-Branch.hasMany(Warehouse, { foreignKey: "branch_id", as: "warehouses" });
+// Branch → Warehouses
+Warehouse.belongsTo(Branch, {
+  foreignKey: "branch_id",
+  as: "branch",
+});
+Branch.hasMany(Warehouse, {
+  foreignKey: "branch_id",
+  as: "warehouses",
+});
 
 // Stock balance
-StockBalance.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
-StockBalance.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+StockBalance.belongsTo(Warehouse, {
+  foreignKey: "warehouse_id",
+  as: "warehouse",
+});
+StockBalance.belongsTo(Product, {
+  foreignKey: "product_id",
+  as: "product",
+});
 
-// Movement header/items
-StockMovement.hasMany(StockMovementItem, { foreignKey: "movement_id", as: "items" });
-StockMovementItem.belongsTo(StockMovement, { foreignKey: "movement_id", as: "movement" });
-StockMovementItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+// Movimientos de stock
+StockMovement.hasMany(StockMovementItem, {
+  foreignKey: "movement_id",
+  as: "items",
+});
+StockMovementItem.belongsTo(StockMovement, {
+  foreignKey: "movement_id",
+  as: "movement",
+});
+StockMovementItem.belongsTo(Product, {
+  foreignKey: "product_id",
+  as: "product",
+});
 
 module.exports = {
   sequelize,
