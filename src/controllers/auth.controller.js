@@ -1,30 +1,32 @@
-const authService = require('../services/auth.service');
+const authService = require("../services/auth.service");
 
-async function login(req, res, next) {
+exports.login = async (req, res) => {
   try {
-    const { email, username, identifier, password } = req.body || {};
+    const body = req.body || {};
+    const identifier = (body.identifier || "").trim();
+    const password = (body.password || "").trim();
 
-    const id = identifier || email || username;
-    if (!id || !password) {
-      return res.status(400).json({ message: 'identifier/email/username and password are required' });
+    if (!identifier || !password) {
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "identifier/email/username and password are required",
+      });
     }
 
-    const result = await authService.login({ identifier: id, password });
+    const data = await authService.login({ identifier, password });
 
-    if (!result.ok) {
-      if (result.code === 'INVALID_CREDENTIALS') return res.status(401).json({ message: 'Invalid credentials' });
-      if (result.code === 'USER_DISABLED') return res.status(403).json({ message: 'User disabled' });
-      return res.status(400).json({ message: 'Login error' });
-    }
-
+    // Esperado: { accessToken, user? }
     return res.json({
-      user: result.user,
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
+      ok: true,
+      ...data,
     });
   } catch (err) {
-    return next(err);
+    console.error("auth.login ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      code: "INTERNAL_ERROR",
+      message: err?.message || "Internal error during login",
+    });
   }
-}
-
-module.exports = { login };
+};
