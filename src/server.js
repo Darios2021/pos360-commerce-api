@@ -23,28 +23,29 @@ const allowedOrigins = String(CORS_ORIGINS)
   .map((o) => o.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // curl / postman / server-to-server
-      if (!origin) return cb(null, true);
+const corsOptions = {
+  origin: (origin, cb) => {
+    // curl / postman / server-to-server
+    if (!origin) return cb(null, true);
 
-      // wildcard explícito
-      if (allowedOrigins.includes("*")) return cb(null, true);
+    // wildcard explícito
+    if (allowedOrigins.includes("*")) return cb(null, true);
 
-      // origins permitidos
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+    // origins permitidos
+    if (allowedOrigins.includes(origin)) return cb(null, true);
 
-      return cb(new Error(`Not allowed by CORS: ${origin}`));
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-  })
-);
+    return cb(new Error(`Not allowed by CORS: ${origin}`));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
+  optionsSuccessStatus: 204,
+};
 
-// responder preflight
-app.options("*", cors());
+app.use(cors(corsOptions));
+
+// ✅ responder preflight CON LA MISMA CONFIG
+app.options("*", cors(corsOptions));
 
 // =====================
 // Middlewares
