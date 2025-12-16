@@ -2,10 +2,7 @@
 const { Category } = require("../models");
 
 exports.list = async (req, res) => {
-  const items = await Category.findAll({
-    order: [["name", "ASC"]],
-  });
-
+  const items = await Category.findAll({ order: [["name", "ASC"]] });
   res.json({ ok: true, items });
 };
 
@@ -17,12 +14,15 @@ exports.getOne = async (req, res) => {
 
 exports.create = async (req, res) => {
   const body = req.body || {};
-  if (!body.name || !String(body.name).trim()) {
-    return res.status(400).json({ ok: false, code: "VALIDATION", message: "name es obligatorio" });
+  const name = String(body.name || "").trim();
+  if (!name) {
+    return res
+      .status(400)
+      .json({ ok: false, code: "VALIDATION", message: "name es obligatorio" });
   }
 
   const item = await Category.create({
-    name: String(body.name).trim(),
+    name,
     description: body.description || null,
     is_active: body.is_active ?? 1,
   });

@@ -1,7 +1,7 @@
 // src/routes/v1.routes.js
 const router = require("express").Router();
 
-// routes
+// 👇 importar routes
 const authRoutes = require("./auth.routes");
 const productsRoutes = require("./products.routes");
 const categoriesRoutes = require("./categories.routes");
@@ -9,7 +9,7 @@ const branchesRoutes = require("./branches.routes");
 const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 
-// mount
+// 👇 montar
 router.use("/auth", authRoutes);
 router.use("/products", productsRoutes);
 router.use("/categories", categoriesRoutes);
