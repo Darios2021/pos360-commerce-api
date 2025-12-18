@@ -1,5 +1,5 @@
 module.exports = (sequelize, DataTypes) => {
-  return sequelize.define(
+  const Category = sequelize.define(
     "Category",
     {
       id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true, autoIncrement: true },
@@ -14,4 +14,11 @@ module.exports = (sequelize, DataTypes) => {
       updatedAt: "updated_at",
     }
   );
+
+  Category.associate = (models) => {
+    Category.belongsTo(models.Category, { foreignKey: "parent_id", as: "parent" });
+    Category.hasMany(models.Category, { foreignKey: "parent_id", as: "children" });
+  };
+
+  return Category;
 };

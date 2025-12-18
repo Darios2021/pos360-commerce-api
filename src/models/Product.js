@@ -1,5 +1,5 @@
 module.exports = (sequelize, DataTypes) => {
-  return sequelize.define(
+  const Product = sequelize.define(
     "Product",
     {
       id: {
@@ -9,18 +9,17 @@ module.exports = (sequelize, DataTypes) => {
       },
 
       // === Identificación ===
-      code: { type: DataTypes.STRING(64), allowNull: true }, // código planilla
+      code: { type: DataTypes.STRING(64), allowNull: true },
       sku: { type: DataTypes.STRING(64), allowNull: false },
       barcode: { type: DataTypes.STRING(64), allowNull: true },
 
       name: { type: DataTypes.STRING(200), allowNull: false },
       description: { type: DataTypes.TEXT, allowNull: true },
 
-      // === Rubro / Sub-rubro ===
+      // === Categoría (apunta a subrubro / hoja) ===
       category_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
-      sub_rubro: { type: DataTypes.STRING(120), allowNull: true },
 
-      // === Flags planilla ===
+      // === Flags ===
       is_new: { type: DataTypes.TINYINT, allowNull: false, defaultValue: 0 },
       is_promo: { type: DataTypes.TINYINT, allowNull: false, defaultValue: 0 },
 
@@ -56,4 +55,6 @@ module.exports = (sequelize, DataTypes) => {
       updatedAt: "updated_at",
     }
   );
+
+  return Product;
 };
