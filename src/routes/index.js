@@ -25,7 +25,11 @@ router.use("/auth", authRoutes);
 
 // Inventory (protegido)
 router.use("/products", requireAuth, require("./products.routes"));
-router.use("/categories", requireAuth, require("./categories.routes")); // ✅ AGREGADO
+router.use("/categories", requireAuth, require("./categories.routes"));
+
+// ✅ IMPORT CSV (protegido)
+router.use("/import", requireAuth, require("./import.routes"));
+
 router.use("/branches", requireAuth, require("./branches.routes"));
 router.use("/warehouses", requireAuth, require("./warehouses.routes"));
 router.use("/stock", requireAuth, require("./stock.routes"));
