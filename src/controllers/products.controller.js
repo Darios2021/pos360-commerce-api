@@ -1,3 +1,4 @@
+// src/controllers/products.controller.js
 const { Op } = require("sequelize");
 const { Product, Category } = require("../models");
 
@@ -11,6 +12,25 @@ function toDec(v, d = 0) {
   const s = String(v).replace(",", ".").trim();
   const n = Number(s);
   return Number.isFinite(n) ? n : d;
+}
+
+function includeCategoryTree() {
+  return [
+    {
+      model: Category,
+      as: "category", // subrubro (hoja)
+      attributes: ["id", "name", "parent_id"],
+      required: false,
+      include: [
+        {
+          model: Category,
+          as: "parent", // rubro
+          attributes: ["id", "name"],
+          required: false,
+        },
+      ],
+    },
+  ];
 }
 
 exports.list = async (req, res, next) => {
@@ -34,22 +54,7 @@ exports.list = async (req, res, next) => {
 
     const { rows, count } = await Product.findAndCountAll({
       where,
-      include: [
-        {
-          model: Category,
-          as: "category", // subrubro (hoja)
-          attributes: ["id", "name", "parent_id"],
-          required: false,
-          include: [
-            {
-              model: Category,
-              as: "parent", // rubro
-              attributes: ["id", "name"],
-              required: false,
-            },
-          ],
-        },
-      ],
+      include: includeCategoryTree(),
       order: [["id", "DESC"]],
       limit,
       offset,
@@ -64,17 +69,7 @@ exports.list = async (req, res, next) => {
 exports.getOne = async (req, res, next) => {
   try {
     const item = await Product.findByPk(req.params.id, {
-      include: [
-        {
-          model: Category,
-          as: "category",
-          attributes: ["id", "name", "parent_id"],
-          required: false,
-          include: [
-            { model: Category, as: "parent", attributes: ["id", "name"], required: false },
-          ],
-        },
-      ],
+      include: includeCategoryTree(),
     });
 
     if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
@@ -94,14 +89,14 @@ exports.create = async (req, res, next) => {
         .json({ ok: false, code: "VALIDATION", message: "sku y name son obligatorios" });
     }
 
-    const item = await Product.create({
+    const created = await Product.create({
       code: body.code ?? null,
       sku: body.sku,
       barcode: body.barcode ?? null,
       name: body.name,
       description: body.description ?? null,
 
-      // category_id ahora SIEMPRE es subrubro (hoja)
+      // ✅ subrubro hoja
       category_id: body.category_id ? Number(body.category_id) : null,
 
       is_new: body.is_new ?? 0,
@@ -126,6 +121,8 @@ exports.create = async (req, res, next) => {
       tax_rate: toDec(body.tax_rate, 21),
     });
 
+    // ✅ devolver completo con category + parent
+    const item = await Product.findByPk(created.id, { include: includeCategoryTree() });
     res.status(201).json({ ok: true, item });
   } catch (e) {
     next(e);
@@ -148,7 +145,9 @@ exports.update = async (req, res, next) => {
 
       category_id:
         body.category_id !== undefined
-          ? (body.category_id ? Number(body.category_id) : null)
+          ? body.category_id
+            ? Number(body.category_id)
+            : null
           : item.category_id,
 
       is_new: body.is_new ?? item.is_new,
@@ -166,16 +165,23 @@ exports.update = async (req, res, next) => {
 
       cost: body.cost !== undefined ? toDec(body.cost, item.cost) : item.cost,
       price: body.price !== undefined ? toDec(body.price, item.price) : item.price,
-      price_list: body.price_list !== undefined ? toDec(body.price_list, item.price_list) : item.price_list,
+      price_list:
+        body.price_list !== undefined ? toDec(body.price_list, item.price_list) : item.price_list,
       price_discount:
-        body.price_discount !== undefined ? toDec(body.price_discount, item.price_discount) : item.price_discount,
+        body.price_discount !== undefined
+          ? toDec(body.price_discount, item.price_discount)
+          : item.price_discount,
       price_reseller:
-        body.price_reseller !== undefined ? toDec(body.price_reseller, item.price_reseller) : item.price_reseller,
+        body.price_reseller !== undefined
+          ? toDec(body.price_reseller, item.price_reseller)
+          : item.price_reseller,
 
       tax_rate: body.tax_rate !== undefined ? toDec(body.tax_rate, item.tax_rate) : item.tax_rate,
     });
 
-    res.json({ ok: true, item });
+    // ✅ devolver completo con category + parent
+    const full = await Product.findByPk(item.id, { include: includeCategoryTree() });
+    res.json({ ok: true, item: full });
   } catch (e) {
     next(e);
   }
