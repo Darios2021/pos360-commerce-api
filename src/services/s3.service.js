@@ -1,61 +1,89 @@
 // src/services/s3.service.js
-const crypto = require("crypto");
-const { PutObjectCommand, HeadBucketCommand } = require("@aws-sdk/client-s3");
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const { s3, s3Config } = require("../config/s3");
+const { S3Client, HeadBucketCommand, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-function safeExtFromMime(mime) {
-  const map = {
-    "image/jpeg": "jpg",
-    "image/png": "png",
-    "image/webp": "webp",
-    "application/pdf": "pdf",
-  };
-  return map[mime] || null;
+function getBool(v, def = false) {
+  if (v === undefined || v === null) return def;
+  const s = String(v).toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
 }
 
-function buildObjectKey({ prefix = "uploads", mimeType, originalName }) {
-  const ext = safeExtFromMime(mimeType) || (originalName?.split(".").pop() || "bin");
-  const rand = crypto.randomBytes(12).toString("hex");
-  const ts = Date.now();
-  return `${prefix}/${ts}-${rand}.${ext}`;
+function must(name, v) {
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
+}
+
+function buildS3Client() {
+  const endpoint = must("S3_ENDPOINT", process.env.S3_ENDPOINT);
+  const region = process.env.S3_REGION || "us-east-1";
+  const accessKeyId = must("S3_ACCESS_KEY", process.env.S3_ACCESS_KEY);
+  const secretAccessKey = must("S3_SECRET_KEY", process.env.S3_SECRET_KEY);
+
+  // MinIO casi siempre necesita path-style
+  const forcePathStyle = getBool(process.env.S3_FORCE_PATH_STYLE, true);
+
+  // Si endpoint ya es https, usá SSL. Si es http, no.
+  const ssl =
+    process.env.S3_SSL !== undefined
+      ? getBool(process.env.S3_SSL, true)
+      : String(endpoint).startsWith("https://");
+
+  return new S3Client({
+    region,
+    endpoint,
+    forcePathStyle,
+    credentials: { accessKeyId, secretAccessKey },
+    tls: ssl,
+  });
+}
+
+function publicObjectUrl({ bucket, key }) {
+  // URL pública para consumir desde frontend.
+  // Si usás minio-coc.cingulado.org como endpoint público, esto te queda joya.
+  const endpoint = must("S3_PUBLIC_BASE_URL", process.env.S3_PUBLIC_BASE_URL || process.env.S3_ENDPOINT);
+
+  const base = String(endpoint).replace(/\/+$/, "");
+  const pathStyle = getBool(process.env.S3_FORCE_PATH_STYLE, true);
+
+  if (pathStyle) {
+    // https://host/bucket/key
+    return `${base}/${bucket}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+  }
+
+  // virtual-host style: https://bucket.host/key
+  // ojo: requiere DNS/ingress compatible
+  const u = new URL(base);
+  return `${u.protocol}//${bucket}.${u.host}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
 }
 
 async function checkBucketAccess() {
-  // Esto valida credenciales y acceso al bucket
-  await s3.send(new HeadBucketCommand({ Bucket: s3Config.bucket }));
+  const bucket = must("S3_BUCKET", process.env.S3_BUCKET);
+  const s3 = buildS3Client();
+  await s3.send(new HeadBucketCommand({ Bucket: bucket }));
   return true;
 }
 
 async function putObject({ key, body, contentType }) {
+  const bucket = must("S3_BUCKET", process.env.S3_BUCKET);
+  const s3 = buildS3Client();
+
   await s3.send(
     new PutObjectCommand({
-      Bucket: s3Config.bucket,
+      Bucket: bucket,
       Key: key,
       Body: body,
-      ContentType: contentType,
+      ContentType: contentType || "application/octet-stream",
     })
   );
 
-  // URL pública “base” (OJO: solo sirve si el bucket/policy permite lectura pública o usas presigned GET)
-  // Para uso privado, te conviene hacer presigned GET cuando necesites mostrar.
-  return `${s3Config.endpoint}/${s3Config.bucket}/${key}`;
-}
-
-async function presignPut({ key, contentType, expiresIn = 60 }) {
-  const cmd = new PutObjectCommand({
-    Bucket: s3Config.bucket,
-    Key: key,
-    ContentType: contentType,
-  });
-
-  const url = await getSignedUrl(s3, cmd, { expiresIn });
-  return url;
+  return {
+    bucket,
+    key,
+    url: publicObjectUrl({ bucket, key }),
+  };
 }
 
 module.exports = {
-  buildObjectKey,
-  putObject,
-  presignPut,
   checkBucketAccess,
+  putObject,
+  publicObjectUrl,
 };

@@ -1,8 +1,9 @@
 // src/routes/index.js
 const router = require("express").Router();
 
-const authRoutes = require("./auth.routes"); // asumo que ya existe
+const authRoutes = require("./auth.routes");
 
+// auth middleware (compatible con tus variantes)
 const { requireAuth } = (() => {
   const authMw = require("../middlewares/auth.middleware");
   return {
@@ -10,7 +11,9 @@ const { requireAuth } = (() => {
   };
 })();
 
-// Public / base
+// =====================
+// Health (public)
+// =====================
 router.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -20,14 +23,23 @@ router.get("/health", (req, res) => {
   });
 });
 
-// Auth
+// =====================
+// Auth (public)
+// =====================
 router.use("/auth", authRoutes);
 
-// Inventory (protegido)
+// =====================
+// Uploads (PROTEGIDO)
+// =====================
+router.use("/upload", requireAuth, require("./uploads.routes"));
+
+// =====================
+// Inventory / Core (PROTEGIDO)
+// =====================
 router.use("/products", requireAuth, require("./products.routes"));
 router.use("/categories", requireAuth, require("./categories.routes"));
 
-// ✅ IMPORT CSV (protegido)
+// Import CSV
 router.use("/import", requireAuth, require("./import.routes"));
 
 router.use("/branches", requireAuth, require("./branches.routes"));
