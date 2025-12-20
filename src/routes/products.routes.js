@@ -1,20 +1,31 @@
 // src/routes/products.routes.js
 const router = require("express").Router();
-const productsCtrl = require("../controllers/products.controller");
 
-// Listado (con q/page/limit)
-router.get("/", productsCtrl.list);
+let ctrl;
+try {
+  ctrl = require("../controllers/products.controller.js");
+} catch (e) {
+  console.error("❌ Cannot require products.controller.js:", e?.message || e);
+  throw e;
+}
 
-// ✅ GET by id (esto te falta y por eso 404)
-router.get("/:id", productsCtrl.getById);
+console.log("🧩 products.controller keys =", Object.keys(ctrl || {}));
+console.log("🧩 typeof list =", typeof ctrl?.list);
+console.log("🧩 typeof getOne =", typeof ctrl?.getOne);
+console.log("🧩 typeof create =", typeof ctrl?.create);
+console.log("🧩 typeof update =", typeof ctrl?.update);
 
-// Crear
-router.post("/", productsCtrl.create);
+// Si alguno no es function, lo frenamos nosotros con mensaje claro
+const mustBeFn = ["list", "getOne", "create", "update"];
+for (const k of mustBeFn) {
+  if (typeof ctrl?.[k] !== "function") {
+    throw new Error(`❌ products.controller.${k} is not a function (is: ${typeof ctrl?.[k]})`);
+  }
+}
 
-// Actualizar
-router.put("/:id", productsCtrl.update);
-
-// (opcional) borrar
-// router.delete("/:id", productsCtrl.remove);
+router.get("/", ctrl.list);
+router.post("/", ctrl.create);
+router.get("/:id", ctrl.getOne);
+router.patch("/:id", ctrl.update);
 
 module.exports = router;
