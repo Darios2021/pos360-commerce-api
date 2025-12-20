@@ -14,23 +14,6 @@ function toDec(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
-function toIdOrNull(v) {
-  if (v === null || v === undefined || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-// En DB: Product.category_id = SUBRUBRO (hoja)
-function resolveLeafCategoryId(body = {}) {
-  // Si el front manda rubro+subrubro separados:
-  // - subcategory_id = hoja => lo guardamos en category_id
-  const leaf = toIdOrNull(body.subcategory_id);
-  if (leaf) return leaf;
-
-  // fallback: modo viejo
-  return toIdOrNull(body.category_id);
-}
-
 function includeCategoryTree() {
   return [
     {
@@ -41,7 +24,7 @@ function includeCategoryTree() {
       include: [
         {
           model: Category,
-          as: "parent", // rubro
+          as: "parent", // rubro (padre)
           attributes: ["id", "name"],
           required: false,
         },
@@ -50,7 +33,7 @@ function includeCategoryTree() {
   ];
 }
 
-exports.list = async (req, res, next) => {
+async function list(req, res, next) {
   try {
     const q = (req.query.q || "").trim();
     const page = Math.max(1, toInt(req.query.page, 1));
@@ -81,9 +64,9 @@ exports.list = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-};
+}
 
-exports.getOne = async (req, res, next) => {
+async function getOne(req, res, next) {
   try {
     const item = await Product.findByPk(req.params.id, {
       include: includeCategoryTree(),
@@ -94,9 +77,9 @@ exports.getOne = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-};
+}
 
-exports.create = async (req, res, next) => {
+async function create(req, res, next) {
   try {
     const body = req.body || {};
 
@@ -106,8 +89,6 @@ exports.create = async (req, res, next) => {
         .json({ ok: false, code: "VALIDATION", message: "sku y name son obligatorios" });
     }
 
-    const leafCategoryId = resolveLeafCategoryId(body);
-
     const created = await Product.create({
       code: body.code ?? null,
       sku: body.sku,
@@ -115,8 +96,8 @@ exports.create = async (req, res, next) => {
       name: body.name,
       description: body.description ?? null,
 
-      // ✅ DB guarda la HOJA (subrubro)
-      category_id: leafCategoryId,
+      // subrubro hoja (category_id)
+      category_id: body.category_id ? Number(body.category_id) : null,
 
       is_new: body.is_new ?? 0,
       is_promo: body.is_promo ?? 0,
@@ -145,20 +126,14 @@ exports.create = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-};
+}
 
-exports.update = async (req, res, next) => {
+async function update(req, res, next) {
   try {
     const item = await Product.findByPk(req.params.id);
     if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
 
     const body = req.body || {};
-
-    // si viene alguno de estos, resolvemos la hoja
-    const wantsCategoryUpdate =
-      body.category_id !== undefined || body.subcategory_id !== undefined;
-
-    const leafCategoryId = wantsCategoryUpdate ? resolveLeafCategoryId(body) : undefined;
 
     await item.update({
       code: body.code ?? item.code,
@@ -167,9 +142,12 @@ exports.update = async (req, res, next) => {
       name: body.name ?? item.name,
       description: body.description ?? item.description,
 
-      // ✅ DB guarda la HOJA (subrubro)
       category_id:
-        leafCategoryId !== undefined ? (leafCategoryId ? Number(leafCategoryId) : null) : item.category_id,
+        body.category_id !== undefined
+          ? body.category_id
+            ? Number(body.category_id)
+            : null
+          : item.category_id,
 
       is_new: body.is_new ?? item.is_new,
       is_promo: body.is_promo ?? item.is_promo,
@@ -205,4 +183,6 @@ exports.update = async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-};
+}
+
+module.exports = { list, getOne, create, update };
