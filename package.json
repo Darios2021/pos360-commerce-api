@@ -10,6 +10,8 @@
     "lint": "node -e \"console.log('No lint configured yet')\""
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.956.0",
+    "@aws-sdk/s3-request-presigner": "^3.956.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "csv-parse": "^6.1.0",

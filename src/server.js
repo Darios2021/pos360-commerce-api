@@ -5,8 +5,11 @@ const cors = require("cors");
 const env = require("./config/env");
 const { sequelize } = require("./models");
 
+// 🔹 MinIO / S3
+const { checkBucketAccess } = require("./services/s3.service");
+
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "25mb" }));
 
 // =====================
 // CORS (PROD + LOCAL)
@@ -45,7 +48,9 @@ app.options("*", corsMw);
 const routes = require("./routes");
 app.use("/api/v1", routes);
 
-// Health (simple)
+// =====================
+// Health
+// =====================
 app.get("/api/v1/health", (req, res) => {
   res.json({
     ok: true,
@@ -57,19 +62,25 @@ app.get("/api/v1/health", (req, res) => {
 
 // =====================
 // Global error handler
-// (incluye CORS en error)
 // =====================
 app.use((err, req, res, next) => {
-  // si CORS tiró error, igual respondemos JSON prolijo
   const msg = err?.message || "Internal error";
   const isCors = msg.includes("Not allowed by CORS");
 
   if (isCors) {
-    return res.status(403).json({ ok: false, code: "CORS_BLOCKED", message: msg });
+    return res.status(403).json({
+      ok: false,
+      code: "CORS_BLOCKED",
+      message: msg,
+    });
   }
 
-  console.error("❌ ERROR:", err);
-  res.status(500).json({ ok: false, code: "SERVER_ERROR", message: msg });
+  console.error("❌ SERVER ERROR:", err);
+  res.status(500).json({
+    ok: false,
+    code: "SERVER_ERROR",
+    message: msg,
+  });
 });
 
 // =====================
@@ -83,6 +94,15 @@ async function start() {
     console.error("❌ DB connection failed");
     console.error(err);
     process.exit(1);
+  }
+
+  // 🔹 Chequeo MinIO / S3 al arranque
+  try {
+    await checkBucketAccess();
+    console.log("✅ MinIO / S3 bucket access OK");
+  } catch (err) {
+    console.error("❌ MinIO / S3 bucket access FAILED");
+    console.error(err?.message || err);
   }
 
   const port = process.env.PORT ?? env.PORT ?? 3000;
