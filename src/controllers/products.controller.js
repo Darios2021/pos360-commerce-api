@@ -14,6 +14,23 @@ function toDec(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+function toIdOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// En DB: Product.category_id = SUBRUBRO (hoja)
+function resolveLeafCategoryId(body = {}) {
+  // Si el front manda rubro+subrubro separados:
+  // - subcategory_id = hoja => lo guardamos en category_id
+  const leaf = toIdOrNull(body.subcategory_id);
+  if (leaf) return leaf;
+
+  // fallback: modo viejo
+  return toIdOrNull(body.category_id);
+}
+
 function includeCategoryTree() {
   return [
     {
@@ -89,6 +106,8 @@ exports.create = async (req, res, next) => {
         .json({ ok: false, code: "VALIDATION", message: "sku y name son obligatorios" });
     }
 
+    const leafCategoryId = resolveLeafCategoryId(body);
+
     const created = await Product.create({
       code: body.code ?? null,
       sku: body.sku,
@@ -96,8 +115,8 @@ exports.create = async (req, res, next) => {
       name: body.name,
       description: body.description ?? null,
 
-      // ✅ subrubro hoja
-      category_id: body.category_id ? Number(body.category_id) : null,
+      // ✅ DB guarda la HOJA (subrubro)
+      category_id: leafCategoryId,
 
       is_new: body.is_new ?? 0,
       is_promo: body.is_promo ?? 0,
@@ -121,7 +140,6 @@ exports.create = async (req, res, next) => {
       tax_rate: toDec(body.tax_rate, 21),
     });
 
-    // ✅ devolver completo con category + parent
     const item = await Product.findByPk(created.id, { include: includeCategoryTree() });
     res.status(201).json({ ok: true, item });
   } catch (e) {
@@ -136,6 +154,12 @@ exports.update = async (req, res, next) => {
 
     const body = req.body || {};
 
+    // si viene alguno de estos, resolvemos la hoja
+    const wantsCategoryUpdate =
+      body.category_id !== undefined || body.subcategory_id !== undefined;
+
+    const leafCategoryId = wantsCategoryUpdate ? resolveLeafCategoryId(body) : undefined;
+
     await item.update({
       code: body.code ?? item.code,
       sku: body.sku ?? item.sku,
@@ -143,12 +167,9 @@ exports.update = async (req, res, next) => {
       name: body.name ?? item.name,
       description: body.description ?? item.description,
 
+      // ✅ DB guarda la HOJA (subrubro)
       category_id:
-        body.category_id !== undefined
-          ? body.category_id
-            ? Number(body.category_id)
-            : null
-          : item.category_id,
+        leafCategoryId !== undefined ? (leafCategoryId ? Number(leafCategoryId) : null) : item.category_id,
 
       is_new: body.is_new ?? item.is_new,
       is_promo: body.is_promo ?? item.is_promo,
@@ -179,7 +200,6 @@ exports.update = async (req, res, next) => {
       tax_rate: body.tax_rate !== undefined ? toDec(body.tax_rate, item.tax_rate) : item.tax_rate,
     });
 
-    // ✅ devolver completo con category + parent
     const full = await Product.findByPk(item.id, { include: includeCategoryTree() });
     res.json({ ok: true, item: full });
   } catch (e) {

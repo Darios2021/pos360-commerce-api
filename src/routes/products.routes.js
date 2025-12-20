@@ -1,9 +1,20 @@
+// src/routes/products.routes.js
 const router = require("express").Router();
-const ctrl = require("../controllers/products.controller");
+const productsCtrl = require("../controllers/products.controller");
 
-router.get("/", ctrl.list);
-router.post("/", ctrl.create);
-router.get("/:id", ctrl.getOne);
-router.patch("/:id", ctrl.update);
+// Listado (con q/page/limit)
+router.get("/", productsCtrl.list);
+
+// ✅ GET by id (esto te falta y por eso 404)
+router.get("/:id", productsCtrl.getById);
+
+// Crear
+router.post("/", productsCtrl.create);
+
+// Actualizar
+router.put("/:id", productsCtrl.update);
+
+// (opcional) borrar
+// router.delete("/:id", productsCtrl.remove);
 
 module.exports = router;
