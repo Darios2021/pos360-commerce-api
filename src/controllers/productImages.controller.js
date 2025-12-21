@@ -17,14 +17,16 @@ function s3Client() {
     s3ForcePathStyle: true,
     signatureVersion: "v4",
     sslEnabled: true,
-    region: process.env.S3_REGION || "us-east-1",
+    region: process.env.S3_REGION || "eu-east-1",
   });
 }
 
 function publicUrlFor(key) {
   const base = process.env.S3_PUBLIC_BASE_URL || process.env.S3_ENDPOINT;
   const bucket = mustEnv("S3_BUCKET");
-  return `${String(base).replace(/\/$/, "")}/${bucket}/${key}`;
+  // Limpia slashes al final del base para evitar // en la URL
+  const cleanBase = String(base).replace(/\/$/, "");
+  return `${cleanBase}/${bucket}/${key}`;
 }
 
 // --- FUNCIONES ---
@@ -42,36 +44,46 @@ async function listByProduct(req, res, next) {
 async function upload(req, res, next) {
   try {
     const productId = req.params.id;
-    const file = (req.files && req.files.length > 0) ? req.files[0] : null;
-
-    if (!file) {
-      return res.status(400).json({ ok: false, message: "No se recibió archivo" });
+    // Soporta múltiples archivos bajo el campo 'files'
+    const files = req.files || [];
+    
+    if (files.length === 0) {
+      return res.status(400).json({ ok: false, message: "No se recibieron archivos" });
     }
 
     const s3 = s3Client();
-    const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
-    const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
+    const results = [];
 
-    await s3.putObject({
-      Bucket: mustEnv("S3_BUCKET"),
-      Key: key,
-      Body: file.buffer,
-      ContentType: file.mimetype,
-      ACL: "public-read"
-    }).promise();
+    for (const file of files) {
+      const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
+      const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
 
-    const img = await ProductImage.create({
-      product_id: productId,
-      url: publicUrlFor(key),
-      sort_order: 0
+      await s3.putObject({
+        Bucket: mustEnv("S3_BUCKET"),
+        Key: key,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+        ACL: "public-read"
+      }).promise();
+
+      const img = await ProductImage.create({
+        product_id: productId,
+        url: publicUrlFor(key),
+        sort_order: 0
+      });
+      
+      results.push(img);
+    }
+
+    res.status(201).json({ 
+      ok: true, 
+      uploaded: results.length,
+      items: results 
     });
-
-    res.status(201).json({ ok: true, item: img });
   } catch (e) {
     console.error("❌ UPLOAD ERROR:", e);
     res.status(500).json({ ok: false, message: e.message });
   }
 }
 
-// ✅ EXPORTACIÓN CLAVE
 module.exports = { listByProduct, upload };
