@@ -1,8 +1,7 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// ===== IMPORTACIÓN DE MODELOS =====
-// Nota: Asegúrate de que los nombres de los archivos coincidan exactamente (Mayúsculas/Minúsculas)
+// ===== IMPORTACIÓN DE MODELOS (Ajustado a tus nombres de archivo reales) =====
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
 const Permission = require("./permission")(sequelize, DataTypes); 
@@ -10,10 +9,9 @@ const UserRole = require("./user_role")(sequelize, DataTypes);
 
 let RolePermission = null;
 try {
+  // Nota: Asegúrate que el archivo se llame role_permission.js y no role_permission.model.js
   RolePermission = require("./role_permission")(sequelize, DataTypes);
-} catch (_) {
-  console.log("⚠️ RolePermission no definido");
-}
+} catch (_) {}
 
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
@@ -24,44 +22,24 @@ const StockBalance = require("./StockBalance")(sequelize, DataTypes);
 const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 
-const Sale = require("./Sale")(sequelize, DataTypes);
-const SaleItem = require("./SaleItem")(sequelize, DataTypes);
-const Payment = require("./Payment")(sequelize, DataTypes);
+// Ajuste según tu captura de pantalla:
+const Sale = require("./sale.model")(sequelize, DataTypes);
+const SaleItem = require("./sale_item.model")(sequelize, DataTypes);
+const Payment = require("./payment.model")(sequelize, DataTypes);
 
-// ==========================================
-// ASOCIACIONES (Corregidas y Completas)
-// ==========================================
+// =====================
+// ASOCIACIONES
+// =====================
 
-// --- AUTH ---
-User.belongsToMany(Role, {
-  through: { model: UserRole, timestamps: false },
-  foreignKey: "user_id",
-  otherKey: "role_id",
-  as: "roles",
-});
-Role.belongsToMany(User, {
-  through: { model: UserRole, timestamps: false },
-  foreignKey: "role_id",
-  otherKey: "user_id",
-  as: "users",
-});
+// Auth
+User.belongsToMany(Role, { through: { model: UserRole, timestamps: false }, foreignKey: "user_id", otherKey: "role_id", as: "roles" });
+Role.belongsToMany(User, { through: { model: UserRole, timestamps: false }, foreignKey: "role_id", otherKey: "user_id", as: "users" });
 
 if (RolePermission) {
-  Role.belongsToMany(Permission, {
-    through: { model: RolePermission, timestamps: false },
-    foreignKey: "role_id",
-    otherKey: "permission_id",
-    as: "permissions",
-  });
-  Permission.belongsToMany(Role, {
-    through: { model: RolePermission, timestamps: false },
-    foreignKey: "permission_id",
-    otherKey: "role_id",
-    as: "roles",
-  });
+  Role.belongsToMany(Permission, { through: { model: RolePermission, timestamps: false }, foreignKey: "role_id", otherKey: "permission_id", as: "permissions" });
 }
 
-// --- INVENTORY (Recursividad de Category arreglada) ---
+// Inventory
 Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
 Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
 
@@ -77,7 +55,7 @@ Branch.hasMany(Warehouse, { foreignKey: "branch_id", as: "warehouses" });
 StockBalance.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 StockBalance.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
-// --- POS & SALES ---
+// POS Links
 Sale.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
 Sale.belongsTo(User, { foreignKey: "user_id", as: "user" });
 Sale.hasMany(SaleItem, { foreignKey: "sale_id", as: "items" });
@@ -87,13 +65,6 @@ SaleItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 Sale.hasMany(Payment, { foreignKey: "sale_id", as: "payments" });
 Payment.belongsTo(Sale, { foreignKey: "sale_id" });
 
-// --- MOVEMENTS ---
-StockMovement.hasMany(StockMovementItem, { foreignKey: "movement_id", as: "items" });
-StockMovementItem.belongsTo(StockMovement, { foreignKey: "movement_id", as: "movement" });
-
-// ==========================================
-// EXPORTACIÓN
-// ==========================================
 module.exports = {
   sequelize,
   User, Role, Permission, UserRole, RolePermission,
