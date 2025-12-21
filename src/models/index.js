@@ -1,17 +1,19 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// ===== IMPORTACIÓN DE MODELOS (Ajustado a tus nombres de archivo reales) =====
+// ===== DETECCIÓN DE MODELOS SEGÚN TUS ARCHIVOS REALES =====
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
-const Permission = require("./permission")(sequelize, DataTypes); 
+const Permission = require("./permission")(sequelize, DataTypes);
 const UserRole = require("./user_role")(sequelize, DataTypes);
 
+// El archivo en tu imagen es "role_permission.js" (confirmar si lleva .model)
 let RolePermission = null;
 try {
-  // Nota: Asegúrate que el archivo se llame role_permission.js y no role_permission.model.js
   RolePermission = require("./role_permission")(sequelize, DataTypes);
-} catch (_) {}
+} catch (e) {
+  console.log("⚠️ RolePermission no cargado");
+}
 
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
@@ -22,14 +24,14 @@ const StockBalance = require("./StockBalance")(sequelize, DataTypes);
 const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 
-// Ajuste según tu captura de pantalla:
+// AQUÍ ESTABA EL ERROR: Usando los nombres exactos de tu captura de pantalla
 const Sale = require("./sale.model")(sequelize, DataTypes);
 const SaleItem = require("./sale_item.model")(sequelize, DataTypes);
 const Payment = require("./payment.model")(sequelize, DataTypes);
 
-// =====================
-// ASOCIACIONES
-// =====================
+// ==========================================
+// ASOCIACIONES (Blindadas para evitar Error 500)
+// ==========================================
 
 // Auth
 User.belongsToMany(Role, { through: { model: UserRole, timestamps: false }, foreignKey: "user_id", otherKey: "role_id", as: "roles" });
@@ -37,9 +39,10 @@ Role.belongsToMany(User, { through: { model: UserRole, timestamps: false }, fore
 
 if (RolePermission) {
   Role.belongsToMany(Permission, { through: { model: RolePermission, timestamps: false }, foreignKey: "role_id", otherKey: "permission_id", as: "permissions" });
+  Permission.belongsToMany(Role, { through: { model: RolePermission, timestamps: false }, foreignKey: "permission_id", otherKey: "role_id", as: "roles" });
 }
 
-// Inventory
+// Inventory & Recursividad de Categoría
 Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
 Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
 
@@ -64,6 +67,10 @@ SaleItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
 Sale.hasMany(Payment, { foreignKey: "sale_id", as: "payments" });
 Payment.belongsTo(Sale, { foreignKey: "sale_id" });
+
+// Movimientos
+StockMovement.hasMany(StockMovementItem, { foreignKey: "movement_id", as: "items" });
+StockMovementItem.belongsTo(StockMovement, { foreignKey: "movement_id", as: "movement" });
 
 module.exports = {
   sequelize,
