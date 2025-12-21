@@ -30,8 +30,19 @@ router.use("/auth", authRoutes);
 
 // =====================
 // Uploads (PROTEGIDO)
+// POST /api/v1/upload   (ojo: el routes/uploads.routes.js debe tener POST "/")
 // =====================
 router.use("/upload", requireAuth, require("./uploads.routes"));
+
+// =====================
+// Product Images (PROTEGIDO)
+// GET /api/v1/products/:id/images
+// =====================
+router.get(
+  "/products/:id/images",
+  requireAuth,
+  require("../controllers/productImages.controller").listByProduct
+);
 
 // =====================
 // Inventory / Core (PROTEGIDO)

@@ -40,12 +40,16 @@ function publicUrlFor(key) {
   const bucket = mustEnv("S3_BUCKET");
   const forcePathStyle = String(process.env.S3_FORCE_PATH_STYLE ?? "true") === "true";
 
-  // path-style: https://host/bucket/key
-  // virtual-hosted style: https://bucket.host/key  (no lo usamos si forcePathStyle=true)
-  if (forcePathStyle) return `${base.replace(/\/$/, "")}/${bucket}/${key}`;
-  // fallback
-  const host = base.replace(/^https?:\/\//, "");
+  if (forcePathStyle) return `${String(base).replace(/\/$/, "")}/${bucket}/${key}`;
+
+  const host = String(base).replace(/^https?:\/\//, "");
   return `https://${bucket}.${host.replace(/\/.*$/, "")}/${key}`;
+}
+
+function safeExt(filename) {
+  const ext = path.extname(filename || "").toLowerCase();
+  const ok = [".png", ".jpg", ".jpeg", ".webp"];
+  return ok.includes(ext) ? ext : ".jpg";
 }
 
 // GET /api/v1/products/:id/images
@@ -59,13 +63,14 @@ exports.listByProduct = async (req, res, next) => {
       order: [["sort_order", "ASC"], ["id", "ASC"]],
     });
 
-    res.json({ ok: true, items });
+    return res.json({ ok: true, items });
   } catch (e) {
     next(e);
   }
 };
 
 // POST /api/v1/upload  (multipart: file + productId)
+// Importante: este controller asume que el route ya tiene multer y te deja req.file en memoria.
 exports.upload = async (req, res, next) => {
   try {
     const productId = toInt(req.body?.productId, 0);
@@ -81,7 +86,7 @@ exports.upload = async (req, res, next) => {
     const bucket = mustEnv("S3_BUCKET");
     const s3 = s3Client();
 
-    const ext = path.extname(req.file.originalname || "").toLowerCase() || ".jpg";
+    const ext = safeExt(req.file.originalname);
     const stamp = Date.now();
     const rand = crypto.randomBytes(8).toString("hex");
     const key = `products/${productId}/${stamp}-${rand}${ext}`;
@@ -93,20 +98,22 @@ exports.upload = async (req, res, next) => {
         Key: key,
         Body: req.file.buffer,
         ContentType: req.file.mimetype || "application/octet-stream",
-        ACL: "public-read", // si tu bucket es privado, sacalo y usa proxy/firma.
+
+        // ⚠️ si tu bucket NO admite ACL, esto rompe. En ese caso comentá esta línea.
+        ACL: "public-read",
       })
       .promise();
 
     const url = publicUrlFor(key);
 
-    // 2) insertamos en DB con el product_id CORRECTO
+    // 2) insertamos en DB
     const img = await ProductImage.create({
       product_id: productId,
       url,
       sort_order: 0,
     });
 
-    res.status(201).json({ ok: true, item: img });
+    return res.status(201).json({ ok: true, item: img });
   } catch (e) {
     next(e);
   }

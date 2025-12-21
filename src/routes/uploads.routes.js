@@ -1,9 +1,10 @@
-// src/routes/upload.routes.js
+// src/routes/uploads.routes.js
 const router = require("express").Router();
+const multer = require("multer");
 const ctrl = require("../controllers/productImages.controller");
-const { upload } = require("../middlewares/upload.middleware");
 
-// upload (frontend usa POST /upload)
+const upload = multer({ storage: multer.memoryStorage() });
+
 router.post("/", upload.single("file"), ctrl.upload);
 
 module.exports = router;
