@@ -1,65 +1,9 @@
-// src/routes/uploads.routes.js
-const express = require("express");
-const multer = require("multer");
-const crypto = require("crypto");
-const path = require("path");
-const { putObject } = require("../services/s3.service");
+// src/routes/upload.routes.js
+const router = require("express").Router();
+const ctrl = require("../controllers/productImages.controller");
+const { upload } = require("../middlewares/upload.middleware");
 
-const router = express.Router();
-
-// Multer en memoria (sube a MinIO directo)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
-});
-
-function safeExt(filename) {
-  const ext = path.extname(filename || "").toLowerCase();
-  // whitelist básica (ajustá si querés)
-  const ok = [".png", ".jpg", ".jpeg", ".webp", ".pdf"];
-  return ok.includes(ext) ? ext : "";
-}
-
-router.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ ok: false, message: "Missing file (field name: file)" });
-    }
-
-    const original = req.file.originalname || "file";
-    const ext = safeExt(original);
-    const rand = crypto.randomBytes(12).toString("hex");
-
-    // opcional: subcarpeta por producto si mandás productId
-    const productId = req.body?.productId ? String(req.body.productId) : null;
-
-    const key = productId
-      ? `products/${productId}/${Date.now()}-${rand}${ext}`
-      : `uploads/${Date.now()}-${rand}${ext}`;
-
-    const saved = await putObject({
-      key,
-      body: req.file.buffer,
-      contentType: req.file.mimetype,
-    });
-
-    return res.json({
-      ok: true,
-      bucket: saved.bucket,
-      key: saved.key,
-      url: saved.url,
-      originalName: original,
-      size: req.file.size,
-      mime: req.file.mimetype,
-    });
-  } catch (err) {
-    console.error("❌ UPLOAD ERROR:", err);
-    return res.status(500).json({
-      ok: false,
-      code: "UPLOAD_FAILED",
-      message: err?.message || "Upload failed",
-    });
-  }
-});
+// upload (frontend usa POST /upload)
+router.post("/", upload.single("file"), ctrl.upload);
 
 module.exports = router;
