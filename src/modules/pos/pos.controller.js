@@ -41,7 +41,9 @@ async function createSale(req, res) {
     const sale = await Sale.create(
       {
         branch_id: Number(branch_id) || 1,
+        // si tenés auth, usar req.user.id; si no, fallback a 1
         user_id: req.user?.id || 1,
+
         customer_name: customer_name || "Consumidor Final",
 
         subtotal: total,
@@ -77,7 +79,7 @@ async function createSale(req, res) {
       );
     }
 
-    // 4) Crear pagos
+    // 4) Pagos
     let totalPaid = 0;
 
     for (const p of payments) {
@@ -85,6 +87,7 @@ async function createSale(req, res) {
       const method = String(p.method || "CASH").toUpperCase();
 
       if (!Number.isFinite(amount) || amount <= 0) throw new Error(`Pago inválido: amount=${p.amount}`);
+      // ENUM real de tu tabla payments
       if (!["CASH", "TRANSFER", "CARD", "QR", "OTHER"].includes(method)) {
         throw new Error(`Método de pago inválido: ${method}`);
       }
@@ -101,10 +104,9 @@ async function createSale(req, res) {
       );
     }
 
-    // Si no mandan pagos, asumimos pagado exacto
+    // si no mandan pagos, asumimos pagado exacto
     if (payments.length === 0) totalPaid = total;
 
-    // 5) Actualizar totales finales
     sale.paid_total = totalPaid;
     sale.change_total = totalPaid - total;
     await sale.save({ transaction: t });
