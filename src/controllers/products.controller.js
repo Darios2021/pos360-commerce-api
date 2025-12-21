@@ -1,6 +1,5 @@
-// src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category } = require("../models");
+const { Product, Category, ProductImage } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -14,6 +13,9 @@ function toDec(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+/**
+ * Helper para incluir jerarquía de categorías e imágenes en las consultas
+ */
 function includeCategoryTree() {
   return [
     {
@@ -29,6 +31,11 @@ function includeCategoryTree() {
           required: false,
         },
       ],
+    },
+    {
+      model: ProductImage,
+      as: "images", // ✅ Ahora las imágenes viajan con el producto
+      required: false,
     },
   ];
 }
@@ -95,29 +102,21 @@ async function create(req, res, next) {
       barcode: body.barcode ?? null,
       name: body.name,
       description: body.description ?? null,
-
-      // subrubro hoja (category_id)
       category_id: body.category_id ? Number(body.category_id) : null,
-
       is_new: body.is_new ?? 0,
       is_promo: body.is_promo ?? 0,
-
       brand: body.brand ?? null,
       model: body.model ?? null,
       warranty_months: body.warranty_months ?? 0,
-
       track_stock: body.track_stock ?? 1,
       sheet_stock_label: body.sheet_stock_label ?? null,
       sheet_has_stock: body.sheet_has_stock ?? 1,
-
       is_active: body.is_active ?? 1,
-
       cost: toDec(body.cost, 0),
       price: toDec(body.price, 0),
       price_list: toDec(body.price_list, 0),
       price_discount: toDec(body.price_discount, 0),
       price_reseller: toDec(body.price_reseller, 0),
-
       tax_rate: toDec(body.tax_rate, 21),
     });
 
@@ -141,27 +140,21 @@ async function update(req, res, next) {
       barcode: body.barcode ?? item.barcode,
       name: body.name ?? item.name,
       description: body.description ?? item.description,
-
       category_id:
         body.category_id !== undefined
           ? body.category_id
             ? Number(body.category_id)
             : null
           : item.category_id,
-
       is_new: body.is_new ?? item.is_new,
       is_promo: body.is_promo ?? item.is_promo,
-
       brand: body.brand ?? item.brand,
       model: body.model ?? item.model,
       warranty_months: body.warranty_months ?? item.warranty_months,
-
       track_stock: body.track_stock ?? item.track_stock,
       sheet_stock_label: body.sheet_stock_label ?? item.sheet_stock_label,
       sheet_has_stock: body.sheet_has_stock ?? item.sheet_has_stock,
-
       is_active: body.is_active ?? item.is_active,
-
       cost: body.cost !== undefined ? toDec(body.cost, item.cost) : item.cost,
       price: body.price !== undefined ? toDec(body.price, item.price) : item.price,
       price_list:
@@ -174,7 +167,6 @@ async function update(req, res, next) {
         body.price_reseller !== undefined
           ? toDec(body.price_reseller, item.price_reseller)
           : item.price_reseller,
-
       tax_rate: body.tax_rate !== undefined ? toDec(body.tax_rate, item.tax_rate) : item.tax_rate,
     });
 
