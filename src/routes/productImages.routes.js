@@ -9,6 +9,7 @@ function mustEnv(name) {
   return v;
 }
 
+// Configuración S3 (AWS SDK v2 compatible con tus logs)
 function s3Client() {
   return new AWS.S3({
     endpoint: mustEnv("S3_ENDPOINT"),
@@ -41,39 +42,41 @@ exports.upload = async (req, res, next) => {
   try {
     const productId = req.params.id;
     
-    // ✅ BUSCAMOS EL ARCHIVO EN EL ARRAY (porque usamos .any() en la ruta)
+    // ✅ Buscamos el primer archivo que venga en el array de Multer
     const file = (req.files && req.files.length > 0) ? req.files[0] : null;
 
     if (!file) {
-      console.error("❌ No llegó ningún archivo. req.files:", req.files);
-      return res.status(400).json({ ok: false, message: "No se recibió archivo" });
+      console.error("⚠️ No se detectó archivo en la petición");
+      return res.status(400).json({ ok: false, message: "No se recibió ningún archivo" });
     }
 
-    console.log(`[UPLOAD] Subiendo ${file.originalname} para producto ${productId}`);
+    console.log(`[UPLOAD] Procesando: ${file.originalname} para producto ${productId}`);
 
     const s3 = s3Client();
     const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
     const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
 
+    // Subida a MinIO / S3
     await s3.putObject({
       Bucket: mustEnv("S3_BUCKET"),
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype,
-      ACL: "public-read"
+      ACL: "public-read" 
     }).promise();
 
+    // Guardar referencia en Base de Datos
     const img = await ProductImage.create({
       product_id: productId,
       url: publicUrlFor(key),
       sort_order: 0
     });
 
-    console.log("✅ Imagen creada en DB:", img.id);
+    console.log("✅ Subida exitosa. Imagen ID:", img.id);
     res.status(201).json({ ok: true, item: img });
 
   } catch (e) {
-    console.error("❌ ERROR EN CONTROLADOR UPLOAD:", e);
+    console.error("❌ ERROR CRÍTICO EN UPLOAD:", e);
     res.status(500).json({ ok: false, message: e.message });
   }
 };
