@@ -1,17 +1,15 @@
-const { DataTypes } = require("sequelize");
-const sequelize = require("../config/database");
+module.exports = (sequelize, DataTypes) => {
+  const Payment = sequelize.define("Payment", {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false },
+    payment_method: { type: DataTypes.STRING, defaultValue: 'cash' }, // cash, card, transfer
+    sale_id: { type: DataTypes.INTEGER }
+  }, {
+    tableName: 'payments',
+    underscored: true,
+    timestamps: true,
+    paranoid: true
+  });
 
-const Payment = sequelize.define("Payment", {
-  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-  sale_id: { type: DataTypes.INTEGER, allowNull: false },
-  method: { type: DataTypes.STRING, allowNull: false }, // CASH, DEBIT, CREDIT
-  amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false },
-  reference: { type: DataTypes.STRING },
-  paid_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
-}, { 
-  tableName: 'payments', 
-  timestamps: false,
-  underscored: true 
-});
-
-module.exports = Payment;
+  return Payment;
+};

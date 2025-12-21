@@ -1,25 +1,17 @@
-const { DataTypes } = require("sequelize");
-const sequelize = require("../config/database");
+module.exports = (sequelize, DataTypes) => {
+  const Sale = sequelize.define("Sale", {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    sale_date: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
+    total_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+    status: { type: DataTypes.STRING, defaultValue: 'completed' }, // pending, completed, cancelled
+    branch_id: { type: DataTypes.INTEGER },
+    user_id: { type: DataTypes.INTEGER }
+  }, {
+    tableName: 'sales',
+    underscored: true,
+    timestamps: true,
+    paranoid: true
+  });
 
-const Sale = sequelize.define("Sale", {
-  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-  branch_id: { type: DataTypes.INTEGER, allowNull: false },
-  user_id: { type: DataTypes.INTEGER, allowNull: false },
-  sale_number: { type: DataTypes.STRING, unique: true },
-  status: { type: DataTypes.ENUM("PENDING", "PAID", "CANCELLED"), defaultValue: "PAID" },
-  customer_name: { type: DataTypes.STRING },
-  customer_doc: { type: DataTypes.STRING },
-  subtotal: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  discount_total: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  tax_total: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  total: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  paid_total: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  change_total: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  sold_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
-}, { 
-  tableName: 'sales', 
-  timestamps: true,
-  underscored: true 
-});
-
-module.exports = Sale;
+  return Sale;
+};
