@@ -69,7 +69,6 @@ router.use("/auth", authRoutes);
 // =====================
 
 // ✅ OJO: si montás /upload, adentro NO debe ser /upload otra vez.
-// (Abajo te dejo uploads.routes corregido)
 router.use("/upload", requireAuth, require("./uploads.routes"));
 
 // Productos / categorías
@@ -83,5 +82,10 @@ router.use("/import", requireAuth, require("./import.routes"));
 router.use("/branches", requireAuth, require("./branches.routes"));
 router.use("/warehouses", requireAuth, require("./warehouses.routes"));
 router.use("/stock", requireAuth, require("./stock.routes"));
+
+// =====================
+// POS (PROTEGIDO) ✅ ESTA ERA LA PARTE QUE FALTABA
+// =====================
+router.use("/pos", requireAuth, require("../modules/pos/pos.routes"));
 
 module.exports = router;
