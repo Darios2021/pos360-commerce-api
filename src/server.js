@@ -1,13 +1,11 @@
 // src/server.js
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
-
 const app = express();
 
 // =====================
-// CORS (FIX REAL)
+// CORS (VERSIÓN CORREGIDA)
 // =====================
 const allowedOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
@@ -15,17 +13,21 @@ const allowedOrigins = (process.env.CORS_ORIGINS || "")
   .filter(Boolean);
 
 const corsOptions = {
-  origin(origin, cb) {
-    // requests sin origin (curl/postman) -> permitir
-    if (!origin) return cb(null, true);
+  origin: function (origin, callback) {
+    // 1. Permitir si no hay origin (Postman, curl, etc)
+    if (!origin) return callback(null, true);
+    
+    // 2. Si estamos en desarrollo, permitir localhost siempre por seguridad
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
 
-    // si CORS_ORIGINS vacío => permitir todo (no recomendado)
-    if (!allowedOrigins.length) return cb(null, true);
-
-    // permitir si está en whitelist
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-
-    return cb(new Error(`CORS blocked: ${origin}`), false);
+    // 3. Permitir si está en la lista de CapRover
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+    
+    return callback(new Error(`CORS blocked: ${origin}`));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -33,27 +35,18 @@ const corsOptions = {
   exposedHeaders: ["Authorization"],
 };
 
-// 👇 MUY IMPORTANTE: CORS primero
 app.use(cors(corsOptions));
-
-// 👇 MUY IMPORTANTE: preflight
-app.options("*", cors(corsOptions));
+app.options("*", cors(corsOptions)); // Preflight
 
 // =====================
-// Body parsers
+// Body parsers y Rutas
 // =====================
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// =====================
-// Routes
-// =====================
 const routes = require("./routes");
 app.use("/api/v1", routes);
 
-// =====================
-// Error handler (para que CORS muestre algo útil)
-// =====================
 app.use((err, req, res, next) => {
   console.error("❌ ERROR:", err?.message || err);
   res.status(500).json({ ok: false, message: err?.message || "Server error" });
