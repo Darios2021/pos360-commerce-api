@@ -19,36 +19,26 @@ router.patch("/:id", productsCtrl.update);
 // --- RUTAS IMÁGENES ---
 router.get("/:id/images", productImagesCtrl.listByProduct);
 
-// ✅ SOLUCIÓN ROBUSTA: Wrapper para capturar errores de Multer
+// ✅ SOLUCIÓN FINAL: Aceptamos el campo "files" que envía tu frontend
 router.post("/:id/images", (req, res, next) => {
-  const uploadMiddleware = upload.single("file"); // Backend espera campo 'file'
+  // Aceptamos hasta 10 archivos en el campo "files"
+  const uploadMiddleware = upload.array("files", 10); 
 
   uploadMiddleware(req, res, (err) => {
     if (err instanceof multer.MulterError) {
-      // Error específico de Multer (ej: Unexpected field, File too large)
-      console.error("❌ MULTER ERROR DETECTADO:", JSON.stringify(err));
-      console.error("👉 El backend esperaba el campo 'file'. Revisa qué envía el frontend.");
-      return res.status(400).json({ 
-        ok: false, 
-        message: `Error al subir archivo: ${err.message}`,
-        code: err.code,
-        field: err.field 
-      });
+      console.error("❌ MULTER ERROR:", JSON.stringify(err));
+      return res.status(400).json({ ok: false, message: err.message, field: err.field });
     } else if (err) {
-      // Otros errores
-      console.error("❌ ERROR DESCONOCIDO EN UPLOAD:", err);
       return res.status(500).json({ ok: false, message: err.message });
     }
 
-    // Si todo salió bien, inyectamos el ID y pasamos al controller
-    if (req.params.id) {
-      req.body = req.body || {};
-      req.body.productId = req.params.id;
-    }
+    // Inyectamos el ID del producto
+    req.body.productId = req.params.id;
     
-    // Validamos que el archivo realmente llegó
-    if (!req.file) {
-      console.warn("⚠️ ALERTA: Multer corrió sin errores, pero req.file está vacío.");
+    // IMPORTANTE: Como usamos .array(), los archivos están en req.files
+    // Si el controlador espera req.file, le pasamos el primero del array
+    if (req.files && req.files.length > 0) {
+      req.file = req.files[0];
     }
 
     next();
