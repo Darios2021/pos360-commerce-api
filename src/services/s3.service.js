@@ -1,89 +1,69 @@
 // src/services/s3.service.js
-const { S3Client, HeadBucketCommand, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const crypto = require("crypto");
 
-function getBool(v, def = false) {
-  if (v === undefined || v === null) return def;
-  const s = String(v).toLowerCase();
-  return s === "1" || s === "true" || s === "yes" || s === "on";
-}
-
-function must(name, v) {
-  if (!v) throw new Error(`Missing env: ${name}`);
+function required(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env ${name}`);
   return v;
 }
 
-function buildS3Client() {
-  const endpoint = must("S3_ENDPOINT", process.env.S3_ENDPOINT);
-  const region = process.env.S3_REGION || "us-east-1";
-  const accessKeyId = must("S3_ACCESS_KEY", process.env.S3_ACCESS_KEY);
-  const secretAccessKey = must("S3_SECRET_KEY", process.env.S3_SECRET_KEY);
+const S3_ENDPOINT = required("S3_ENDPOINT");
+const S3_REGION = process.env.S3_REGION || "us-east-1";
+const S3_BUCKET = required("S3_BUCKET");
+const S3_ACCESS_KEY = required("S3_ACCESS_KEY");
+const S3_SECRET_KEY = required("S3_SECRET_KEY");
+const S3_FORCE_PATH_STYLE = String(process.env.S3_FORCE_PATH_STYLE || "true") === "true";
+const S3_SSL = String(process.env.S3_SSL || "true") === "true";
+const S3_PUBLIC_BASE_URL = process.env.S3_PUBLIC_BASE_URL || S3_ENDPOINT;
 
-  // MinIO casi siempre necesita path-style
-  const forcePathStyle = getBool(process.env.S3_FORCE_PATH_STYLE, true);
+const client = new S3Client({
+  region: S3_REGION,
+  endpoint: S3_ENDPOINT,
+  forcePathStyle: S3_FORCE_PATH_STYLE,
+  tls: S3_SSL,
+  credentials: {
+    accessKeyId: S3_ACCESS_KEY,
+    secretAccessKey: S3_SECRET_KEY,
+  },
+});
 
-  // Si endpoint ya es https, usá SSL. Si es http, no.
-  const ssl =
-    process.env.S3_SSL !== undefined
-      ? getBool(process.env.S3_SSL, true)
-      : String(endpoint).startsWith("https://");
+function extFromMime(mime, originalName = "") {
+  const lower = String(originalName || "").toLowerCase();
+  const last = lower.includes(".") ? lower.split(".").pop() : "";
+  if (last) return last;
 
-  return new S3Client({
-    region,
-    endpoint,
-    forcePathStyle,
-    credentials: { accessKeyId, secretAccessKey },
-    tls: ssl,
-  });
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/png") return "png";
+  if (mime === "image/webp") return "webp";
+  return "bin";
 }
 
-function publicObjectUrl({ bucket, key }) {
-  // URL pública para consumir desde frontend.
-  // Si usás minio-coc.cingulado.org como endpoint público, esto te queda joya.
-  const endpoint = must("S3_PUBLIC_BASE_URL", process.env.S3_PUBLIC_BASE_URL || process.env.S3_ENDPOINT);
-
-  const base = String(endpoint).replace(/\/+$/, "");
-  const pathStyle = getBool(process.env.S3_FORCE_PATH_STYLE, true);
-
-  if (pathStyle) {
-    // https://host/bucket/key
-    return `${base}/${bucket}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
-  }
-
-  // virtual-host style: https://bucket.host/key
-  // ojo: requiere DNS/ingress compatible
-  const u = new URL(base);
-  return `${u.protocol}//${bucket}.${u.host}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+function joinUrl(base, path) {
+  return String(base).replace(/\/+$/, "") + "/" + String(path).replace(/^\/+/, "");
 }
 
-async function checkBucketAccess() {
-  const bucket = must("S3_BUCKET", process.env.S3_BUCKET);
-  const s3 = buildS3Client();
-  await s3.send(new HeadBucketCommand({ Bucket: bucket }));
-  return true;
-}
+/**
+ * Sube imagen (buffer) a MinIO y devuelve URL pública.
+ */
+async function uploadProductImage({ productId, buffer, mimeType, originalName }) {
+  const rand = crypto.randomBytes(8).toString("hex");
+  const ext = extFromMime(mimeType, originalName);
+  const key = `products/${productId}/${Date.now()}-${rand}.${ext}`;
 
-async function putObject({ key, body, contentType }) {
-  const bucket = must("S3_BUCKET", process.env.S3_BUCKET);
-  const s3 = buildS3Client();
-
-  await s3.send(
+  await client.send(
     new PutObjectCommand({
-      Bucket: bucket,
+      Bucket: S3_BUCKET,
       Key: key,
-      Body: body,
-      ContentType: contentType || "application/octet-stream",
+      Body: buffer,
+      ContentType: mimeType || "application/octet-stream",
+      ACL: "public-read",
     })
   );
 
-  return {
-    bucket,
-    key,
-    url: publicObjectUrl({ bucket, key }),
-  };
+  // Para MinIO con path-style: https://minio-domain/bucket/key
+  const url = joinUrl(S3_PUBLIC_BASE_URL, `${S3_BUCKET}/${key}`);
+  return { key, url };
 }
 
-module.exports = {
-  checkBucketAccess,
-  putObject,
-  publicObjectUrl,
-};
+module.exports = { uploadProductImage };

@@ -1,3 +1,4 @@
+// src/models/index.js
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
@@ -15,6 +16,7 @@ try {
 // ===== INVENTORY =====
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
+const ProductImage = require("./ProductImage")(sequelize, DataTypes); // ✅ NEW
 const Branch = require("./Branch")(sequelize, DataTypes);
 const Warehouse = require("./Warehouse")(sequelize, DataTypes);
 const StockBalance = require("./StockBalance")(sequelize, DataTypes);
@@ -68,7 +70,7 @@ Category.hasMany(Category, {
   as: "children",
 });
 
-// Product → Category (Rubro)
+// Product → Category (HOJA: subrubro)
 Product.belongsTo(Category, {
   foreignKey: "category_id",
   as: "category",
@@ -76,6 +78,16 @@ Product.belongsTo(Category, {
 Category.hasMany(Product, {
   foreignKey: "category_id",
   as: "products",
+});
+
+// ✅ Product ↔ Images
+Product.hasMany(ProductImage, {
+  foreignKey: "product_id",
+  as: "images",
+});
+ProductImage.belongsTo(Product, {
+  foreignKey: "product_id",
+  as: "product",
 });
 
 // Branch → Warehouses
@@ -125,6 +137,7 @@ module.exports = {
   // inventory
   Category,
   Product,
+  ProductImage, // ✅ NEW
   Branch,
   Warehouse,
   StockBalance,
