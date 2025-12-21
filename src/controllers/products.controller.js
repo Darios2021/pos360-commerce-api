@@ -14,19 +14,20 @@ function toDec(v, d = 0) {
 }
 
 /**
- * Helper para incluir jerarquía de categorías e imágenes en las consultas
+ * Helper para incluir el árbol de categorías y las imágenes
+ * Basado en la asociación establecida en models/index.js
  */
 function includeCategoryTree() {
   return [
     {
       model: Category,
-      as: "category", // subrubro (hoja)
+      as: "category",
       attributes: ["id", "name", "parent_id"],
       required: false,
       include: [
         {
           model: Category,
-          as: "parent", // rubro (padre)
+          as: "parent",
           attributes: ["id", "name"],
           required: false,
         },
@@ -34,7 +35,7 @@ function includeCategoryTree() {
     },
     {
       model: ProductImage,
-      as: "images", // ✅ Ahora las imágenes viajan con el producto
+      as: "images", // Coincide con la asociación en models/index.js
       required: false,
     },
   ];
@@ -89,11 +90,8 @@ async function getOne(req, res, next) {
 async function create(req, res, next) {
   try {
     const body = req.body || {};
-
     if (!body.sku || !body.name) {
-      return res
-        .status(400)
-        .json({ ok: false, code: "VALIDATION", message: "sku y name son obligatorios" });
+      return res.status(400).json({ ok: false, message: "sku y name son obligatorios" });
     }
 
     const created = await Product.create({
@@ -133,40 +131,25 @@ async function update(req, res, next) {
     if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
 
     const body = req.body || {};
-
     await item.update({
       code: body.code ?? item.code,
       sku: body.sku ?? item.sku,
       barcode: body.barcode ?? item.barcode,
       name: body.name ?? item.name,
       description: body.description ?? item.description,
-      category_id:
-        body.category_id !== undefined
-          ? body.category_id
-            ? Number(body.category_id)
-            : null
-          : item.category_id,
+      category_id: body.category_id !== undefined ? (body.category_id ? Number(body.category_id) : null) : item.category_id,
       is_new: body.is_new ?? item.is_new,
       is_promo: body.is_promo ?? item.is_promo,
       brand: body.brand ?? item.brand,
       model: body.model ?? item.model,
       warranty_months: body.warranty_months ?? item.warranty_months,
       track_stock: body.track_stock ?? item.track_stock,
-      sheet_stock_label: body.sheet_stock_label ?? item.sheet_stock_label,
-      sheet_has_stock: body.sheet_has_stock ?? item.sheet_has_stock,
       is_active: body.is_active ?? item.is_active,
       cost: body.cost !== undefined ? toDec(body.cost, item.cost) : item.cost,
       price: body.price !== undefined ? toDec(body.price, item.price) : item.price,
-      price_list:
-        body.price_list !== undefined ? toDec(body.price_list, item.price_list) : item.price_list,
-      price_discount:
-        body.price_discount !== undefined
-          ? toDec(body.price_discount, item.price_discount)
-          : item.price_discount,
-      price_reseller:
-        body.price_reseller !== undefined
-          ? toDec(body.price_reseller, item.price_reseller)
-          : item.price_reseller,
+      price_list: body.price_list !== undefined ? toDec(body.price_list, item.price_list) : item.price_list,
+      price_discount: body.price_discount !== undefined ? toDec(body.price_discount, item.price_discount) : item.price_discount,
+      price_reseller: body.price_reseller !== undefined ? toDec(body.price_reseller, item.price_reseller) : item.price_reseller,
       tax_rate: body.tax_rate !== undefined ? toDec(body.tax_rate, item.tax_rate) : item.tax_rate,
     });
 
