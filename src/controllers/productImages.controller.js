@@ -17,38 +17,31 @@ function s3Client() {
     s3ForcePathStyle: true,
     signatureVersion: "v4",
     sslEnabled: true,
-    region: process.env.S3_REGION || "eu-east-1",
+    region: process.env.S3_REGION || "us-east-1",
   });
 }
 
 function publicUrlFor(key) {
   const base = process.env.S3_PUBLIC_BASE_URL || process.env.S3_ENDPOINT;
   const bucket = mustEnv("S3_BUCKET");
-  // Limpia slashes al final del base para evitar // en la URL
   const cleanBase = String(base).replace(/\/$/, "");
   return `${cleanBase}/${bucket}/${key}`;
-}
-
-// --- FUNCIONES ---
-
-async function listByProduct(req, res, next) {
-  try {
-    const items = await ProductImage.findAll({
-      where: { product_id: req.params.id },
-      order: [["sort_order", "ASC"]],
-    });
-    res.json({ ok: true, items });
-  } catch (e) { next(e); }
 }
 
 async function upload(req, res, next) {
   try {
     const productId = req.params.id;
-    // Soporta múltiples archivos bajo el campo 'files'
-    const files = req.files || [];
     
+    // CORRECCIÓN: Captura archivos sin importar si vienen en req.files (array) o req.file (single)
+    let files = [];
+    if (req.files) {
+      files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
+    } else if (req.file) {
+      files = [req.file];
+    }
+
     if (files.length === 0) {
-      return res.status(400).json({ ok: false, message: "No se recibieron archivos" });
+      return res.status(400).json({ ok: false, message: "No se recibió ningún archivo" });
     }
 
     const s3 = s3Client();
@@ -84,6 +77,16 @@ async function upload(req, res, next) {
     console.error("❌ UPLOAD ERROR:", e);
     res.status(500).json({ ok: false, message: e.message });
   }
+}
+
+async function listByProduct(req, res, next) {
+  try {
+    const items = await ProductImage.findAll({
+      where: { product_id: req.params.id },
+      order: [["sort_order", "ASC"]],
+    });
+    res.json({ ok: true, items });
+  } catch (e) { next(e); }
 }
 
 module.exports = { listByProduct, upload };
