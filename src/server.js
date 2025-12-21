@@ -1,12 +1,15 @@
-// src/server.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const { sequelize } = require("./models"); // Importa la instancia blindada de Sequelize
+const routes = require("./routes/v1.routes"); // Ajusta según tu archivo de rutas
+const { errorMiddleware } = require("./middlewares/error.middleware");
+
 const app = express();
 
-// =====================
-// CORS (VERSIÓN CORREGIDA)
-// =====================
+// ==========================================
+// 1. CONFIGURACIÓN DE CORS (Blindaje Total)
+// ==========================================
 const allowedOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
@@ -14,43 +17,60 @@ const allowedOrigins = (process.env.CORS_ORIGINS || "")
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // 1. Permitir si no hay origin (Postman, curl, etc)
     if (!origin) return callback(null, true);
-    
-    // 2. Si estamos en desarrollo, permitir localhost siempre por seguridad
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-      return callback(null, true);
-    }
-
-    // 3. Permitir si está en la lista de CapRover
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) return callback(null, true);
     if (allowedOrigins.length === 0 || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
       return callback(null, true);
     }
-    
-    return callback(new Error(`CORS blocked: ${origin}`));
+    return callback(new Error(`CORS blocked by POS360: ${origin}`));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-  exposedHeaders: ["Authorization"],
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // Preflight
+app.options("*", cors(corsOptions)); // Habilita preflight para todo
 
-// =====================
-// Body parsers y Rutas
-// =====================
-app.use(express.json({ limit: "10mb" }));
+// ==========================================
+// 2. MIDDLEWARES DE DATOS
+// ==========================================
+app.use(express.json({ limit: "10mb" })); // Límite alto para procesos pesados
 app.use(express.urlencoded({ extended: true }));
 
-const routes = require("./routes");
+// ==========================================
+// 3. RUTAS Y SALUD
+// ==========================================
+app.get("/", (req, res) => res.json({ name: "pos360-api", status: "online", db: "connected" }));
 app.use("/api/v1", routes);
 
-app.use((err, req, res, next) => {
-  console.error("❌ ERROR:", err?.message || err);
-  res.status(500).json({ ok: false, message: err?.message || "Server error" });
-});
+// ==========================================
+// 4. GESTIÓN DE ERRORES (Capa de Seguridad)
+// ==========================================
+app.use(errorMiddleware);
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`✅ API listening on :${port}`));
+// ==========================================
+// 5. ARRANQUE CONTROLADO (Evita reinicios en CapRover)
+// ==========================================
+const PORT = process.env.PORT || 3000;
+
+async function start() {
+  try {
+    // Verificamos DB antes de abrir el puerto
+    await sequelize.authenticate();
+    console.log("✅ Conexión a Base de Datos: EXITOSA");
+
+    // Sincronización segura (No borra datos)
+    // await sequelize.sync({ alter: false }); 
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Servidor POS360 escuchando en: http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error("❌ ERROR CRÍTICO AL INICIAR EL SERVIDOR:", error.message);
+    // No cerramos el proceso inmediatamente para que CapRover nos deje ver el log
+    setTimeout(() => process.exit(1), 5000); 
+  }
+}
+
+start();
