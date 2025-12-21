@@ -1,36 +1,34 @@
-// src/routes/products.routes.js
 const router = require("express").Router();
 const multer = require("multer");
 
 const productsCtrl = require("../controllers/products.controller.js");
 const productImagesCtrl = require("../controllers/productImages.controller.js");
 
-// Multer en memoria para subir a MinIO desde controller
+// Configuración de Multer en Memoria (Buffer)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
 });
 
-// ----------------------
-// Productos
-// ----------------------
+// --- RUTAS DE PRODUCTOS ---
 router.get("/", productsCtrl.list);
 router.post("/", productsCtrl.create);
 router.get("/:id", productsCtrl.getOne);
 router.patch("/:id", productsCtrl.update);
 
-// ----------------------
-// Imágenes de producto
-// GET  /api/v1/products/:id/images
-// POST /api/v1/products/:id/images  (multipart: file)
-// ----------------------
+// --- RUTAS DE IMÁGENES ---
+
 router.get("/:id/images", productImagesCtrl.listByProduct);
 
-// Nota: el controller espera productId en body, así que lo seteamos acá:
+// ✅ SOLUCIÓN AL "UNEXPECTED FIELD":
+// 1. 'upload.single("file")' coincide con fd.append("file", ...) del frontend.
+// 2. Pasamos el ID del parámetro de ruta al body para que el controller lo encuentre.
 router.post("/:id/images", upload.single("file"), (req, res, next) => {
-  req.body = req.body || {};
-  req.body.productId = req.params.id;
-  return productImagesCtrl.upload(req, res, next);
-});
+  if (req.params.id) {
+    req.body = req.body || {};
+    req.body.productId = req.params.id;
+  }
+  next();
+}, productImagesCtrl.upload);
 
 module.exports = router;

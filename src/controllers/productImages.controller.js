@@ -1,4 +1,3 @@
-// src/controllers/productImages.controller.js
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
 const path = require("path");
@@ -17,6 +16,7 @@ function toInt(v, d = 0) {
 }
 
 // --- S3/MinIO client (aws-sdk v2) ---
+// TÚ LÓGICA ORIGINAL INTACTA
 function s3Client() {
   const endpoint = mustEnv("S3_ENDPOINT");
   const accessKeyId = mustEnv("S3_ACCESS_KEY");
@@ -69,18 +69,19 @@ exports.listByProduct = async (req, res, next) => {
   }
 };
 
-// POST /api/v1/upload  (multipart: file + productId)
-// Importante: este controller asume que el route ya tiene multer y te deja req.file en memoria.
+// POST /api/v1/products/:id/images
 exports.upload = async (req, res, next) => {
   try {
-    const productId = toInt(req.body?.productId, 0);
+    // MODIFICACIÓN: Buscamos el ID en params O en body para mayor seguridad
+    const productId = toInt(req.params.id || req.body?.productId, 0);
 
     if (!productId) {
       return res.status(400).json({ ok: false, message: "productId es obligatorio" });
     }
 
+    // Multer ya debió haber procesado el archivo en el router
     if (!req.file) {
-      return res.status(400).json({ ok: false, message: "file es obligatorio" });
+      return res.status(400).json({ ok: false, message: "file es obligatorio (asegúrate de enviar 'file' en form-data)" });
     }
 
     const bucket = mustEnv("S3_BUCKET");
@@ -91,30 +92,35 @@ exports.upload = async (req, res, next) => {
     const rand = crypto.randomBytes(8).toString("hex");
     const key = `products/${productId}/${stamp}-${rand}${ext}`;
 
-    // 1) subimos a MinIO
+    // 1) Subimos a MinIO/S3
     await s3
       .putObject({
         Bucket: bucket,
         Key: key,
         Body: req.file.buffer,
         ContentType: req.file.mimetype || "application/octet-stream",
-
-        // ⚠️ si tu bucket NO admite ACL, esto rompe. En ese caso comentá esta línea.
-        ACL: "public-read",
+        ACL: "public-read", // Comentar si tu MinIO no soporta ACLs
       })
       .promise();
 
     const url = publicUrlFor(key);
 
-    // 2) insertamos en DB
+    // 2) Insertamos en DB
     const img = await ProductImage.create({
       product_id: productId,
       url,
       sort_order: 0,
     });
+    
+    console.log(`[UPLOAD] Imagen subida exitosamente: ID ${img.id} para Producto ${productId}`);
 
     return res.status(201).json({ ok: true, item: img });
   } catch (e) {
+    console.error("[UPLOAD ERROR]", e);
+    // Si sigue saliendo Unexpected field, es un tema del nombre del campo en el frontend vs router
+    if (e.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ ok: false, message: "El archivo es demasiado grande (Máx 25MB)" });
+    }
     next(e);
   }
 };
