@@ -2,14 +2,18 @@ module.exports = (sequelize, DataTypes) => {
   const Product = sequelize.define("Product", {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     name: { type: DataTypes.STRING, allowNull: false },
-    sku: { type: DataTypes.STRING, unique: true },
+    code: { type: DataTypes.STRING, unique: true },
+    barcode: { type: DataTypes.STRING },
+    description: { type: DataTypes.TEXT },
     price: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-    // ... el resto de tus campos (barcode, etc)
+    cost: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+    is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
+    category_id: { type: DataTypes.INTEGER }
   }, {
     tableName: 'products',
     underscored: true,
-    timestamps: true, // 👈 IMPORTANTE: Esto debe estar en TRUE
-    paranoid: true    // 👈 El blindaje que pediste
+    timestamps: true, // Obligatorio para Soft Delete
+    paranoid: true    // Soft Delete activado correctamente aquí
   });
 
   return Product;

@@ -1,17 +1,10 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// Configuración común para proteger tablas
-const protectSchema = {
-  paranoid: true,      // Activa Soft Delete (añade deleted_at)
-  timestamps: true,    // Mantiene created_at y updated_at
-  underscored: true    // Usa snake_case en la DB (branch_id en vez de branchId)
-};
-
 // ===== AUTH =====
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
-const Permission = require("./permission")(sequelize, DataTypes);
+const Permission = require("./permission")(sequelize, DataTypes); // Verifica si el archivo es permission.js o Permission.js
 const UserRole = require("./user_role")(sequelize, DataTypes);
 
 let RolePermission = null;
@@ -29,30 +22,22 @@ const StockBalance = require("./StockBalance")(sequelize, DataTypes);
 const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 
-// ===== POS (NUEVOS) =====
+// ===== POS =====
 const Sale = require("./Sale")(sequelize, DataTypes);
 const SaleItem = require("./SaleItem")(sequelize, DataTypes);
 const Payment = require("./Payment")(sequelize, DataTypes);
 
-// ==========================================
-// BLINDAJE: Impedir supresión física
-// ==========================================
-// Esto asegura que al llamar a .destroy(), solo se marque como eliminado
-const modelsToProtect = [Product, Category, Sale, StockBalance, Warehouse, Branch];
-modelsToProtect.forEach(model => {
-  model.options.paranoid = true;
-});
+// =====================
+// Associations
+// =====================
 
-// =====================
-// AUTH Associations
-// =====================
+// Auth
 User.belongsToMany(Role, {
   through: { model: UserRole, timestamps: false },
   foreignKey: "user_id",
   otherKey: "role_id",
   as: "roles",
 });
-
 Role.belongsToMany(User, {
   through: { model: UserRole, timestamps: false },
   foreignKey: "role_id",
@@ -67,25 +52,12 @@ if (RolePermission) {
     otherKey: "permission_id",
     as: "permissions",
   });
-  Permission.belongsToMany(Role, {
-    through: { model: RolePermission, timestamps: false },
-    foreignKey: "permission_id",
-    otherKey: "role_id",
-    as: "roles",
-  });
 }
 
-// =====================
-// INVENTORY & POS Associations
-// =====================
-Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
-Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
-
+// Inventory
 Product.belongsTo(Category, { foreignKey: "category_id", as: "category" });
 Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
-
 Product.hasMany(ProductImage, { foreignKey: "product_id", as: "images" });
-ProductImage.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
 Warehouse.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
 Branch.hasMany(Warehouse, { foreignKey: "branch_id", as: "warehouses" });
@@ -102,10 +74,6 @@ SaleItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
 Sale.hasMany(Payment, { foreignKey: "sale_id", as: "payments" });
 Payment.belongsTo(Sale, { foreignKey: "sale_id" });
-
-// Stock Movements
-StockMovement.hasMany(StockMovementItem, { foreignKey: "movement_id", as: "items" });
-StockMovementItem.belongsTo(StockMovement, { foreignKey: "movement_id", as: "movement" });
 
 module.exports = {
   sequelize,
