@@ -7,38 +7,49 @@ async function createSale(req, res, next) {
 
     console.log("💰 [POS] Procesando venta...");
 
-    // 1. Iniciar Transacción
     t = await sequelize.transaction();
 
-    // 2. Crear Cabecera (Estado 'PAID' según tu ENUM)
+    // 1. Calculamos totales PREVIOS para poder crear la cabecera
+    // (Aunque luego actualicemos, es mejor tener valores iniciales)
+    let calculatedTotal = 0;
+    items.forEach(i => {
+      calculatedTotal += (Number(i.quantity) * Number(i.unit_price));
+    });
+
+    // 2. Crear Cabecera
     const sale = await Sale.create({
       branch_id: branch_id || 1, 
       user_id: user_id || 1,     
       customer_name: customer_name || "Consumidor Final",
-      total: 0, 
-      paid_total: 0, // Importante inicializar
-      status: 'PAID', // ✅ Ajustado a tu ENUM
+      
+      // Llenamos los campos obligatorios NO NULL de tu DB
+      subtotal: calculatedTotal, // Asumimos subtotal = total por ahora (sin impuestos separados)
+      tax_total: 0,
+      discount_total: 0,
+      total: calculatedTotal,
+      
+      paid_total: 0, // Lo actualizamos después de procesar pagos
+      change_total: 0,
+      
+      status: 'PAID', 
       sold_at: new Date()
     }, { transaction: t });
-
-    let calculatedTotal = 0;
 
     // 3. Insertar Items
     for (const item of items) {
       const qty = Number(item.quantity);
       const price = Number(item.unit_price);
-      const subtotal = qty * price;
+      const lineTotal = qty * price;
       
-      calculatedTotal += subtotal;
-
       await SaleItem.create({
         sale_id: sale.id,
         product_id: item.product_id,
         quantity: qty,
         unit_price: price,
-        line_total: subtotal, // ✅ Tu tabla usa line_total, no subtotal
-        // Si el frontend enviara el nombre, lo guardaríamos aquí:
-        // product_name_snapshot: item.name 
+        
+        // USAMOS EL NOMBRE CORRECTO DE LA DB
+        line_total: lineTotal, 
+        product_name_snapshot: item.product_name_snapshot || "Item"
       }, { transaction: t });
     }
 
@@ -51,34 +62,26 @@ async function createSale(req, res, next) {
       await Payment.create({
         sale_id: sale.id,
         amount: amount,
-        method: p.method // ✅ Tu tabla usa 'method'
+        
+        // USAMOS EL NOMBRE CORRECTO DE LA DB
+        method: p.method 
       }, { transaction: t });
     }
 
-    // 5. Actualizar totales finales en la cabecera
-    sale.total = calculatedTotal;
-    sale.paid_total = totalPaid; // ✅ Llenamos paid_total según tu esquema
-    
-    // Si pagó menos del total, podríamos cambiar estado, pero por ahora asumimos PAID
-    if (totalPaid >= calculatedTotal) {
-        sale.status = 'PAID';
-    } else {
-        sale.status = 'DRAFT'; // O lo dejamos en PAID según tu lógica de negocio
-    }
-
+    // 5. Actualizar totales finales
+    sale.paid_total = totalPaid;
+    sale.change_total = totalPaid - calculatedTotal; // Vuelto
     await sale.save({ transaction: t });
 
-    // 6. Commit
     await t.commit();
 
-    console.log(`✅ [POS] Venta #${sale.id} guardada. Total: $${calculatedTotal}`);
+    console.log(`✅ [POS] Venta #${sale.id} guardada correctamente.`);
     
     res.json({ ok: true, data: sale });
 
   } catch (e) {
     if (t) await t.rollback();
-    console.error("❌ [POS ERROR]", e);
-    // Mejorar el mensaje de error para el frontend
+    console.error("❌ [POS ERROR] Detalles:", e); // Esto mostrará el error exacto en consola
     res.status(500).json({ ok: false, message: e.message });
   }
 }
