@@ -1,26 +1,63 @@
-exports.upload = async (req, res, next) => {
+const AWS = require("aws-sdk");
+const crypto = require("crypto");
+const path = require("path");
+const { ProductImage } = require("../models");
+
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env ${name}`);
+  return v;
+}
+
+function s3Client() {
+  return new AWS.S3({
+    endpoint: mustEnv("S3_ENDPOINT"),
+    accessKeyId: mustEnv("S3_ACCESS_KEY"),
+    secretAccessKey: mustEnv("S3_SECRET_KEY"),
+    s3ForcePathStyle: true,
+    signatureVersion: "v4",
+    sslEnabled: true,
+    region: process.env.S3_REGION || "us-east-1",
+  });
+}
+
+function publicUrlFor(key) {
+  const base = process.env.S3_PUBLIC_BASE_URL || process.env.S3_ENDPOINT;
+  const bucket = mustEnv("S3_BUCKET");
+  return `${String(base).replace(/\/$/, "")}/${bucket}/${key}`;
+}
+
+// --- FUNCIONES ---
+
+async function listByProduct(req, res, next) {
   try {
-    const productId = toInt(req.body.productId, 0);
-    
-    // Usamos req.file (que la ruta ya extrajo de req.files)
-    if (!req.file) {
-      return res.status(400).json({ ok: false, message: "No se recibió archivo en el campo 'files'" });
+    const items = await ProductImage.findAll({
+      where: { product_id: req.params.id },
+      order: [["sort_order", "ASC"]],
+    });
+    res.json({ ok: true, items });
+  } catch (e) { next(e); }
+}
+
+async function upload(req, res, next) {
+  try {
+    const productId = req.params.id;
+    const file = (req.files && req.files.length > 0) ? req.files[0] : null;
+
+    if (!file) {
+      return res.status(400).json({ ok: false, message: "No se recibió archivo" });
     }
 
-    console.log(`[UPLOAD] Procesando archivo: ${req.file.originalname} para producto ${productId}`);
-
-    const bucket = mustEnv("S3_BUCKET");
     const s3 = s3Client();
-    
-    const ext = path.extname(req.file.originalname).toLowerCase() || ".jpg";
+    const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
     const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
 
     await s3.putObject({
-      Bucket: bucket,
+      Bucket: mustEnv("S3_BUCKET"),
       Key: key,
-      Body: req.file.buffer,
-      ContentType: req.file.mimetype,
-      ACL: "public-read" 
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: "public-read"
     }).promise();
 
     const img = await ProductImage.create({
@@ -30,9 +67,11 @@ exports.upload = async (req, res, next) => {
     });
 
     res.status(201).json({ ok: true, item: img });
-
   } catch (e) {
-    console.error("[CONTROLLER ERROR]", e);
-    next(e);
+    console.error("❌ UPLOAD ERROR:", e);
+    res.status(500).json({ ok: false, message: e.message });
   }
-};
+}
+
+// ✅ EXPORTACIÓN CLAVE
+module.exports = { listByProduct, upload };
