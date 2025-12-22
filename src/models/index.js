@@ -1,16 +1,17 @@
+// src/models/index.js
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
-// ===== DETECCIÓN DE MODELOS SEGÚN TUS ARCHIVOS REALES =====
+// ===== MODELOS =====
 const User = require("./User")(sequelize, DataTypes);
 const Role = require("./Role")(sequelize, DataTypes);
 const Permission = require("./permission")(sequelize, DataTypes);
 const UserRole = require("./user_role")(sequelize, DataTypes);
 
-// ✅ NUEVO: user_branches
+// ✅ user_branches
 const UserBranch = require("./UserBranch")(sequelize, DataTypes);
 
-// El archivo en tu imagen es "role_permission.js"
+// role_permission.js (puede no existir)
 let RolePermission = null;
 try {
   RolePermission = require("./role_permission")(sequelize, DataTypes);
@@ -18,6 +19,7 @@ try {
   console.log("⚠️ RolePermission no cargado");
 }
 
+// Inventory
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
 const ProductImage = require("./ProductImage")(sequelize, DataTypes);
@@ -36,7 +38,7 @@ const Payment = require("./payment.model")(sequelize, DataTypes);
 // ASOCIACIONES
 // ==========================================
 
-// Auth
+// Auth: Users ↔ Roles
 User.belongsToMany(Role, {
   through: { model: UserRole, timestamps: false },
   foreignKey: "user_id",
@@ -50,6 +52,7 @@ Role.belongsToMany(User, {
   as: "users",
 });
 
+// Roles ↔ Permissions (si existe tabla puente)
 if (RolePermission) {
   Role.belongsToMany(Permission, {
     through: { model: RolePermission, timestamps: false },
@@ -65,7 +68,7 @@ if (RolePermission) {
   });
 }
 
-// ✅ Usuarios ↔ Sucursales (user_branches)
+// ✅ Users ↔ Branches (user_branches)
 User.belongsToMany(Branch, {
   through: { model: UserBranch, timestamps: false },
   foreignKey: "user_id",
@@ -79,10 +82,11 @@ Branch.belongsToMany(User, {
   as: "users",
 });
 
-// Inventory & Categorías
+// Categorías (recursivo)
 Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
 Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
 
+// Productos
 Product.belongsTo(Category, { foreignKey: "category_id", as: "category" });
 Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
 
@@ -97,7 +101,7 @@ Branch.hasMany(Warehouse, { foreignKey: "branch_id", as: "warehouses" });
 StockBalance.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 StockBalance.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
-// POS Links
+// POS: Sale
 Sale.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
 Sale.belongsTo(User, { foreignKey: "user_id", as: "user" });
 
@@ -106,9 +110,10 @@ SaleItem.belongsTo(Sale, { foreignKey: "sale_id", as: "sale" });
 
 SaleItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
-// ✅ IMPORTANTE: ya tenés warehouse_id NOT NULL + FK en BD
+// ✅ warehouse_id NOT NULL + FK en BD
 SaleItem.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 
+// ✅ Pagos (ALIAS CLAVE para dashboard)
 Sale.hasMany(Payment, { foreignKey: "sale_id", as: "payments" });
 Payment.belongsTo(Sale, { foreignKey: "sale_id", as: "sale" });
 
@@ -116,7 +121,7 @@ Payment.belongsTo(Sale, { foreignKey: "sale_id", as: "sale" });
 StockMovement.hasMany(StockMovementItem, { foreignKey: "movement_id", as: "items" });
 StockMovementItem.belongsTo(StockMovement, { foreignKey: "movement_id", as: "movement" });
 
-// ✅ Recomendado (auditoría)
+// ✅ Auditoría
 StockMovement.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 StockMovement.belongsTo(User, { foreignKey: "created_by", as: "creator" });
 
@@ -127,7 +132,7 @@ module.exports = {
   Permission,
   UserRole,
   RolePermission,
-  UserBranch, // ✅ exportado
+  UserBranch,
 
   Category,
   Product,

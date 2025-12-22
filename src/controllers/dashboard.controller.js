@@ -40,23 +40,14 @@ async function inventory(req, res, next) {
     const totalProducts = await Product.count();
     const activeProducts = await Product.count({ where: { is_active: 1 } });
 
-    // 🔒 Blindado: si el modelo NO tiene price_list, no lo usa.
-    const hasPrice = !!Product.rawAttributes?.price;
-    const hasPriceList = !!Product.rawAttributes?.price_list;
-
-    const priceConds = [];
-
-    if (hasPriceList) {
-      priceConds.push({ [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] });
-    }
-    if (hasPrice) {
-      priceConds.push({ [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] });
-    }
-
-    // Si no hay ninguna columna de precio, noPriceProducts = 0 (para no romper)
-    const noPriceProducts = priceConds.length
-      ? await Product.count({ where: { [Op.and]: priceConds } })
-      : 0;
+    const noPriceProducts = await Product.count({
+      where: {
+        [Op.and]: [
+          { [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] },
+          { [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] },
+        ],
+      },
+    });
 
     const categories = await Category.count();
 
@@ -92,7 +83,6 @@ async function inventory(req, res, next) {
       },
     });
   } catch (e) {
-    console.error("❌ [DASHBOARD INVENTORY ERROR]", e);
     next(e);
   }
 }
@@ -121,11 +111,13 @@ async function sales(req, res, next) {
     const avgTicket = todayCount > 0 ? todayTotal / todayCount : 0;
 
     // --- Pagos hoy por método ---
+    // ✅ FIX: Sale está asociado a Payment con alias "sale"
     const paymentRows = await Payment.findAll({
       attributes: ["method", [fn("SUM", col("amount")), "sum_amount"]],
       include: [
         {
           model: Sale,
+          as: "sale", // ✅ ESTE es el fix del error
           attributes: [],
           required: true,
           where: { sold_at: { [Op.between]: [from, to] }, status: "PAID" },
@@ -156,10 +148,7 @@ async function sales(req, res, next) {
     start.setHours(0, 0, 0, 0);
 
     const salesByDayRows = await Sale.findAll({
-      attributes: [
-        [fn("DATE", col("sold_at")), "day"],
-        [fn("SUM", col("total")), "sum_total"],
-      ],
+      attributes: [[fn("DATE", col("sold_at")), "day"], [fn("SUM", col("total")), "sum_total"]],
       where: { sold_at: { [Op.gte]: start }, status: "PAID" },
       group: [fn("DATE", col("sold_at"))],
       order: [[fn("DATE", col("sold_at")), "ASC"]],
