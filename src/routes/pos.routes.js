@@ -1,6 +1,7 @@
 // src/routes/pos.routes.js
 const router = require("express").Router();
 
+// ✅ Prevención: si falta auth.middleware, no crashea
 function resolveRequireAuth() {
   try {
     const authMw = require("../middlewares/auth.middleware");
@@ -24,27 +25,20 @@ function resolveRequireAuth() {
 
 const requireAuth = resolveRequireAuth();
 
+// ✅ branchContext robusto (export default function)
+const branchContext = require("../middlewares/branchContext.middleware");
+
 const {
   listSales,
   getSaleById,
-  createSale,   // ✅ NUEVO (no rompe nada)
+  createSale,
   deleteSale,
 } = require("../controllers/posSales.controller");
 
-// =======================
-// Ventas
-// =======================
-
-// Listado
-router.get("/sales", requireAuth, listSales);
-
-// Detalle
-router.get("/sales/:id", requireAuth, getSaleById);
-
-// ✅ CREAR (checkout POS)
-router.post("/sales", requireAuth, createSale);
-
-// Borrar (admin más adelante)
-router.delete("/sales/:id", requireAuth, deleteSale);
+// ⛳ Importante: requireAuth → branchContext → handlers
+router.get("/sales", requireAuth, branchContext, listSales);
+router.get("/sales/:id", requireAuth, branchContext, getSaleById);
+router.post("/sales", requireAuth, branchContext, createSale);
+router.delete("/sales/:id", requireAuth, branchContext, deleteSale);
 
 module.exports = router;

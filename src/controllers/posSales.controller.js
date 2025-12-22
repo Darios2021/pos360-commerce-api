@@ -96,8 +96,14 @@ function getAuthUserId(req) {
  */
 function getAuthBranchId(req) {
   return (
+    // ✅ NUEVO: soportar branchContext.middleware.js (req.ctx.branchId)
+    toInt(req?.ctx?.branchId, 0) ||
+    toInt(req?.ctx?.branch_id, 0) ||
+
+    // ✅ si algún día lo agregás al token o a req.user
     toInt(req?.user?.branch_id, 0) ||
     toInt(req?.user?.branchId, 0) ||
+
     toInt(req?.auth?.branch_id, 0) ||
     toInt(req?.auth?.branchId, 0) ||
     toInt(req?.branch?.id, 0) ||
@@ -111,14 +117,18 @@ function getAuthBranchId(req) {
 /**
  * 🏬 Resolver warehouse_id obligatorio:
  * 1) item.warehouse_id
- * 2) req.warehouse / req.warehouseId / req.branchContext.*
- * 3) primer depósito de la sucursal en DB (Warehouses where branch_id)
+ * 2) req.ctx / req.warehouse / req.warehouseId / req.branchContext.*
+ * 3) primer depósito de la sucursal en DB
  */
 async function resolveWarehouseId(req, branch_id, itemWarehouseId, tx) {
   const direct = toInt(itemWarehouseId, 0);
   if (direct > 0) return direct;
 
   const fromReq =
+    // ✅ NUEVO: soportar branchContext.middleware.js
+    toInt(req?.ctx?.warehouseId, 0) ||
+    toInt(req?.ctx?.warehouse_id, 0) ||
+
     toInt(req?.warehouse?.id, 0) ||
     toInt(req?.warehouseId, 0) ||
     toInt(req?.branchContext?.warehouse_id, 0) ||
@@ -129,7 +139,6 @@ async function resolveWarehouseId(req, branch_id, itemWarehouseId, tx) {
 
   if (fromReq > 0) return fromReq;
 
-  // DB fallback: primer depósito de la sucursal
   const wh = await Warehouse.findOne({
     where: { branch_id: toInt(branch_id, 0) },
     order: [["id", "ASC"]],
@@ -159,7 +168,6 @@ async function assertWarehouseInBranch(warehouse_id, branch_id, tx) {
 
 // ============================
 // GET /api/v1/pos/sales
-// (filtrado por sucursal del usuario)
 // ============================
 async function listSales(req, res, next) {
   try {
@@ -182,7 +190,7 @@ async function listSales(req, res, next) {
     const from = parseDateTime(req.query.from);
     const to = parseDateTime(req.query.to);
 
-    const where = { branch_id }; // ✅ enforce
+    const where = { branch_id };
 
     if (status) where.status = status;
 
@@ -225,7 +233,6 @@ async function listSales(req, res, next) {
 
 // ============================
 // GET /api/v1/pos/sales/:id
-// (bloquea cross-branch)
 // ============================
 async function getSaleById(req, res, next) {
   try {
@@ -287,7 +294,6 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
-// (branch_id desde usuario, valida warehouse del branch, valida product.branch_id si existe)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -328,7 +334,6 @@ async function createSale(req, res, next) {
       });
     }
 
-    // Normalizar items + resolver warehouse_id obligatorio
     const normItems = [];
     for (const it of items) {
       const product_id = toInt(it?.product_id || it?.productId, 0);
@@ -351,7 +356,6 @@ async function createSale(req, res, next) {
       });
     }
 
-    // validación básica + warehouse obligatorio + warehouse pertenece al branch
     for (const it of normItems) {
       if (!it.product_id || it.quantity <= 0 || it.unit_price < 0) {
         await t.rollback();
@@ -378,7 +382,6 @@ async function createSale(req, res, next) {
       }
     }
 
-    // ✅ Validar Product.branch_id si existe (cuando agregues columna)
     if (Product?.rawAttributes?.branch_id) {
       const ids = [...new Set(normItems.map((x) => x.product_id))];
       const prods = await Product.findAll({
@@ -418,7 +421,7 @@ async function createSale(req, res, next) {
     const change_total = Math.max(0, paid_total - total);
 
     const salePayload = {
-      branch_id, // ✅ enforce del usuario
+      branch_id,
       user_id,
       customer_name,
       status,
@@ -431,7 +434,6 @@ async function createSale(req, res, next) {
       change_total,
     };
 
-    // sale_number si lo mandan
     if (typeof req.body?.sale_number === "string" && req.body.sale_number.trim()) {
       salePayload.sale_number = req.body.sale_number.trim();
     }
@@ -479,7 +481,6 @@ async function createSale(req, res, next) {
 
 // ============================
 // DELETE /api/v1/pos/sales/:id
-// (bloquea cross-branch)
 // ============================
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
