@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category, Subcategory, ProductImage } = require("../models");
+const { Product, Category, ProductImage } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -22,10 +22,55 @@ function getBranchId(req) {
   );
 }
 
-function pickBody(body = {}) {
-  // whitelist para evitar que te metan cualquier cosa
-  const out = {};
+// ✅ arma includes sólo si la asociación existe en Product.associations
+function buildProductIncludes() {
+  const inc = [];
+  const A = Product?.associations || {};
 
+  // category
+  // soporta alias típicos: "category" o "Category"
+  const catAs = A.category ? "category" : A.Category ? "Category" : null;
+  if (catAs) {
+    const catInclude = { association: catAs, required: false };
+
+    // parent dentro de category (si existe en Category.associations)
+    try {
+      const CatModel = A[catAs]?.target || Category;
+      const CA = CatModel?.associations || {};
+      const parentAs = CA.parent ? "parent" : CA.Parent ? "Parent" : null;
+      if (parentAs) {
+        catInclude.include = [{ association: parentAs, required: false }];
+      }
+    } catch {
+      // no-op
+    }
+
+    inc.push(catInclude);
+  }
+
+  // subcategory (puede llamarse "subcategory" o "sub_category" o "Subcategory")
+  const subAs =
+    A.subcategory ? "subcategory" :
+    A.sub_category ? "sub_category" :
+    A.Subcategory ? "Subcategory" :
+    null;
+
+  if (subAs) inc.push({ association: subAs, required: false });
+
+  // images (puede ser "images" o "productImages" etc.)
+  const imgAs =
+    A.images ? "images" :
+    A.productImages ? "productImages" :
+    A.ProductImages ? "ProductImages" :
+    null;
+
+  if (imgAs) inc.push({ association: imgAs, required: false });
+
+  return inc;
+}
+
+function pickBody(body = {}) {
+  const out = {};
   const fields = [
     "code",
     "sku",
@@ -55,7 +100,6 @@ function pickBody(body = {}) {
     if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
   }
 
-  // normalizaciones
   if (out.sku != null) out.sku = String(out.sku).trim();
   if (out.barcode != null) out.barcode = String(out.barcode).trim() || null;
   if (out.code != null) out.code = String(out.code).trim() || null;
@@ -109,7 +153,6 @@ async function list(req, res, next) {
 
     if (q) {
       const qNum = toFloat(q, NaN);
-
       where[Op.or] = [
         { name: { [Op.like]: `%${q}%` } },
         { sku: { [Op.like]: `%${q}%` } },
@@ -118,28 +161,17 @@ async function list(req, res, next) {
         { brand: { [Op.like]: `%${q}%` } },
         { model: { [Op.like]: `%${q}%` } },
       ];
-
-      if (Number.isFinite(qNum)) {
-        where[Op.or].push({ id: toInt(qNum, 0) });
-        where[Op.or].push({ price: qNum });
-      }
+      if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
+
+    const include = buildProductIncludes();
 
     const { count, rows } = await Product.findAndCountAll({
       where,
       order: [["id", "DESC"]],
       limit,
       offset,
-      include: [
-        {
-          model: Category,
-          as: "category",
-          required: false,
-          include: [{ model: Category, as: "parent", required: false }],
-        },
-        { model: Subcategory, as: "subcategory", required: false },
-        { model: ProductImage, as: "images", required: false },
-      ],
+      include,
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
@@ -171,19 +203,9 @@ async function getOne(req, res, next) {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
-    const p = await Product.findByPk(id, {
-      include: [
-        {
-          model: Category,
-          as: "category",
-          required: false,
-          include: [{ model: Category, as: "parent", required: false }],
-        },
-        { model: Subcategory, as: "subcategory", required: false },
-        { model: ProductImage, as: "images", required: false },
-      ],
-    });
+    const include = buildProductIncludes();
 
+    const p = await Product.findByPk(id, { include });
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
     if (toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
@@ -202,7 +224,6 @@ async function getOne(req, res, next) {
 
 // ============================
 // POST /api/v1/products
-// branch_id SIEMPRE desde ctx (no desde body)
 // ============================
 async function create(req, res, next) {
   try {
@@ -224,7 +245,6 @@ async function create(req, res, next) {
       });
     }
 
-    // enforce branch
     payload.branch_id = branch_id;
 
     const created = await Product.create(payload);
@@ -236,7 +256,6 @@ async function create(req, res, next) {
 
 // ============================
 // PATCH /api/v1/products/:id
-// bloquea cross-branch + no permite cambiar branch_id
 // ============================
 async function update(req, res, next) {
   try {
@@ -264,22 +283,12 @@ async function update(req, res, next) {
     }
 
     const patch = pickBody(req.body || {});
-    delete patch.branch_id; // seguridad: no permitir cambiar sucursal
+    delete patch.branch_id;
 
     await p.update(patch);
 
-    const updated = await Product.findByPk(id, {
-      include: [
-        {
-          model: Category,
-          as: "category",
-          required: false,
-          include: [{ model: Category, as: "parent", required: false }],
-        },
-        { model: Subcategory, as: "subcategory", required: false },
-        { model: ProductImage, as: "images", required: false },
-      ],
-    });
+    const include = buildProductIncludes();
+    const updated = await Product.findByPk(id, { include });
 
     return res.json({ ok: true, message: "Producto actualizado", data: updated });
   } catch (e) {
