@@ -1,5 +1,5 @@
 // src/controllers/pos.controller.js
-const { Op, literal } = require("sequelize");
+const { literal } = require("sequelize");
 const {
   sequelize,
   Sale,
@@ -16,20 +16,61 @@ function toNum(v, def = 0) {
   return Number.isFinite(n) ? n : def;
 }
 
+function toInt(v, def = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : def;
+}
+
+/**
+ * Resuelve branchId/warehouseId de forma robusta:
+ * 1) req.ctx (si existe)
+ * 2) req.body.branch_id / req.body.warehouse_id
+ * 3) req.query.branch_id / req.query.warehouse_id
+ */
+function resolvePosContext(req) {
+  const branchId =
+    toInt(req?.ctx?.branchId, 0) ||
+    toInt(req?.body?.branch_id, 0) ||
+    toInt(req?.query?.branch_id, 0);
+
+  const warehouseId =
+    toInt(req?.ctx?.warehouseId, 0) ||
+    toInt(req?.body?.warehouse_id, 0) ||
+    toInt(req?.query?.warehouse_id, 0);
+
+  return { branchId, warehouseId };
+}
+
 async function getContext(req, res) {
+  const { branchId, warehouseId } = resolvePosContext(req);
+
   return res.json({
     ok: true,
     data: {
-      user: { id: req.user.id, email: req.user.email, username: req.user.username },
-      branch: req.ctx.branch,
-      warehouse: req.ctx.warehouse,
+      user: req.user
+        ? { id: req.user.id, email: req.user.email, username: req.user.username }
+        : null,
+      // si tu middleware setea req.ctx.branch/warehouse, lo devolvemos
+      branch: req?.ctx?.branch || (branchId ? { id: branchId } : null),
+      warehouse: req?.ctx?.warehouse || (warehouseId ? { id: warehouseId } : null),
+      // ids explícitos (para debug)
+      branchId: branchId || null,
+      warehouseId: warehouseId || null,
     },
   });
 }
 
 async function listProductsForPos(req, res) {
   try {
-    const warehouseId = req.ctx.warehouseId;
+    const { warehouseId } = resolvePosContext(req);
+
+    if (!warehouseId) {
+      return res.status(400).json({
+        ok: false,
+        code: "WAREHOUSE_REQUIRED",
+        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá req.ctx.warehouseId.",
+      });
+    }
 
     const q = String(req.query.q || "").trim();
     const limit = Math.min(Math.max(parseInt(req.query.limit || "24", 10), 1), 200);
@@ -111,9 +152,28 @@ async function createSale(req, res) {
     const customer_name = body.customer_name || "Consumidor Final";
     const note = body.note || null;
 
+    if (!req.user?.id) {
+      return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No autenticado" });
+    }
+
     const userId = req.user.id;
-    const branchId = req.ctx.branchId;
-    const warehouseId = req.ctx.warehouseId;
+    const { branchId, warehouseId } = resolvePosContext(req);
+
+    if (!branchId) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "Falta branch_id (sucursal). Enviá branch_id o configurá req.ctx.branchId.",
+      });
+    }
+
+    if (!warehouseId) {
+      return res.status(400).json({
+        ok: false,
+        code: "WAREHOUSE_REQUIRED",
+        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá req.ctx.warehouseId.",
+      });
+    }
 
     if (items.length === 0) {
       return res.status(400).json({ ok: false, code: "EMPTY_ITEMS", message: "Venta sin items" });
@@ -126,9 +186,21 @@ async function createSale(req, res) {
     }));
 
     for (const it of normalizedItems) {
-      if (!it.product_id) throw Object.assign(new Error("Item inválido: falta product_id"), { httpStatus: 400, code: "INVALID_ITEM" });
-      if (!Number.isFinite(it.quantity) || it.quantity <= 0) throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), { httpStatus: 400, code: "INVALID_ITEM" });
-      if (!Number.isFinite(it.unit_price) || it.unit_price <= 0) throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), { httpStatus: 400, code: "INVALID_ITEM" });
+      if (!it.product_id)
+        throw Object.assign(new Error("Item inválido: falta product_id"), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
+      if (!Number.isFinite(it.quantity) || it.quantity <= 0)
+        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
+      if (!Number.isFinite(it.unit_price) || it.unit_price <= 0)
+        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
     }
 
     let subtotal = 0;
@@ -167,14 +239,15 @@ async function createSale(req, res) {
       { transaction: t }
     );
 
-    // ✅ PRO TIP: lock por producto para evitar doble venta simultánea con mismo stock
     for (const it of normalizedItems) {
       const p = await Product.findByPk(it.product_id, { transaction: t });
       if (!p) {
-        throw Object.assign(new Error(`Producto no existe: id=${it.product_id}`), { httpStatus: 400, code: "PRODUCT_NOT_FOUND" });
+        throw Object.assign(new Error(`Producto no existe: id=${it.product_id}`), {
+          httpStatus: 400,
+          code: "PRODUCT_NOT_FOUND",
+        });
       }
 
-      // Traigo el balance con lock (si no existe, no hay stock cargado)
       const sb = await StockBalance.findOne({
         where: { warehouse_id: warehouseId, product_id: it.product_id },
         transaction: t,
@@ -182,20 +255,19 @@ async function createSale(req, res) {
       });
 
       if (!sb) {
-        throw Object.assign(new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${warehouseId}`), {
-          httpStatus: 409,
-          code: "STOCK_BALANCE_MISSING",
-        });
+        throw Object.assign(
+          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${warehouseId}`),
+          { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
+        );
       }
 
       if (Number(sb.qty) < it.quantity) {
-        throw Object.assign(new Error(`Stock insuficiente (depósito ${warehouseId}) para producto ${p.sku || p.id}`), {
-          httpStatus: 409,
-          code: "STOCK_INSUFFICIENT",
-        });
+        throw Object.assign(
+          new Error(`Stock insuficiente (depósito ${warehouseId}) para producto ${p.sku || p.id}`),
+          { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
+        );
       }
 
-      // ✅ actualizo con literal (el trigger también protege)
       await sb.update({ qty: literal(`qty - ${it.quantity}`) }, { transaction: t });
 
       const lineTotal = it.quantity * it.unit_price;
@@ -235,11 +307,17 @@ async function createSale(req, res) {
       const method = String(pay.method || "CASH").toUpperCase();
 
       if (!Number.isFinite(amount) || amount <= 0) {
-        throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), { httpStatus: 400, code: "INVALID_PAYMENT" });
+        throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), {
+          httpStatus: 400,
+          code: "INVALID_PAYMENT",
+        });
       }
 
       if (!["CASH", "TRANSFER", "CARD", "QR", "OTHER"].includes(method)) {
-        throw Object.assign(new Error(`Pago inválido: method=${method}`), { httpStatus: 400, code: "INVALID_PAYMENT_METHOD" });
+        throw Object.assign(new Error(`Pago inválido: method=${method}`), {
+          httpStatus: 400,
+          code: "INVALID_PAYMENT_METHOD",
+        });
       }
 
       totalPaid += amount;

@@ -13,7 +13,6 @@ function toFloat(v, d = 0) {
 }
 
 function parseDateTime(v) {
-  // acepta "YYYY-MM-DD" o "YYYY-MM-DD HH:mm:ss"
   if (!v) return null;
   const s = String(v).trim();
   const d = new Date(s.replace(" ", "T"));
@@ -46,7 +45,6 @@ async function listSales(req, res, next) {
     else if (from) where.sold_at = { [Op.gte]: from };
     else if (to) where.sold_at = { [Op.lte]: to };
 
-    // búsqueda simple (cliente / sale_number / id / total)
     if (q) {
       const qNum = toFloat(q, NaN);
       where[Op.or] = [
@@ -54,7 +52,6 @@ async function listSales(req, res, next) {
         { sale_number: { [Op.like]: `%${q}%` } },
       ];
 
-      // si es número, busca por id o total aprox
       if (Number.isFinite(qNum)) {
         where[Op.or].push({ id: toInt(qNum, 0) });
         where[Op.or].push({ total: qNum });
@@ -66,9 +63,7 @@ async function listSales(req, res, next) {
       order: [["id", "DESC"]],
       limit,
       offset,
-      include: [
-        { model: Payment, as: "payments", required: false },
-      ],
+      include: [{ model: Payment, as: "payments", required: false }],
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
@@ -129,7 +124,6 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // DELETE /api/v1/pos/sales/:id
-// (ojo: esto borra realmente)
 // ============================
 async function deleteSale(req, res, next) {
   try {
