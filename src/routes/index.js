@@ -2,6 +2,7 @@
 const router = require("express").Router();
 
 const authRoutes = require("./auth.routes");
+const { requireAuth } = require("../middlewares/auth");
 
 // =====================
 // Health (PUBLICO) - primero siempre
@@ -14,50 +15,6 @@ router.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
-
-// =====================
-// Resolver middleware auth sin romper el server
-// (si no existe, NO crashea: devuelve 500 con mensaje)
-// =====================
-function resolveRequireAuth() {
-  let authMw;
-  try {
-    authMw = require("../middlewares/auth.middleware");
-  } catch (e) {
-    console.error("❌ No existe ../middlewares/auth.middleware:", e?.message || e);
-    return function missingAuthMw(req, res) {
-      return res.status(500).json({
-        ok: false,
-        code: "AUTH_MW_MISSING",
-        message: "Auth middleware missing: ../middlewares/auth.middleware",
-      });
-    };
-  }
-
-  const candidate =
-    authMw?.requireAuth ||
-    authMw?.authenticate ||
-    authMw?.auth ||
-    authMw?.authenticateToken ||
-    authMw?.default ||
-    authMw;
-
-  if (typeof candidate !== "function") {
-    console.error("❌ Auth middleware export NO es function. Keys:", Object.keys(authMw || {}));
-    return function badAuthMw(req, res) {
-      return res.status(500).json({
-        ok: false,
-        code: "AUTH_MW_INVALID",
-        message: "Auth middleware export is not a function",
-        keys: Object.keys(authMw || {}),
-      });
-    };
-  }
-
-  return candidate;
-}
-
-const requireAuth = resolveRequireAuth();
 
 // =====================
 // Auth (PUBLICO)
@@ -84,7 +41,7 @@ router.use("/warehouses", requireAuth, require("./warehouses.routes"));
 router.use("/stock", requireAuth, require("./stock.routes"));
 
 // =====================
-// POS (PROTEGIDO) ✅ ESTA ERA LA PARTE QUE FALTABA
+// POS (PROTEGIDO)
 // =====================
 router.use("/pos", requireAuth, require("../modules/pos/pos.routes"));
 
