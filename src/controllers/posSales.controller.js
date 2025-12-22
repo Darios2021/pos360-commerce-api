@@ -36,6 +36,60 @@ function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
+/**
+ * 🔐 Obtiene el user_id desde cualquier middleware / JWT conocido
+ * NO valida token (eso ya lo hace requireAuth)
+ */
+function getAuthUserId(req) {
+  const candidates = [
+    req?.user?.id,
+    req?.user?.user_id,
+    req?.user?.sub,
+    req?.auth?.id,
+    req?.auth?.userId,
+    req?.auth?.user_id,
+    req?.jwt?.id,
+    req?.jwt?.userId,
+    req?.jwt?.sub,
+    req?.tokenPayload?.id,
+    req?.tokenPayload?.userId,
+    req?.tokenPayload?.sub,
+    req?.session?.user?.id,
+    req?.session?.userId,
+    req?.userId,
+  ];
+
+  for (const v of candidates) {
+    const n = toInt(v, 0);
+    if (n > 0) return n;
+  }
+
+  // Fallback: decodificar payload del JWT (ya validado por requireAuth)
+  try {
+    const h = String(req.headers?.authorization || "");
+    const m = h.match(/^Bearer\s+(.+)$/i);
+    const token = m?.[1];
+    if (!token) return 0;
+
+    const parts = token.split(".");
+    if (parts.length !== 3) return 0;
+
+    const payloadB64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payloadJson = Buffer.from(payloadB64, "base64").toString("utf8");
+    const payload = JSON.parse(payloadJson);
+
+    return (
+      toInt(payload?.id, 0) ||
+      toInt(payload?.userId, 0) ||
+      toInt(payload?.user_id, 0) ||
+      toInt(payload?.sub, 0) ||
+      0
+    );
+  } catch {
+    return 0;
+  }
+}
+
 // ============================
 // GET /api/v1/pos/sales
 // ============================
@@ -144,11 +198,8 @@ async function getSaleById(req, res, next) {
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
-    // 🔒 REQUIRED POR DB
-    const user_id =
-      toInt(req.user?.id, 0) ||
-      toInt(req.auth?.id, 0) ||
-      toInt(req.userId, 0);
+    // 🔐 user_id OBLIGATORIO (resuelto de forma robusta)
+    const user_id = getAuthUserId(req);
 
     if (!user_id) {
       await t.rollback();
@@ -227,7 +278,7 @@ async function createSale(req, res, next) {
     const sale = await Sale.create(
       {
         branch_id,
-        user_id, // ✅ FIX CLAVE
+        user_id,
         customer_name,
         status,
         sold_at,
