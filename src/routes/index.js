@@ -41,6 +41,11 @@ router.use("/warehouses", requireAuth, require("./warehouses.routes"));
 router.use("/stock", requireAuth, require("./stock.routes"));
 
 // =====================
+// DASHBOARD (PROTEGIDO) ✅ KPIs Inventario / Ventas
+// =====================
+router.use("/dashboard", requireAuth, require("./dashboard.routes"));
+
+// =====================
 // POS (PROTEGIDO)
 // =====================
 router.use("/pos", requireAuth, require("../modules/pos/pos.routes"));
