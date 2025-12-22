@@ -31,9 +31,23 @@ function requireAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, env.JWT_SECRET);
 
-    // payload: { sub, email, username, roles, iat, exp }
-    req.user = payload;
-    req.user.roles = normalizeRoles(payload.roles);
+    // payload típico: { sub, email, username, roles, iat, exp }
+    // ✅ normalizamos para que SIEMPRE exista req.user.id numérico
+    const userId = Number(payload?.sub || payload?.id || 0);
+
+    req.user = {
+      ...payload,
+      id: Number.isFinite(userId) && userId > 0 ? userId : undefined,
+      roles: normalizeRoles(payload?.roles),
+    };
+
+    if (!req.user.id) {
+      return res.status(401).json({
+        ok: false,
+        code: "INVALID_TOKEN_PAYLOAD",
+        message: "Token válido pero sin sub/id de usuario.",
+      });
+    }
 
     return next();
   } catch (e) {

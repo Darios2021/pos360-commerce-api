@@ -2,15 +2,16 @@
 const express = require("express");
 const router = express.Router();
 
-const posController = require("./pos.controller");
-const { requireRole } = require("../../middlewares/auth");
+const posController = require("../../controllers/pos.controller");
+const { branchContext } = require("../../middlewares/branchContext.middleware");
 
-// Ventas
-router.get("/sales", posController.listSales);
-router.get("/sales/:id", posController.getSale);
-router.post("/sales", posController.createSale);
+// Contexto de sucursal/depósito del usuario logueado
+router.get("/context", branchContext, posController.getContext);
 
-// ✅ Borrar SOLO admin/super_admin
-router.delete("/sales/:id", requireRole("admin", "super_admin"), posController.deleteSale);
+// Productos para POS (con stock del depósito)
+router.get("/products", branchContext, posController.listProductsForPos);
+
+// Crear venta (descuenta stock + crea movimientos)
+router.post("/sales", branchContext, posController.createSale);
 
 module.exports = router;
