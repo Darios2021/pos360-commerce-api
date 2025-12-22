@@ -1,5 +1,5 @@
 // src/controllers/dashboard.controller.js
-const { Op, fn, col, Sequelize } = require("sequelize");
+const { Op, fn, col } = require("sequelize");
 const { Product, Category, Sale, Payment } = require("../models");
 
 // ===== Helpers =====
@@ -40,15 +40,23 @@ async function inventory(req, res, next) {
     const totalProducts = await Product.count();
     const activeProducts = await Product.count({ where: { is_active: 1 } });
 
-    // Sin precio (price_list<=0 y price<=0)
-    const noPriceProducts = await Product.count({
-      where: {
-        [Op.and]: [
-          { [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] },
-          { [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] },
-        ],
-      },
-    });
+    // 🔒 Blindado: si el modelo NO tiene price_list, no lo usa.
+    const hasPrice = !!Product.rawAttributes?.price;
+    const hasPriceList = !!Product.rawAttributes?.price_list;
+
+    const priceConds = [];
+
+    if (hasPriceList) {
+      priceConds.push({ [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] });
+    }
+    if (hasPrice) {
+      priceConds.push({ [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] });
+    }
+
+    // Si no hay ninguna columna de precio, noPriceProducts = 0 (para no romper)
+    const noPriceProducts = priceConds.length
+      ? await Product.count({ where: { [Op.and]: priceConds } })
+      : 0;
 
     const categories = await Category.count();
 
@@ -84,6 +92,7 @@ async function inventory(req, res, next) {
       },
     });
   } catch (e) {
+    console.error("❌ [DASHBOARD INVENTORY ERROR]", e);
     next(e);
   }
 }
@@ -112,7 +121,6 @@ async function sales(req, res, next) {
     const avgTicket = todayCount > 0 ? todayTotal / todayCount : 0;
 
     // --- Pagos hoy por método ---
-    // ✅ IMPORTANTÍSIMO: NO usamos "as: sale" porque tu asociación Payment.belongsTo(Sale) no tiene alias.
     const paymentRows = await Payment.findAll({
       attributes: ["method", [fn("SUM", col("amount")), "sum_amount"]],
       include: [
@@ -153,14 +161,13 @@ async function sales(req, res, next) {
         [fn("SUM", col("total")), "sum_total"],
       ],
       where: { sold_at: { [Op.gte]: start }, status: "PAID" },
-      group: [fn("DATE", col("sold_at"))], // ✅ más robusto en MySQL
+      group: [fn("DATE", col("sold_at"))],
       order: [[fn("DATE", col("sold_at")), "ASC"]],
       raw: true,
     });
 
     const map = new Map();
     for (const r of salesByDayRows) {
-      // r.day suele venir como 'YYYY-MM-DD'
       map.set(String(r.day), Number(r.sum_total || 0));
     }
 
@@ -177,10 +184,7 @@ async function sales(req, res, next) {
       where: { status: "PAID" },
       order: [["id", "DESC"]],
       limit: 10,
-      include: [
-        // ✅ acá SÍ usamos alias "payments" porque vos lo definiste en Sale.hasMany(Payment, { as: "payments" })
-        { model: Payment, as: "payments", required: false },
-      ],
+      include: [{ model: Payment, as: "payments", required: false }],
     });
 
     return res.json({
