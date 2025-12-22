@@ -27,8 +27,13 @@ const requireAuth = resolveRequireAuth();
 const {
   listSales,
   getSaleById,
+  createSale,   // ✅ NUEVO (no rompe nada)
   deleteSale,
 } = require("../controllers/posSales.controller");
+
+// =======================
+// Ventas
+// =======================
 
 // Listado
 router.get("/sales", requireAuth, listSales);
@@ -36,7 +41,10 @@ router.get("/sales", requireAuth, listSales);
 // Detalle
 router.get("/sales/:id", requireAuth, getSaleById);
 
-// Borrar (si querés: después lo protegemos por rol admin)
+// ✅ CREAR (checkout POS)
+router.post("/sales", requireAuth, createSale);
+
+// Borrar (admin más adelante)
 router.delete("/sales/:id", requireAuth, deleteSale);
 
 module.exports = router;
