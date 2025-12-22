@@ -1,9 +1,14 @@
 // src/middlewares/branchContext.middleware.js
 const { sequelize } = require("../models");
 
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+
 async function branchContext(req, res, next) {
   try {
-    const userId = req.user?.id || req.user?.sub;
+    const userId = toInt(req.user?.id || req.user?.sub, 0);
     if (!userId) {
       return res.status(401).json({
         ok: false,
@@ -12,7 +17,7 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // 1) branch_id desde users (tu DB real)
+    // 1) Branch del usuario (users.branch_id)
     const [[u]] = await sequelize.query(
       `
       SELECT branch_id
@@ -23,20 +28,19 @@ async function branchContext(req, res, next) {
       { replacements: { userId } }
     );
 
-    if (!u?.branch_id) {
+    const branchId = toInt(u?.branch_id, 0);
+    if (!branchId) {
       return res.status(409).json({
         ok: false,
         code: "USER_WITHOUT_BRANCH",
-        message: `El usuario ${userId} no tiene branch_id asignado (users).`,
+        message: `El usuario ${userId} no tiene sucursal asignada (users.branch_id).`,
       });
     }
-
-    const branchId = Number(u.branch_id);
 
     // 2) Branch
     const [[branch]] = await sequelize.query(
       `
-      SELECT id, name
+      SELECT id, name, code, address, city
       FROM branches
       WHERE id = :branchId
       LIMIT 1
@@ -52,10 +56,10 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // 3) Warehouse default (primero por sucursal)
+    // 3) Warehouse default de la sucursal (el primero)
     const [[wh]] = await sequelize.query(
       `
-      SELECT id, name, branch_id
+      SELECT id, code, name, branch_id
       FROM warehouses
       WHERE branch_id = :branchId
       ORDER BY id ASC
@@ -72,13 +76,19 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // ✅ Contexto
+    // ✅ Contexto listo
     req.ctx = {
       branchId,
-      warehouseId: Number(wh.id),
+      warehouseId: toInt(wh.id, 0),
       branch,
       warehouse: wh,
     };
+
+    // ✅ compat para controladores que miran otros nombres
+    req.branch = branch;
+    req.branchId = branchId;
+    req.warehouse = wh;
+    req.warehouseId = toInt(wh.id, 0);
 
     return next();
   } catch (e) {
