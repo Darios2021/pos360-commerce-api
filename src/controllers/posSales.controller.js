@@ -37,7 +37,7 @@ function upper(v) {
 }
 
 /**
- * 🔐 Obtiene el user_id desde cualquier middleware / JWT conocido
+ * 🔐 Obtiene user_id desde middleware o JWT (fallback)
  * NO valida token (eso ya lo hace requireAuth)
  */
 function getAuthUserId(req) {
@@ -88,6 +88,37 @@ function getAuthUserId(req) {
   } catch {
     return 0;
   }
+}
+
+/**
+ * 🏬 Resolver warehouse_id obligatorio:
+ * 1) item.warehouse_id
+ * 2) req.warehouse / req.warehouseId / req.branchContext.*
+ * 3) primer depósito de la sucursal en DB (Warehouses where branch_id)
+ */
+async function resolveWarehouseId(req, branch_id, itemWarehouseId, tx) {
+  const direct = toInt(itemWarehouseId, 0);
+  if (direct > 0) return direct;
+
+  const fromReq =
+    toInt(req?.warehouse?.id, 0) ||
+    toInt(req?.warehouseId, 0) ||
+    toInt(req?.branchContext?.warehouse_id, 0) ||
+    toInt(req?.branchContext?.default_warehouse_id, 0) ||
+    toInt(req?.branch?.warehouse_id, 0) ||
+    toInt(req?.branch?.default_warehouse_id, 0) ||
+    0;
+
+  if (fromReq > 0) return fromReq;
+
+  // DB fallback: primer depósito de la sucursal
+  const wh = await Warehouse.findOne({
+    where: { branch_id: toInt(branch_id, 0) },
+    order: [["id", "ASC"]],
+    transaction: tx,
+  });
+
+  return toInt(wh?.id, 0);
 }
 
 // ============================
@@ -194,13 +225,15 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
+// Body: { branch_id, customer_name?, status?, sold_at?, items:[], payments:[] }
+// items[]: { product_id, quantity, unit_price?, warehouse_id? }
+// payments[]: { method, amount, paid_at? }
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
-    // 🔐 user_id OBLIGATORIO (resuelto de forma robusta)
+    // ✅ user_id requerido por DB
     const user_id = getAuthUserId(req);
-
     if (!user_id) {
       await t.rollback();
       return res.status(401).json({
@@ -241,21 +274,30 @@ async function createSale(req, res, next) {
       });
     }
 
-    const normItems = items.map((it) => {
+    // Normalizar items + resolver warehouse_id obligatorio (por item / contexto / db)
+    const normItems = [];
+    for (const it of items) {
       const product_id = toInt(it?.product_id || it?.productId, 0);
-      const warehouse_id = toInt(it?.warehouse_id || it?.warehouseId, 0) || null;
       const quantity = toFloat(it?.quantity, 0);
       const unit_price = toFloat(it?.unit_price ?? it?.unitPrice ?? it?.price, 0);
 
-      return {
+      const warehouse_id = await resolveWarehouseId(
+        req,
+        branch_id,
+        it?.warehouse_id || it?.warehouseId,
+        t
+      );
+
+      normItems.push({
         product_id,
         warehouse_id,
         quantity,
         unit_price,
         line_total: quantity * unit_price,
-      };
-    });
+      });
+    }
 
+    // validación básica + warehouse obligatorio
     for (const it of normItems) {
       if (!it.product_id || it.quantity <= 0 || it.unit_price < 0) {
         await t.rollback();
@@ -263,6 +305,15 @@ async function createSale(req, res, next) {
           ok: false,
           code: "BAD_REQUEST",
           message: "Item inválido: product_id requerido, quantity>0, unit_price>=0",
+        });
+      }
+      if (!it.warehouse_id) {
+        await t.rollback();
+        return res.status(400).json({
+          ok: false,
+          code: "WAREHOUSE_REQUIRED",
+          message:
+            "warehouse_id requerido (no vino en item y no se encontró depósito default para esta sucursal).",
         });
       }
     }
@@ -275,22 +326,26 @@ async function createSale(req, res, next) {
     const paid_total = payments.reduce((a, p) => a + toFloat(p?.amount, 0), 0);
     const change_total = Math.max(0, paid_total - total);
 
-    const sale = await Sale.create(
-      {
-        branch_id,
-        user_id,
-        customer_name,
-        status,
-        sold_at,
-        subtotal,
-        discount_total,
-        tax_total,
-        total,
-        paid_total,
-        change_total,
-      },
-      { transaction: t }
-    );
+    // Si Sale tiene warehouse_id (algunos schemas lo exigen), setearlo sin romper schemas que no lo tienen:
+    const salePayload = {
+      branch_id,
+      user_id,
+      customer_name,
+      status,
+      sold_at,
+      subtotal,
+      discount_total,
+      tax_total,
+      total,
+      paid_total,
+      change_total,
+    };
+
+    if (Sale?.rawAttributes?.warehouse_id) {
+      salePayload.warehouse_id = normItems[0]?.warehouse_id || null;
+    }
+
+    const sale = await Sale.create(salePayload, { transaction: t });
 
     await SaleItem.bulkCreate(
       normItems.map((it) => ({
@@ -322,11 +377,7 @@ async function createSale(req, res, next) {
       include: [{ model: Payment, as: "payments", required: false }],
     });
 
-    return res.status(201).json({
-      ok: true,
-      message: "Venta creada",
-      data: created,
-    });
+    return res.status(201).json({ ok: true, message: "Venta creada", data: created });
   } catch (e) {
     try {
       await t.rollback();
