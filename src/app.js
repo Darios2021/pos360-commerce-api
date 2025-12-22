@@ -3,7 +3,6 @@ const express = require("express");
 const cors = require("cors");
 
 const v1Routes = require("./routes/v1.routes");
-const { errorMiddleware } = require("./middlewares/error.middleware");
 
 function createApp() {
   const app = express();
@@ -18,8 +17,13 @@ function createApp() {
 
   const corsOptions = {
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // curl/postman
-      if (origin.includes("localhost")) return callback(null, true); // dev
+      // Requests sin origin (curl, server-to-server)
+      if (!origin) return callback(null, true);
+
+      // Dev local
+      if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
+        return callback(null, true);
+      }
 
       if (
         allowedOrigins.includes("*") ||
@@ -46,12 +50,13 @@ function createApp() {
   app.use(express.urlencoded({ extended: true }));
 
   // =====================
-  // 3. Root
+  // 3. Root / Health
   // =====================
   app.get("/", (req, res) => {
     res.json({
       name: "pos360-api",
       status: "online",
+      env: process.env.NODE_ENV || "unknown",
       time: new Date().toISOString(),
     });
   });
@@ -62,9 +67,36 @@ function createApp() {
   app.use("/api/v1", v1Routes);
 
   // =====================
-  // 5. Error handler
+  // 5. 404 handler
   // =====================
-  app.use(errorMiddleware);
+  app.use((req, res) => {
+    res.status(404).json({
+      ok: false,
+      code: "NOT_FOUND",
+      message: `Ruta no encontrada: ${req.method} ${req.originalUrl}`,
+    });
+  });
+
+  // =====================
+  // 6. ERROR HANDLER FINAL (CLAVE)
+  // =====================
+  app.use((err, req, res, next) => {
+    console.error("❌ [API ERROR]", {
+      method: req.method,
+      url: req.originalUrl,
+      message: err?.message,
+      code: err?.code,
+      stack: err?.stack,
+    });
+
+    const status = err?.httpStatus || 500;
+
+    return res.status(status).json({
+      ok: false,
+      code: err?.code || "INTERNAL_ERROR",
+      message: err?.message || "Internal Server Error",
+    });
+  });
 
   return app;
 }
