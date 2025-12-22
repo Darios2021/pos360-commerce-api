@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category, ProductImage } = require("../models");
+const { Product, Category } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -12,12 +12,18 @@ function toFloat(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+/**
+ * ✅ branchId viene del middleware branchContext (recomendado)
+ * y hacemos fallback a user.branch_id (por si aún no está montado)
+ */
 function getBranchId(req) {
   return (
     toInt(req?.ctx?.branchId, 0) ||
+    toInt(req?.ctx?.branch_id, 0) ||
     toInt(req?.branchId, 0) ||
     toInt(req?.branch?.id, 0) ||
     toInt(req?.user?.branch_id, 0) ||
+    toInt(req?.user?.branchId, 0) ||
     0
   );
 }
@@ -27,8 +33,7 @@ function buildProductIncludes() {
   const inc = [];
   const A = Product?.associations || {};
 
-  // category
-  // soporta alias típicos: "category" o "Category"
+  // category (alias típico: "category")
   const catAs = A.category ? "category" : A.Category ? "Category" : null;
   if (catAs) {
     const catInclude = { association: catAs, required: false };
@@ -48,22 +53,20 @@ function buildProductIncludes() {
     inc.push(catInclude);
   }
 
-  // subcategory (puede llamarse "subcategory" o "sub_category" o "Subcategory")
+  // subcategory (alias típicos)
   const subAs =
     A.subcategory ? "subcategory" :
     A.sub_category ? "sub_category" :
     A.Subcategory ? "Subcategory" :
     null;
-
   if (subAs) inc.push({ association: subAs, required: false });
 
-  // images (puede ser "images" o "productImages" etc.)
+  // images (alias típicos)
   const imgAs =
     A.images ? "images" :
     A.productImages ? "productImages" :
     A.ProductImages ? "ProductImages" :
     null;
-
   if (imgAs) inc.push({ association: imgAs, required: false });
 
   return inc;
@@ -208,7 +211,9 @@ async function getOne(req, res, next) {
     const p = await Product.findByPk(id, { include });
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
+    // ✅ Cross-branch SOLO si el producto trae branch_id numérico (evita falsos 403 si el modelo no lo expone)
+    const pb = toInt(p.branch_id, 0);
+    if (pb > 0 && pb !== toInt(branch_id, 0)) {
       return res.status(403).json({
         ok: false,
         code: "CROSS_BRANCH_PRODUCT",
@@ -274,7 +279,8 @@ async function update(req, res, next) {
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
+    const pb = toInt(p.branch_id, 0);
+    if (pb > 0 && pb !== toInt(branch_id, 0)) {
       return res.status(403).json({
         ok: false,
         code: "CROSS_BRANCH_PRODUCT",

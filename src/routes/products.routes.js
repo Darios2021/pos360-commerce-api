@@ -1,3 +1,4 @@
+// src/routes/products.routes.js
 const router = require("express").Router();
 const multer = require("multer");
 
@@ -9,15 +10,16 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
 });
 
-// --- PRODUCTOS ---
+// --- LIST ---
 router.get("/", productsCtrl.list);
 router.post("/", productsCtrl.create);
-router.get("/:id", productsCtrl.getOne);
-router.patch("/:id", productsCtrl.update);
 
-// --- IMÁGENES ---
-// ✅ Estas dos líneas fallaban si el controlador no exportaba bien
+// --- IMÁGENES (antes de /:id) ---
 router.get("/:id/images", productImagesCtrl.listByProduct);
 router.post("/:id/images", upload.any(), productImagesCtrl.upload);
+
+// --- ONE ---
+router.get("/:id", productsCtrl.getOne);
+router.patch("/:id", productsCtrl.update);
 
 module.exports = router;
