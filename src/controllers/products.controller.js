@@ -1,172 +1,295 @@
+// src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category, ProductImage } = require("../models");
+const { Product, Category, Subcategory, ProductImage } = require("../models");
 
-// --- HELPERS DE CONVERSIÓN ---
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
 
-function toDec(v, d = 0) {
-  if (v === null || v === undefined || v === "") return d;
-  const s = String(v).replace(",", ".").trim();
-  const n = Number(s);
+function toFloat(v, d = 0) {
+  const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
 
-// --- HELPER DE ASOCIACIONES ---
-function includeCategoryTree() {
-  return [
-    {
-      model: Category,
-      as: "category",
-      attributes: ["id", "name", "parent_id"],
-      required: false,
-      include: [
-        {
-          model: Category,
-          as: "parent",
-          attributes: ["id", "name"],
-          required: false,
-        },
-      ],
-    },
-    {
-      model: ProductImage,
-      as: "images", // ✅ Crucial para el carrusel en el detalle
-      required: false,
-    },
-  ];
+function getBranchId(req) {
+  return (
+    toInt(req?.ctx?.branchId, 0) ||
+    toInt(req?.branchId, 0) ||
+    toInt(req?.branch?.id, 0) ||
+    toInt(req?.user?.branch_id, 0) ||
+    0
+  );
 }
 
-// --- MÉTODOS DEL CONTROLADOR ---
+function pickBody(body = {}) {
+  // whitelist para evitar que te metan cualquier cosa
+  const out = {};
 
+  const fields = [
+    "code",
+    "sku",
+    "barcode",
+    "name",
+    "description",
+    "category_id",
+    "subcategory_id",
+    "is_new",
+    "is_promo",
+    "brand",
+    "model",
+    "warranty_months",
+    "track_stock",
+    "sheet_stock_label",
+    "sheet_has_stock",
+    "is_active",
+    "cost",
+    "price",
+    "price_list",
+    "price_discount",
+    "price_reseller",
+    "tax_rate",
+  ];
+
+  for (const k of fields) {
+    if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
+  }
+
+  // normalizaciones
+  if (out.sku != null) out.sku = String(out.sku).trim();
+  if (out.barcode != null) out.barcode = String(out.barcode).trim() || null;
+  if (out.code != null) out.code = String(out.code).trim() || null;
+  if (out.name != null) out.name = String(out.name).trim();
+
+  if (out.category_id != null) out.category_id = toInt(out.category_id, null);
+  if (out.subcategory_id != null) out.subcategory_id = toInt(out.subcategory_id, null);
+
+  const bools = ["is_new", "is_promo", "track_stock", "sheet_has_stock", "is_active"];
+  for (const b of bools) {
+    if (out[b] != null) out[b] = !!out[b];
+  }
+
+  const nums = [
+    "warranty_months",
+    "cost",
+    "price",
+    "price_list",
+    "price_discount",
+    "price_reseller",
+    "tax_rate",
+  ];
+  for (const n of nums) {
+    if (out[n] != null) out[n] = toFloat(out[n], 0);
+  }
+
+  return out;
+}
+
+// ============================
+// GET /api/v1/products
+// ============================
 async function list(req, res, next) {
   try {
-    const q = (req.query.q || "").trim();
+    const branch_id = getBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
     const page = Math.max(1, toInt(req.query.page, 1));
-    const limit = Math.min(100, Math.max(1, toInt(req.query.limit, 20)));
+    const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
     const offset = (page - 1) * limit;
 
-    const where = {};
+    const q = String(req.query.q || "").trim();
+
+    const where = { branch_id };
+
     if (q) {
+      const qNum = toFloat(q, NaN);
+
       where[Op.or] = [
         { name: { [Op.like]: `%${q}%` } },
         { sku: { [Op.like]: `%${q}%` } },
+        { barcode: { [Op.like]: `%${q}%` } },
+        { code: { [Op.like]: `%${q}%` } },
         { brand: { [Op.like]: `%${q}%` } },
         { model: { [Op.like]: `%${q}%` } },
       ];
+
+      if (Number.isFinite(qNum)) {
+        where[Op.or].push({ id: toInt(qNum, 0) });
+        where[Op.or].push({ price: qNum });
+      }
     }
 
-    const { rows, count } = await Product.findAndCountAll({
+    const { count, rows } = await Product.findAndCountAll({
       where,
-      include: includeCategoryTree(),
       order: [["id", "DESC"]],
       limit,
       offset,
+      include: [
+        {
+          model: Category,
+          as: "category",
+          required: false,
+          include: [{ model: Category, as: "parent", required: false }],
+        },
+        { model: Subcategory, as: "subcategory", required: false },
+        { model: ProductImage, as: "images", required: false },
+      ],
     });
 
-    res.json({ ok: true, page, limit, total: count, items: rows });
+    const pages = Math.max(1, Math.ceil(count / limit));
+
+    return res.json({
+      ok: true,
+      data: rows,
+      meta: { page, limit, total: count, pages },
+    });
   } catch (e) {
-    console.error("[LIST ERROR]", e);
     next(e);
   }
 }
 
+// ============================
+// GET /api/v1/products/:id
+// ============================
 async function getOne(req, res, next) {
   try {
-    console.log(`[GET] Consultando producto ID: ${req.params.id}`);
-    const item = await Product.findByPk(req.params.id, { 
-      include: includeCategoryTree() 
+    const branch_id = getBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
+
+    const p = await Product.findByPk(id, {
+      include: [
+        {
+          model: Category,
+          as: "category",
+          required: false,
+          include: [{ model: Category, as: "parent", required: false }],
+        },
+        { model: Subcategory, as: "subcategory", required: false },
+        { model: ProductImage, as: "images", required: false },
+      ],
     });
 
-    if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
-    res.json({ ok: true, item });
-  } catch (e) { 
-    next(e); 
+    if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
+
+    if (toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
+      return res.status(403).json({
+        ok: false,
+        code: "CROSS_BRANCH_PRODUCT",
+        message: "No podés ver un producto de otra sucursal.",
+      });
+    }
+
+    return res.json({ ok: true, data: p });
+  } catch (e) {
+    next(e);
   }
 }
 
+// ============================
+// POST /api/v1/products
+// branch_id SIEMPRE desde ctx (no desde body)
+// ============================
 async function create(req, res, next) {
   try {
-    const b = req.body;
-    console.log("[POST] Payload recibido:", b);
+    const branch_id = getBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
 
-    const created = await Product.create({
-      code: b.code || null,
-      sku: b.sku,
-      barcode: b.barcode || null,
-      name: b.name,
-      description: b.description || null,
-      category_id: toInt(b.category_id, null),
-      subcategory_id: toInt(b.subcategory_id, null),
-      brand: b.brand || null,
-      model: b.model || null,
-      warranty_months: toInt(b.warranty_months, 0),
-      is_new: b.is_new ? 1 : 0,
-      is_promo: b.is_promo ? 1 : 0,
-      track_stock: b.track_stock ? 1 : 0,
-      is_active: b.is_active ? 1 : 0,
-      cost: toDec(b.cost, 0),
-      price: toDec(b.price, 0),
-      price_list: toDec(b.price_list, 0),
-      price_discount: toDec(b.price_discount, 0),
-      price_reseller: toDec(b.price_reseller, 0),
-      tax_rate: toDec(b.tax_rate, 21),
-    });
+    const payload = pickBody(req.body || {});
+    if (!payload.sku || !payload.name) {
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "sku y name son requeridos",
+      });
+    }
 
-    console.log(`[POST] Producto creado exitosamente: ${created.id}`);
-    
-    // Devolver el objeto completo con relaciones para que el Store se sincronice
-    const item = await Product.findByPk(created.id, { include: includeCategoryTree() });
-    res.status(201).json({ ok: true, item });
-  } catch (e) { 
-    console.error("[CREATE ERROR]", e);
-    next(e); 
+    // enforce branch
+    payload.branch_id = branch_id;
+
+    const created = await Product.create(payload);
+    return res.status(201).json({ ok: true, message: "Producto creado", data: created });
+  } catch (e) {
+    next(e);
   }
 }
 
+// ============================
+// PATCH /api/v1/products/:id
+// bloquea cross-branch + no permite cambiar branch_id
+// ============================
 async function update(req, res, next) {
   try {
-    const id = req.params.id;
-    const item = await Product.findByPk(id);
-    if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
+    const branch_id = getBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
 
-    const b = req.body;
-    console.log(`[PATCH] Actualizando producto ${id} con:`, b);
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
-    await item.update({
-      code: b.code !== undefined ? b.code : item.code,
-      sku: b.sku !== undefined ? b.sku : item.sku,
-      barcode: b.barcode !== undefined ? b.barcode : item.barcode,
-      name: b.name !== undefined ? b.name : item.name,
-      description: b.description !== undefined ? b.description : item.description,
-      category_id: b.category_id !== undefined ? toInt(b.category_id, null) : item.category_id,
-      subcategory_id: b.subcategory_id !== undefined ? toInt(b.subcategory_id, null) : item.subcategory_id,
-      brand: b.brand !== undefined ? b.brand : item.brand,
-      model: b.model !== undefined ? b.model : item.model,
-      warranty_months: b.warranty_months !== undefined ? toInt(b.warranty_months, 0) : item.warranty_months,
-      is_new: b.is_new !== undefined ? (b.is_new ? 1 : 0) : item.is_new,
-      is_promo: b.is_promo !== undefined ? (b.is_promo ? 1 : 0) : item.is_promo,
-      track_stock: b.track_stock !== undefined ? (b.track_stock ? 1 : 0) : item.track_stock,
-      is_active: b.is_active !== undefined ? (b.is_active ? 1 : 0) : item.is_active,
-      cost: b.cost !== undefined ? toDec(b.cost, 0) : item.cost,
-      price: b.price !== undefined ? toDec(b.price, 0) : item.price,
-      price_list: b.price_list !== undefined ? toDec(b.price_list, 0) : item.price_list,
-      price_discount: b.price_discount !== undefined ? toDec(b.price_discount, 0) : item.price_discount,
-      price_reseller: b.price_reseller !== undefined ? toDec(b.price_reseller, 0) : item.price_reseller,
-      tax_rate: b.tax_rate !== undefined ? toDec(b.tax_rate, 21) : item.tax_rate,
+    const p = await Product.findByPk(id);
+    if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
+
+    if (toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
+      return res.status(403).json({
+        ok: false,
+        code: "CROSS_BRANCH_PRODUCT",
+        message: "No podés modificar un producto de otra sucursal.",
+      });
+    }
+
+    const patch = pickBody(req.body || {});
+    delete patch.branch_id; // seguridad: no permitir cambiar sucursal
+
+    await p.update(patch);
+
+    const updated = await Product.findByPk(id, {
+      include: [
+        {
+          model: Category,
+          as: "category",
+          required: false,
+          include: [{ model: Category, as: "parent", required: false }],
+        },
+        { model: Subcategory, as: "subcategory", required: false },
+        { model: ProductImage, as: "images", required: false },
+      ],
     });
 
-    console.log(`[PATCH] Producto ${id} actualizado en DB. Refrescando relaciones...`);
-    
-    // Refrescar para traer imágenes y categorías actualizadas
-    const full = await Product.findByPk(item.id, { include: includeCategoryTree() });
-    res.json({ ok: true, item: full });
-  } catch (e) { 
-    console.error("[UPDATE ERROR]", e);
-    next(e); 
+    return res.json({ ok: true, message: "Producto actualizado", data: updated });
+  } catch (e) {
+    next(e);
   }
 }
 
-module.exports = { list, getOne, create, update };
+module.exports = {
+  list,
+  create,
+  getOne,
+  update,
+};
