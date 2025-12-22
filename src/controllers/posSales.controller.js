@@ -1,6 +1,15 @@
 // src/controllers/posSales.controller.js
 const { Op } = require("sequelize");
-const { sequelize, Sale, Payment, SaleItem, Product, Category, ProductImage, Warehouse } = require("../models");
+const {
+  sequelize,
+  Sale,
+  Payment,
+  SaleItem,
+  Product,
+  Category,
+  ProductImage,
+  Warehouse,
+} = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -131,13 +140,25 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
-// Body: { branch_id, customer_name?, status?, sold_at?, items:[], payments:[] }
-// items[]: { product_id, quantity, unit_price?, warehouse_id? }
-// payments[]: { method, amount, paid_at? }
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
+    // 🔒 REQUIRED POR DB
+    const user_id =
+      toInt(req.user?.id, 0) ||
+      toInt(req.auth?.id, 0) ||
+      toInt(req.userId, 0);
+
+    if (!user_id) {
+      await t.rollback();
+      return res.status(401).json({
+        ok: false,
+        code: "NO_USER",
+        message: "No se pudo determinar el usuario autenticado (user_id).",
+      });
+    }
+
     const branch_id =
       toInt(req.body?.branch_id, 0) ||
       toInt(req.query?.branch_id, 0) ||
@@ -146,7 +167,11 @@ async function createSale(req, res, next) {
 
     if (!branch_id) {
       await t.rollback();
-      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "branch_id requerido" });
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "branch_id requerido",
+      });
     }
 
     const customer_name = String(req.body?.customer_name || "").trim() || null;
@@ -158,10 +183,13 @@ async function createSale(req, res, next) {
 
     if (!items || items.length === 0) {
       await t.rollback();
-      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "items requerido (array no vacío)" });
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "items requerido (array no vacío)",
+      });
     }
 
-    // 1) Normalizar items y calcular line_total
     const normItems = items.map((it) => {
       const product_id = toInt(it?.product_id || it?.productId, 0);
       const warehouse_id = toInt(it?.warehouse_id || it?.warehouseId, 0) || null;
@@ -177,7 +205,6 @@ async function createSale(req, res, next) {
       };
     });
 
-    // validación básica
     for (const it of normItems) {
       if (!it.product_id || it.quantity <= 0 || it.unit_price < 0) {
         await t.rollback();
@@ -189,36 +216,31 @@ async function createSale(req, res, next) {
       }
     }
 
-    // 2) Totales (si tu Sale tiene campos distintos, decime y lo ajusto)
     const subtotal = normItems.reduce((a, it) => a + it.line_total, 0);
     const discount_total = toFloat(req.body?.discount_total, 0);
     const tax_total = toFloat(req.body?.tax_total, 0);
     const total = Math.max(0, subtotal - discount_total + tax_total);
 
-    // pagos
     const paid_total = payments.reduce((a, p) => a + toFloat(p?.amount, 0), 0);
     const change_total = Math.max(0, paid_total - total);
 
-    // 3) Crear Sale
     const sale = await Sale.create(
       {
         branch_id,
+        user_id, // ✅ FIX CLAVE
         customer_name,
         status,
         sold_at,
-
         subtotal,
         discount_total,
         tax_total,
         total,
-
         paid_total,
         change_total,
       },
       { transaction: t }
     );
 
-    // 4) Crear SaleItems
     await SaleItem.bulkCreate(
       normItems.map((it) => ({
         sale_id: sale.id,
@@ -227,16 +249,10 @@ async function createSale(req, res, next) {
         quantity: it.quantity,
         unit_price: it.unit_price,
         line_total: it.line_total,
-
-        // snapshots opcionales (si tu modelo tiene estos campos, sino se ignoran)
-        product_name_snapshot: it.product_name_snapshot,
-        product_sku_snapshot: it.product_sku_snapshot,
-        product_barcode_snapshot: it.product_barcode_snapshot,
       })),
       { transaction: t }
     );
 
-    // 5) Crear Payments
     if (payments.length) {
       await Payment.bulkCreate(
         payments.map((p) => ({
@@ -251,21 +267,25 @@ async function createSale(req, res, next) {
 
     await t.commit();
 
-    // 6) devolver venta creada con pagos (liviano)
     const created = await Sale.findByPk(sale.id, {
       include: [{ model: Payment, as: "payments", required: false }],
     });
 
-    return res.status(201).json({ ok: true, message: "Venta creada", data: created });
+    return res.status(201).json({
+      ok: true,
+      message: "Venta creada",
+      data: created,
+    });
   } catch (e) {
-    try { await t.rollback(); } catch {}
+    try {
+      await t.rollback();
+    } catch {}
     next(e);
   }
 }
 
 // ============================
 // DELETE /api/v1/pos/sales/:id
-// (mejorado: borra dependencias)
 // ============================
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -282,7 +302,6 @@ async function deleteSale(req, res, next) {
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
     }
 
-    // borrar dependencias primero (evita FK issues si no hay cascade)
     await Payment.destroy({ where: { sale_id: id }, transaction: t });
     await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
 
@@ -291,7 +310,9 @@ async function deleteSale(req, res, next) {
     await t.commit();
     return res.json({ ok: true, message: "Venta eliminada" });
   } catch (e) {
-    try { await t.rollback(); } catch {}
+    try {
+      await t.rollback();
+    } catch {}
     next(e);
   }
 }
