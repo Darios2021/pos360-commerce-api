@@ -1,3 +1,4 @@
+// src/controllers/productImages.controller.js
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
 const path = require("path");
@@ -9,6 +10,11 @@ function mustEnv(name) {
   return v;
 }
 
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+
 function s3Client() {
   return new AWS.S3({
     endpoint: mustEnv("S3_ENDPOINT"),
@@ -16,7 +22,7 @@ function s3Client() {
     secretAccessKey: mustEnv("S3_SECRET_KEY"),
     s3ForcePathStyle: true,
     signatureVersion: "v4",
-    sslEnabled: true,
+    sslEnabled: String(process.env.S3_SSL_ENABLED ?? "true") === "true",
     region: process.env.S3_REGION || "us-east-1",
   });
 }
@@ -28,11 +34,34 @@ function publicUrlFor(key) {
   return `${cleanBase}/${bucket}/${key}`;
 }
 
-async function upload(req, res, next) {
+// (opcional) intentar inferir Key desde URL pública
+function keyFromPublicUrl(url) {
+  if (!url) return null;
+  const bucket = process.env.S3_BUCKET;
+  if (!bucket) return null;
+
   try {
-    const productId = req.params.id;
-    
-    // CORRECCIÓN: Captura archivos sin importar si vienen en req.files (array) o req.file (single)
+    const u = new URL(url);
+    const p = u.pathname.replace(/^\/+/, ""); // sin leading slash
+    const idx = p.indexOf(`${bucket}/`);
+    if (idx === -1) return null;
+    return p.substring(idx + `${bucket}/`.length);
+  } catch {
+    // por si no es URL válida
+    const s = String(url);
+    const marker = `/${bucket}/`;
+    const i = s.indexOf(marker);
+    if (i === -1) return null;
+    return s.substring(i + marker.length);
+  }
+}
+
+async function upload(req, res) {
+  try {
+    const productId = toInt(req.params.id, 0);
+    if (!productId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "productId inválido" });
+
+    // Captura archivos: multer.any() => req.files array
     let files = [];
     if (req.files) {
       files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
@@ -41,7 +70,7 @@ async function upload(req, res, next) {
     }
 
     if (files.length === 0) {
-      return res.status(400).json({ ok: false, message: "No se recibió ningún archivo" });
+      return res.status(400).json({ ok: false, code: "NO_FILES", message: "No se recibió ningún archivo" });
     }
 
     const s3 = s3Client();
@@ -56,37 +85,84 @@ async function upload(req, res, next) {
         Key: key,
         Body: file.buffer,
         ContentType: file.mimetype,
-        ACL: "public-read"
+        ACL: "public-read",
       }).promise();
 
       const img = await ProductImage.create({
         product_id: productId,
         url: publicUrlFor(key),
-        sort_order: 0
+        sort_order: 0,
       });
-      
+
       results.push(img);
     }
 
-    res.status(201).json({ 
-      ok: true, 
+    return res.status(201).json({
+      ok: true,
       uploaded: results.length,
-      items: results 
+      items: results,
     });
   } catch (e) {
-    console.error("❌ UPLOAD ERROR:", e);
-    res.status(500).json({ ok: false, message: e.message });
+    console.error("❌ [productImages.upload] ERROR:", e);
+    return res.status(500).json({ ok: false, code: "UPLOAD_ERROR", message: e.message });
   }
 }
 
 async function listByProduct(req, res, next) {
   try {
+    const productId = toInt(req.params.id, 0);
+    if (!productId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "productId inválido" });
+
     const items = await ProductImage.findAll({
-      where: { product_id: req.params.id },
-      order: [["sort_order", "ASC"]],
+      where: { product_id: productId },
+      order: [["sort_order", "ASC"], ["id", "ASC"]],
     });
-    res.json({ ok: true, items });
-  } catch (e) { next(e); }
+
+    return res.json({ ok: true, items });
+  } catch (e) {
+    next(e);
+  }
 }
 
-module.exports = { listByProduct, upload };
+// ✅ DELETE /products/:id/images/:imageId
+// - borra DB
+// - opcional: borra también en MinIO si S3_DELETE_ON_REMOVE=true
+async function remove(req, res, next) {
+  try {
+    const productId = toInt(req.params.id, 0);
+    const imageId = toInt(req.params.imageId, 0);
+    if (!productId || !imageId) {
+      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "IDs inválidos" });
+    }
+
+    const img = await ProductImage.findOne({ where: { id: imageId, product_id: productId } });
+    if (!img) {
+      return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Imagen no encontrada" });
+    }
+
+    // opcional: borrar objeto en S3/MinIO
+    const doDelete = String(process.env.S3_DELETE_ON_REMOVE ?? "false") === "true";
+    if (doDelete) {
+      const key = keyFromPublicUrl(img.url);
+      if (key) {
+        const s3 = s3Client();
+        try {
+          await s3.deleteObject({
+            Bucket: mustEnv("S3_BUCKET"),
+            Key: key,
+          }).promise();
+        } catch (e) {
+          console.warn("⚠️ No se pudo borrar objeto en S3/MinIO:", e?.message || e);
+        }
+      }
+    }
+
+    await img.destroy();
+
+    return res.json({ ok: true, message: "Imagen eliminada" });
+  } catch (e) {
+    next(e);
+  }
+}
+
+module.exports = { listByProduct, upload, remove };
