@@ -47,7 +47,6 @@ function keyFromPublicUrl(url) {
     if (idx === -1) return null;
     return p.substring(idx + `${bucket}/`.length);
   } catch {
-    // por si no es URL válida
     const s = String(url);
     const marker = `/${bucket}/`;
     const i = s.indexOf(marker);
@@ -59,9 +58,15 @@ function keyFromPublicUrl(url) {
 async function upload(req, res) {
   try {
     const productId = toInt(req.params.id, 0);
-    if (!productId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "productId inválido" });
+    if (!productId) {
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "productId inválido",
+      });
+    }
 
-    // Captura archivos: multer.any() => req.files array
+    // multer.any() => req.files array
     let files = [];
     if (req.files) {
       files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
@@ -70,7 +75,11 @@ async function upload(req, res) {
     }
 
     if (files.length === 0) {
-      return res.status(400).json({ ok: false, code: "NO_FILES", message: "No se recibió ningún archivo" });
+      return res.status(400).json({
+        ok: false,
+        code: "NO_FILES",
+        message: "No se recibió ningún archivo",
+      });
     }
 
     const s3 = s3Client();
@@ -80,13 +89,15 @@ async function upload(req, res) {
       const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
       const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
 
-      await s3.putObject({
-        Bucket: mustEnv("S3_BUCKET"),
-        Key: key,
-        Body: file.buffer,
-        ContentType: file.mimetype,
-        ACL: "public-read",
-      }).promise();
+      await s3
+        .putObject({
+          Bucket: mustEnv("S3_BUCKET"),
+          Key: key,
+          Body: file.buffer,
+          ContentType: file.mimetype,
+          ACL: "public-read",
+        })
+        .promise();
 
       const img = await ProductImage.create({
         product_id: productId,
@@ -104,14 +115,24 @@ async function upload(req, res) {
     });
   } catch (e) {
     console.error("❌ [productImages.upload] ERROR:", e);
-    return res.status(500).json({ ok: false, code: "UPLOAD_ERROR", message: e.message });
+    return res.status(500).json({
+      ok: false,
+      code: "UPLOAD_ERROR",
+      message: e.message,
+    });
   }
 }
 
 async function listByProduct(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
-    if (!productId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "productId inválido" });
+    if (!productId) {
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "productId inválido",
+      });
+    }
 
     const items = await ProductImage.findAll({
       where: { product_id: productId },
@@ -131,26 +152,39 @@ async function remove(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
     const imageId = toInt(req.params.imageId, 0);
+
     if (!productId || !imageId) {
-      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "IDs inválidos" });
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "IDs inválidos",
+      });
     }
 
-    const img = await ProductImage.findOne({ where: { id: imageId, product_id: productId } });
+    const img = await ProductImage.findOne({
+      where: { id: imageId, product_id: productId },
+    });
+
     if (!img) {
-      return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Imagen no encontrada" });
+      return res.status(404).json({
+        ok: false,
+        code: "NOT_FOUND",
+        message: "Imagen no encontrada",
+      });
     }
 
-    // opcional: borrar objeto en S3/MinIO
     const doDelete = String(process.env.S3_DELETE_ON_REMOVE ?? "false") === "true";
     if (doDelete) {
       const key = keyFromPublicUrl(img.url);
       if (key) {
         const s3 = s3Client();
         try {
-          await s3.deleteObject({
-            Bucket: mustEnv("S3_BUCKET"),
-            Key: key,
-          }).promise();
+          await s3
+            .deleteObject({
+              Bucket: mustEnv("S3_BUCKET"),
+              Key: key,
+            })
+            .promise();
         } catch (e) {
           console.warn("⚠️ No se pudo borrar objeto en S3/MinIO:", e?.message || e);
         }
@@ -158,7 +192,6 @@ async function remove(req, res, next) {
     }
 
     await img.destroy();
-
     return res.json({ ok: true, message: "Imagen eliminada" });
   } catch (e) {
     next(e);

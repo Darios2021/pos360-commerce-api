@@ -1,3 +1,4 @@
+// src/routes/products.routes.js
 const router = require("express").Router();
 const multer = require("multer");
 
@@ -14,6 +15,9 @@ router.get("/", productsCtrl.list);
 router.post("/", productsCtrl.create);
 router.get("/:id", productsCtrl.getOne);
 router.patch("/:id", productsCtrl.update);
+
+// ✅ DELETE producto
+router.delete("/:id", productsCtrl.remove);
 
 // --- IMÁGENES ---
 router.get("/:id/images", productImagesCtrl.listByProduct);

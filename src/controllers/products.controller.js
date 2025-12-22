@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category } = require("../models");
+const { Product, Category, ProductImage } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -67,7 +67,17 @@ function buildProductIncludes() {
     A.productImages ? "productImages" :
     A.ProductImages ? "ProductImages" :
     null;
-  if (imgAs) inc.push({ association: imgAs, required: false });
+
+  if (imgAs) {
+    inc.push({ association: imgAs, required: false });
+  } else {
+    // fallback por si las asociaciones no están registradas pero existe el modelo
+    // (no rompe si no hay)
+    if (ProductImage && typeof ProductImage === "function") {
+      // no hacemos nada si no hay asociación; Sequelize exige association o Model relacionado
+      // dejamos vacío para no generar "Include unexpected"
+    }
+  }
 
   return inc;
 }
@@ -132,6 +142,15 @@ function pickBody(body = {}) {
   return out;
 }
 
+function requireAdmin(req, res) {
+  const roles = Array.isArray(req?.user?.roles) ? req.user.roles : [];
+  if (!roles.includes("admin")) {
+    res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo admin puede realizar esta acción." });
+    return false;
+  }
+  return true;
+}
+
 // ============================
 // GET /api/v1/products
 // ============================
@@ -151,7 +170,6 @@ async function list(req, res, next) {
     const offset = (page - 1) * limit;
 
     const q = String(req.query.q || "").trim();
-
     const where = { branch_id };
 
     if (q) {
@@ -302,9 +320,48 @@ async function update(req, res, next) {
   }
 }
 
+// ============================
+// DELETE /api/v1/products/:id  (solo admin)
+// ============================
+async function remove(req, res, next) {
+  try {
+    if (!requireAdmin(req, res)) return;
+
+    const branch_id = getBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
+
+    const p = await Product.findByPk(id);
+    if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
+
+    const pb = toInt(p.branch_id, 0);
+    if (pb > 0 && pb !== toInt(branch_id, 0)) {
+      return res.status(403).json({
+        ok: false,
+        code: "CROSS_BRANCH_PRODUCT",
+        message: "No podés eliminar un producto de otra sucursal.",
+      });
+    }
+
+    await p.destroy();
+    return res.json({ ok: true, message: "Producto eliminado" });
+  } catch (e) {
+    next(e);
+  }
+}
+
 module.exports = {
   list,
   create,
   getOne,
   update,
+  remove,
 };
