@@ -13,18 +13,14 @@ function createApp() {
   // =====================
   const allowedOrigins = (process.env.CORS_ORIGINS || "")
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   const corsOptions = {
     origin: (origin, callback) => {
-      // Permitir requests sin origin (curl, postman)
-      if (!origin) return callback(null, true);
+      if (!origin) return callback(null, true); // curl/postman
+      if (origin.includes("localhost")) return callback(null, true); // dev
 
-      // Permitir localhost siempre (dev)
-      if (origin.includes("localhost")) return callback(null, true);
-
-      // Permitir si está en whitelist o wildcard
       if (
         allowedOrigins.includes("*") ||
         allowedOrigins.includes(origin) ||
@@ -50,7 +46,7 @@ function createApp() {
   app.use(express.urlencoded({ extended: true }));
 
   // =====================
-  // 3. Health / root
+  // 3. Root
   // =====================
   app.get("/", (req, res) => {
     res.json({
@@ -66,7 +62,7 @@ function createApp() {
   app.use("/api/v1", v1Routes);
 
   // =====================
-  // 5. Error handler (SIEMPRE AL FINAL)
+  // 5. Error handler
   // =====================
   app.use(errorMiddleware);
 
