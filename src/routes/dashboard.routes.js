@@ -1,12 +1,13 @@
 // src/routes/dashboard.routes.js
 const router = require("express").Router();
-const dashboard = require("../controllers/dashboard.controller");
+const dashboardController = require("../controllers/dashboard.controller");
 
-// KPIs
-router.get("/inventory", dashboard.inventory);
-router.get("/sales", dashboard.sales);
+// KPIs de inventario
+// GET /api/v1/dashboard/inventory
+router.get("/inventory", dashboardController.inventory);
 
-// ping opcional
-router.get("/", (req, res) => res.json({ ok: true, service: "dashboard" }));
+// KPIs de ventas
+// GET /api/v1/dashboard/sales
+router.get("/sales", dashboardController.sales);
 
 module.exports = router;
