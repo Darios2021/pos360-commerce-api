@@ -3,7 +3,7 @@ const router = require("express").Router();
 
 const authRoutes = require("./auth.routes");
 const { requireAuth } = require("../middlewares/auth");
-const { branchContext } = require("../middlewares/branchContext.middleware");
+const branchContext = require("../middlewares/branchContext.middleware");
 
 // =====================
 // Health (PUBLICO) - primero siempre
@@ -23,7 +23,7 @@ router.get("/health", (req, res) => {
 router.use("/auth", authRoutes);
 
 // =====================
-// Uploads + imágenes + inventory (PROTEGIDO)
+// Uploads + imágenes (PROTEGIDO)
 // =====================
 router.use("/upload", requireAuth, require("./uploads.routes"));
 
@@ -47,12 +47,19 @@ router.use("/stock", requireAuth, require("./stock.routes"));
 
 // =====================
 // DASHBOARD (PROTEGIDO)
+// KPIs Inventario + Ventas (ApexCharts)
 // =====================
 router.use("/dashboard", requireAuth, require("./dashboard.routes"));
 
 // =====================
-// POS (PROTEGIDO) + CONTEXTO SUCURSAL/DEPOSITO
+// POS (PROTEGIDO) + CONTEXTO SUCURSAL / DEPÓSITO
+// ⚠️ requireAuth → branchContext → routes
 // =====================
-router.use("/pos", requireAuth, branchContext, require("../modules/pos/pos.routes"));
+router.use(
+  "/pos",
+  requireAuth,
+  branchContext,
+  require("../modules/pos/pos.routes")
+);
 
 module.exports = router;
