@@ -8,6 +8,7 @@ const healthRoutes = require("./health.routes");
 const authRoutes = require("./auth.routes");
 
 // Protected
+const protectedRoutes = require("./protected.routes"); // ✅ /me
 const productsRoutes = require("./products.routes");
 const categoriesRoutes = require("./categories.routes");
 const subcategoriesRoutes = require("./subcategories.routes");
@@ -16,7 +17,7 @@ const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 const dashboardRoutes = require("./dashboard.routes");
 
-// POS (tu archivo está en src/routes/pos.routes.js según tu screenshot)
+// POS
 const posRoutes = require("./pos.routes");
 
 // =====================
@@ -26,7 +27,12 @@ router.use("/health", healthRoutes);
 router.use("/auth", authRoutes);
 
 // =====================
-// Protected
+// Protected (me / perfil)
+// =====================
+router.use("/", requireAuth, protectedRoutes); // ✅ expone GET /api/v1/me
+
+// =====================
+// Protected módulos
 // =====================
 router.use("/products", requireAuth, productsRoutes);
 router.use("/categories", requireAuth, categoriesRoutes);
