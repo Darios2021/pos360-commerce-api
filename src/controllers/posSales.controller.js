@@ -91,6 +91,24 @@ function getAuthUserId(req) {
 }
 
 /**
+ * ✅ branch_id SIEMPRE desde el usuario/contexto
+ * (no desde body/query)
+ */
+function getAuthBranchId(req) {
+  return (
+    toInt(req?.user?.branch_id, 0) ||
+    toInt(req?.user?.branchId, 0) ||
+    toInt(req?.auth?.branch_id, 0) ||
+    toInt(req?.auth?.branchId, 0) ||
+    toInt(req?.branch?.id, 0) ||
+    toInt(req?.branchId, 0) ||
+    toInt(req?.branchContext?.branch_id, 0) ||
+    toInt(req?.branchContext?.id, 0) ||
+    0
+  );
+}
+
+/**
  * 🏬 Resolver warehouse_id obligatorio:
  * 1) item.warehouse_id
  * 2) req.warehouse / req.warehouseId / req.branchContext.*
@@ -121,25 +139,51 @@ async function resolveWarehouseId(req, branch_id, itemWarehouseId, tx) {
   return toInt(wh?.id, 0);
 }
 
+/**
+ * ✅ Validar que un warehouse pertenezca a la sucursal
+ */
+async function assertWarehouseInBranch(warehouse_id, branch_id, tx) {
+  const wh = await Warehouse.findByPk(warehouse_id, { transaction: tx });
+  if (!wh) {
+    return { ok: false, code: "WAREHOUSE_NOT_FOUND", message: "Depósito inexistente." };
+  }
+  if (toInt(wh.branch_id, 0) !== toInt(branch_id, 0)) {
+    return {
+      ok: false,
+      code: "CROSS_BRANCH_WAREHOUSE",
+      message: "El depósito no pertenece a la sucursal del usuario.",
+    };
+  }
+  return { ok: true, warehouse: wh };
+}
+
 // ============================
 // GET /api/v1/pos/sales
+// (filtrado por sucursal del usuario)
 // ============================
 async function listSales(req, res, next) {
   try {
+    const branch_id = getAuthBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
     const offset = (page - 1) * limit;
 
     const q = String(req.query.q || "").trim();
     const status = String(req.query.status || "").trim().toUpperCase();
-    const branchId = toInt(req.query.branch_id, 0);
 
     const from = parseDateTime(req.query.from);
     const to = parseDateTime(req.query.to);
 
-    const where = {};
+    const where = { branch_id }; // ✅ enforce
 
-    if (branchId > 0) where.branch_id = branchId;
     if (status) where.status = status;
 
     if (from && to) where.sold_at = { [Op.between]: [from, to] };
@@ -181,9 +225,19 @@ async function listSales(req, res, next) {
 
 // ============================
 // GET /api/v1/pos/sales/:id
+// (bloquea cross-branch)
 // ============================
 async function getSaleById(req, res, next) {
   try {
+    const branch_id = getAuthBranchId(req);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
@@ -217,6 +271,14 @@ async function getSaleById(req, res, next) {
 
     if (!sale) return res.status(404).json({ ok: false, message: "Venta no encontrada" });
 
+    if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+      return res.status(403).json({
+        ok: false,
+        code: "CROSS_BRANCH_SALE",
+        message: "No podés ver una venta de otra sucursal.",
+      });
+    }
+
     return res.json({ ok: true, data: sale });
   } catch (e) {
     next(e);
@@ -225,14 +287,11 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
-// Body: { branch_id, customer_name?, status?, sold_at?, items:[], payments:[] }
-// items[]: { product_id, quantity, unit_price?, warehouse_id? }
-// payments[]: { method, amount, paid_at? }
+// (branch_id desde usuario, valida warehouse del branch, valida product.branch_id si existe)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
-    // ✅ user_id requerido por DB
     const user_id = getAuthUserId(req);
     if (!user_id) {
       await t.rollback();
@@ -243,18 +302,13 @@ async function createSale(req, res, next) {
       });
     }
 
-    const branch_id =
-      toInt(req.body?.branch_id, 0) ||
-      toInt(req.query?.branch_id, 0) ||
-      toInt(req.branch?.id, 0) ||
-      toInt(req.branchId, 0);
-
+    const branch_id = getAuthBranchId(req);
     if (!branch_id) {
       await t.rollback();
       return res.status(400).json({
         ok: false,
-        code: "BAD_REQUEST",
-        message: "branch_id requerido",
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
       });
     }
 
@@ -274,7 +328,7 @@ async function createSale(req, res, next) {
       });
     }
 
-    // Normalizar items + resolver warehouse_id obligatorio (por item / contexto / db)
+    // Normalizar items + resolver warehouse_id obligatorio
     const normItems = [];
     for (const it of items) {
       const product_id = toInt(it?.product_id || it?.productId, 0);
@@ -297,7 +351,7 @@ async function createSale(req, res, next) {
       });
     }
 
-    // validación básica + warehouse obligatorio
+    // validación básica + warehouse obligatorio + warehouse pertenece al branch
     for (const it of normItems) {
       if (!it.product_id || it.quantity <= 0 || it.unit_price < 0) {
         await t.rollback();
@@ -316,6 +370,43 @@ async function createSale(req, res, next) {
             "warehouse_id requerido (no vino en item y no se encontró depósito default para esta sucursal).",
         });
       }
+
+      const whCheck = await assertWarehouseInBranch(it.warehouse_id, branch_id, t);
+      if (!whCheck.ok) {
+        await t.rollback();
+        return res.status(403).json({ ok: false, code: whCheck.code, message: whCheck.message });
+      }
+    }
+
+    // ✅ Validar Product.branch_id si existe (cuando agregues columna)
+    if (Product?.rawAttributes?.branch_id) {
+      const ids = [...new Set(normItems.map((x) => x.product_id))];
+      const prods = await Product.findAll({
+        where: { id: ids },
+        attributes: ["id", "branch_id"],
+        transaction: t,
+      });
+
+      const map = new Map(prods.map((p) => [toInt(p.id, 0), toInt(p.branch_id, 0)]));
+      for (const it of normItems) {
+        const pb = map.get(toInt(it.product_id, 0));
+        if (!pb) {
+          await t.rollback();
+          return res.status(400).json({
+            ok: false,
+            code: "PRODUCT_NOT_FOUND",
+            message: `Producto no existe: product_id=${it.product_id}`,
+          });
+        }
+        if (toInt(pb, 0) !== toInt(branch_id, 0)) {
+          await t.rollback();
+          return res.status(403).json({
+            ok: false,
+            code: "CROSS_BRANCH_PRODUCT",
+            message: `Producto ${it.product_id} no pertenece a la sucursal del usuario.`,
+          });
+        }
+      }
     }
 
     const subtotal = normItems.reduce((a, it) => a + it.line_total, 0);
@@ -326,9 +417,8 @@ async function createSale(req, res, next) {
     const paid_total = payments.reduce((a, p) => a + toFloat(p?.amount, 0), 0);
     const change_total = Math.max(0, paid_total - total);
 
-    // Si Sale tiene warehouse_id (algunos schemas lo exigen), setearlo sin romper schemas que no lo tienen:
     const salePayload = {
-      branch_id,
+      branch_id, // ✅ enforce del usuario
       user_id,
       customer_name,
       status,
@@ -341,8 +431,9 @@ async function createSale(req, res, next) {
       change_total,
     };
 
-    if (Sale?.rawAttributes?.warehouse_id) {
-      salePayload.warehouse_id = normItems[0]?.warehouse_id || null;
+    // sale_number si lo mandan
+    if (typeof req.body?.sale_number === "string" && req.body.sale_number.trim()) {
+      salePayload.sale_number = req.body.sale_number.trim();
     }
 
     const sale = await Sale.create(salePayload, { transaction: t });
@@ -388,10 +479,21 @@ async function createSale(req, res, next) {
 
 // ============================
 // DELETE /api/v1/pos/sales/:id
+// (bloquea cross-branch)
 // ============================
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
+    const branch_id = getAuthBranchId(req);
+    if (!branch_id) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
     const id = toInt(req.params.id, 0);
     if (!id) {
       await t.rollback();
@@ -402,6 +504,15 @@ async function deleteSale(req, res, next) {
     if (!sale) {
       await t.rollback();
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
+    }
+
+    if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+      await t.rollback();
+      return res.status(403).json({
+        ok: false,
+        code: "CROSS_BRANCH_SALE",
+        message: "No podés eliminar una venta de otra sucursal.",
+      });
     }
 
     await Payment.destroy({ where: { sale_id: id }, transaction: t });
