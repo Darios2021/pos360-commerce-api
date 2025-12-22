@@ -12,29 +12,28 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // 1) Branch del usuario (tomamos la primera)
-    const [[ub]] = await sequelize.query(
+    // 1) branch_id desde users (tu DB real)
+    const [[u]] = await sequelize.query(
       `
       SELECT branch_id
-      FROM user_branches
-      WHERE user_id = :userId
-      ORDER BY branch_id ASC
+      FROM users
+      WHERE id = :userId
       LIMIT 1
       `,
       { replacements: { userId } }
     );
 
-    if (!ub?.branch_id) {
+    if (!u?.branch_id) {
       return res.status(409).json({
         ok: false,
         code: "USER_WITHOUT_BRANCH",
-        message: `El usuario ${userId} no tiene sucursal asignada (user_branches).`,
+        message: `El usuario ${userId} no tiene branch_id asignado (users).`,
       });
     }
 
-    const branchId = Number(ub.branch_id);
+    const branchId = Number(u.branch_id);
 
-    // 2) Branch (NO pedimos phone)
+    // 2) Branch
     const [[branch]] = await sequelize.query(
       `
       SELECT id, name
@@ -53,7 +52,7 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // 3) Warehouse (1 depósito por sucursal => tomamos el primero)
+    // 3) Warehouse default (primero por sucursal)
     const [[wh]] = await sequelize.query(
       `
       SELECT id, name, branch_id
@@ -73,9 +72,9 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // ✅ Contexto listo
+    // ✅ Contexto
     req.ctx = {
-      branchId: branchId,
+      branchId,
       warehouseId: Number(wh.id),
       branch,
       warehouse: wh,
@@ -92,4 +91,4 @@ async function branchContext(req, res, next) {
   }
 }
 
-module.exports = { branchContext };
+module.exports = branchContext;
