@@ -1,8 +1,8 @@
 // src/controllers/dashboard.controller.js
-const { Op, fn, col, literal } = require("sequelize");
-const { Product, Category, Sale, SaleItem, Payment } = require("../models");
+const { Op, fn, col, Sequelize } = require("sequelize");
+const { Product, Category, Sale, Payment } = require("../models");
 
-// Helpers
+// ===== Helpers =====
 function ymd(d) {
   const x = new Date(d);
   const yyyy = x.getFullYear();
@@ -40,17 +40,12 @@ async function inventory(req, res, next) {
     const totalProducts = await Product.count();
     const activeProducts = await Product.count({ where: { is_active: 1 } });
 
-    // sin precio (price_list=0 y price=0) o null
+    // Sin precio (price_list<=0 y price<=0)
     const noPriceProducts = await Product.count({
       where: {
-        [Op.or]: [
-          { price_list: { [Op.lte]: 0 } },
-          { price_list: null },
-        ],
         [Op.and]: [
-          {
-            [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }],
-          },
+          { [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] },
+          { [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] },
         ],
       },
     });
@@ -102,36 +97,30 @@ async function sales(req, res, next) {
     const from = startOfDay(now);
     const to = endOfDay(now);
 
-    // Ventas hoy
+    // --- Ventas hoy ---
     const todayCount = await Sale.count({
-      where: {
-        sold_at: { [Op.between]: [from, to] },
-        status: "PAID",
-      },
+      where: { sold_at: { [Op.between]: [from, to] }, status: "PAID" },
     });
 
     const todayTotalRow = await Sale.findOne({
       attributes: [[fn("SUM", col("total")), "sum_total"]],
-      where: {
-        sold_at: { [Op.between]: [from, to] },
-        status: "PAID",
-      },
+      where: { sold_at: { [Op.between]: [from, to] }, status: "PAID" },
       raw: true,
     });
 
     const todayTotal = Number(todayTotalRow?.sum_total || 0);
     const avgTicket = todayCount > 0 ? todayTotal / todayCount : 0;
 
-    // Pagos hoy por método
+    // --- Pagos hoy por método ---
+    // ✅ IMPORTANTÍSIMO: NO usamos "as: sale" porque tu asociación Payment.belongsTo(Sale) no tiene alias.
     const paymentRows = await Payment.findAll({
       attributes: ["method", [fn("SUM", col("amount")), "sum_amount"]],
       include: [
         {
           model: Sale,
-          as: "sale",
           attributes: [],
-          where: { sold_at: { [Op.between]: [from, to] }, status: "PAID" },
           required: true,
+          where: { sold_at: { [Op.between]: [from, to] }, status: "PAID" },
         },
       ],
       group: ["method"],
@@ -152,7 +141,7 @@ async function sales(req, res, next) {
       }
     }
 
-    // Ventas últimos 7 días (por fecha)
+    // --- Ventas últimos 7 días ---
     const days = 7;
     const start = new Date();
     start.setDate(start.getDate() - (days - 1));
@@ -160,19 +149,19 @@ async function sales(req, res, next) {
 
     const salesByDayRows = await Sale.findAll({
       attributes: [
-        [fn("DATE", col("sold_at")), "d"],
+        [fn("DATE", col("sold_at")), "day"],
         [fn("SUM", col("total")), "sum_total"],
       ],
       where: { sold_at: { [Op.gte]: start }, status: "PAID" },
-      group: [literal("d")],
-      order: [[literal("d"), "ASC"]],
+      group: [fn("DATE", col("sold_at"))], // ✅ más robusto en MySQL
+      order: [[fn("DATE", col("sold_at")), "ASC"]],
       raw: true,
     });
 
-    // armamos array completo de 7 días (aunque no haya ventas)
     const map = new Map();
     for (const r of salesByDayRows) {
-      map.set(String(r.d), Number(r.sum_total || 0));
+      // r.day suele venir como 'YYYY-MM-DD'
+      map.set(String(r.day), Number(r.sum_total || 0));
     }
 
     const salesByDay = [];
@@ -180,24 +169,17 @@ async function sales(req, res, next) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
       const key = ymd(d);
-      salesByDay.push({
-        date: key,
-        total: map.get(key) || 0,
-      });
+      salesByDay.push({ date: key, total: map.get(key) || 0 });
     }
 
-    // Últimas ventas (para tabla)
+    // --- Últimas ventas (tabla) ---
     const lastSales = await Sale.findAll({
       where: { status: "PAID" },
       order: [["id", "DESC"]],
       limit: 10,
       include: [
-        {
-          model: Payment,
-          as: "payments",
-          attributes: ["id", "method", "amount", "paid_at"],
-          required: false,
-        },
+        // ✅ acá SÍ usamos alias "payments" porque vos lo definiste en Sale.hasMany(Payment, { as: "payments" })
+        { model: Payment, as: "payments", required: false },
       ],
     });
 
@@ -214,6 +196,7 @@ async function sales(req, res, next) {
       },
     });
   } catch (e) {
+    console.error("❌ [DASHBOARD SALES ERROR]", e);
     next(e);
   }
 }
