@@ -1,8 +1,11 @@
 // src/routes/dashboard.routes.js
 const router = require("express").Router();
-const ctrl = require("../controllers/dashboard.controller");
+const dashboardCtrl = require("../controllers/dashboard.controller");
 
-router.get("/inventory", ctrl.inventory);
-router.get("/sales", ctrl.sales);
+// GET /api/v1/dashboard/inventory
+router.get("/inventory", dashboardCtrl.inventory);
+
+// GET /api/v1/dashboard/sales
+router.get("/sales", dashboardCtrl.sales);
 
 module.exports = router;

@@ -25,23 +25,31 @@ router.use("/auth", authRoutes);
 // Uploads + imágenes + inventory (PROTEGIDO)
 // =====================
 
-// ✅ OJO: si montás /upload, adentro NO debe ser /upload otra vez.
+// ⚠️ IMPORTANTE:
+// si montás /upload, adentro NO debe volver a llamarse /upload
 router.use("/upload", requireAuth, require("./uploads.routes"));
 
-// Productos / categorías
+// =====================
+// Productos / Categorías
+// =====================
 router.use("/products", requireAuth, require("./products.routes"));
 router.use("/categories", requireAuth, require("./categories.routes"));
 
-// Import
+// =====================
+// Importaciones
+// =====================
 router.use("/import", requireAuth, require("./import.routes"));
 
-// Otros
+// =====================
+// Estructura / Stock
+// =====================
 router.use("/branches", requireAuth, require("./branches.routes"));
 router.use("/warehouses", requireAuth, require("./warehouses.routes"));
 router.use("/stock", requireAuth, require("./stock.routes"));
 
 // =====================
-// DASHBOARD (PROTEGIDO) ✅ KPIs Inventario / Ventas
+// DASHBOARD (PROTEGIDO)
+// KPIs Inventario + Ventas (ApexCharts)
 // =====================
 router.use("/dashboard", requireAuth, require("./dashboard.routes"));
 
