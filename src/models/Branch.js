@@ -1,3 +1,4 @@
+// src/models/Branch.js
 module.exports = (sequelize, DataTypes) => {
   return sequelize.define(
     "Branch",
@@ -12,6 +13,7 @@ module.exports = (sequelize, DataTypes) => {
     {
       tableName: "branches",
       timestamps: true,
+      underscored: true,
       createdAt: "created_at",
       updatedAt: "updated_at",
     }
