@@ -93,6 +93,14 @@ Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
 Product.hasMany(ProductImage, { foreignKey: "product_id", as: "images" });
 ProductImage.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 
+// ✅ Product ↔ Branch  (esto evita: "Branch is not associated to Product!")
+Product.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
+Branch.hasMany(Product, { foreignKey: "branch_id", as: "products" });
+
+
+Product.hasMany(ProductImage, { foreignKey: "product_id", as: "images" });
+ProductImage.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+
 // Branch/Warehouse
 Warehouse.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
 Branch.hasMany(Warehouse, { foreignKey: "branch_id", as: "warehouses" });
