@@ -87,7 +87,7 @@ Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
 Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
 
 // ==========================================
-// ✅ Productos + Branch (CLAVE para tu caso)
+// ✅ Productos + Branch
 // ==========================================
 
 // Product ↔ Category
@@ -98,8 +98,7 @@ if (!Category.associations?.products) {
   Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
 }
 
-// ✅ Product ↔ Branch (esto evita: "Branch is not associated to Product!")
-// Requiere columna products.branch_id en BD/model (vos ya la estás usando).
+// ✅ Product ↔ Branch
 if (!Product.associations?.branch) {
   Product.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
 }
@@ -107,7 +106,7 @@ if (!Branch.associations?.products) {
   Branch.hasMany(Product, { foreignKey: "branch_id", as: "products" });
 }
 
-// ✅ Product ↔ Images (evita duplicar alias "images")
+// ✅ Product ↔ Images
 if (!Product.associations?.images) {
   Product.hasMany(ProductImage, { foreignKey: "product_id", as: "images" });
 }
@@ -152,7 +151,7 @@ if (!SaleItem.associations?.warehouse) {
   SaleItem.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 }
 
-// ✅ Pagos (ALIAS CLAVE para dashboard)
+// ✅ Pagos
 if (!Sale.associations?.payments) {
   Sale.hasMany(Payment, { foreignKey: "sale_id", as: "payments" });
 }
