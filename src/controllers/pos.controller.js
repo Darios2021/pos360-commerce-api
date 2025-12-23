@@ -9,6 +9,7 @@ const {
   StockBalance,
   StockMovement,
   StockMovementItem,
+  Warehouse,
 } = require("../models");
 
 function toNum(v, def = 0) {
@@ -19,6 +20,16 @@ function toNum(v, def = 0) {
 function toInt(v, def = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : def;
+}
+
+function normalizeRoles(raw) {
+  if (!raw || !Array.isArray(raw)) return [];
+  return raw.map((r) => String(r || "").toLowerCase()).filter(Boolean);
+}
+
+function isAdminReq(req) {
+  const roles = normalizeRoles(req?.user?.roles);
+  return roles.includes("admin");
 }
 
 /**
@@ -41,6 +52,23 @@ function resolvePosContext(req) {
   return { branchId, warehouseId };
 }
 
+/**
+ * ✅ si no viene warehouse_id:
+ * - intenta tomar el "primer warehouse" de la sucursal (branch_id)
+ */
+async function resolveWarehouseForBranch(branchId) {
+  const bid = toInt(branchId, 0);
+  if (!bid) return 0;
+
+  const w = await Warehouse.findOne({
+    where: { branch_id: bid },
+    order: [["id", "ASC"]],
+    attributes: ["id"],
+  });
+
+  return toInt(w?.id, 0);
+}
+
 async function getContext(req, res) {
   const { branchId, warehouseId } = resolvePosContext(req);
 
@@ -48,12 +76,10 @@ async function getContext(req, res) {
     ok: true,
     data: {
       user: req.user
-        ? { id: req.user.id, email: req.user.email, username: req.user.username }
+        ? { id: req.user.id, email: req.user.email, username: req.user.username, branch_id: req.user.branch_id, roles: req.user.roles }
         : null,
-      // si tu middleware setea req.ctx.branch/warehouse, lo devolvemos
       branch: req?.ctx?.branch || (branchId ? { id: branchId } : null),
       warehouse: req?.ctx?.warehouse || (warehouseId ? { id: warehouseId } : null),
-      // ids explícitos (para debug)
       branchId: branchId || null,
       warehouseId: warehouseId || null,
     },
@@ -156,22 +182,35 @@ async function createSale(req, res) {
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No autenticado" });
     }
 
-    const userId = req.user.id;
-    const { branchId, warehouseId } = resolvePosContext(req);
+    const userId = toInt(req.user.id, 0);
+    const admin = isAdminReq(req);
 
-    if (!branchId) {
+    // ✅ branch: user normal = SIEMPRE su branch_id. admin: puede mandar branch_id, si no usa el suyo
+    const userBranchId = toInt(req.user.branch_id, 0);
+    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
+
+    const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
+
+    if (!resolvedBranchId) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
-        message: "Falta branch_id (sucursal). Enviá branch_id o configurá req.ctx.branchId.",
+        message: "Falta branch_id (sucursal). El usuario no tiene sucursal asignada.",
       });
     }
 
-    if (!warehouseId) {
+    // ✅ warehouse: si no viene, intentamos resolver por branch
+    let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
+    if (!resolvedWarehouseId) {
+      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+    }
+
+    if (!resolvedWarehouseId) {
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
-        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá req.ctx.warehouseId.",
+        message:
+          "Falta warehouse_id (depósito). Enviá warehouse_id o asegurate de tener al menos 1 depósito creado para la sucursal.",
       });
     }
 
@@ -210,8 +249,8 @@ async function createSale(req, res) {
 
     const sale = await Sale.create(
       {
-        branch_id: branchId,
-        user_id: userId,
+        branch_id: resolvedBranchId,
+        user_id: userId, // ✅ siempre registra el usuario logueado
         status: "PAID",
         sale_number: null,
         customer_name,
@@ -230,7 +269,7 @@ async function createSale(req, res) {
     const movement = await StockMovement.create(
       {
         type: "out",
-        warehouse_id: warehouseId,
+        warehouse_id: resolvedWarehouseId,
         ref_type: "sale",
         ref_id: String(sale.id),
         note: `Venta POS #${sale.id}`,
@@ -249,21 +288,23 @@ async function createSale(req, res) {
       }
 
       const sb = await StockBalance.findOne({
-        where: { warehouse_id: warehouseId, product_id: it.product_id },
+        where: { warehouse_id: resolvedWarehouseId, product_id: it.product_id },
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
 
       if (!sb) {
         throw Object.assign(
-          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${warehouseId}`),
+          new Error(
+            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
+          ),
           { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
         );
       }
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(`Stock insuficiente (depósito ${warehouseId}) para producto ${p.sku || p.id}`),
+          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
           { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
         );
       }
@@ -276,7 +317,7 @@ async function createSale(req, res) {
         {
           sale_id: sale.id,
           product_id: it.product_id,
-          warehouse_id: warehouseId,
+          warehouse_id: resolvedWarehouseId,
           quantity: it.quantity,
           unit_price: it.unit_price,
           discount_amount: 0,
@@ -349,7 +390,7 @@ async function createSale(req, res) {
         sale_id: sale.id,
         branch_id: sale.branch_id,
         user_id: sale.user_id,
-        warehouse_id: warehouseId,
+        warehouse_id: resolvedWarehouseId,
         subtotal: sale.subtotal,
         total: sale.total,
         paid_total: sale.paid_total,
