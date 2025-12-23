@@ -1,26 +1,26 @@
 // src/routes/pos.routes.js
 const router = require("express").Router();
-
-// ✅ IMPORT CORRECTO: destructuring (porque auth.js exporta un objeto)
 const { requireAuth } = require("../middlewares/auth");
 
-const {
-  listSales,
-  getSaleById,
-  createSale,
-  deleteSale,
-} = require("../controllers/posSales.controller");
+// ✅ POS controller (context + products + createSale con stock)
+const posController = require("../controllers/pos.controller");
 
-// Listado
-router.get("/sales", requireAuth, listSales);
+// ✅ POS Sales controller (list/get/delete)
+const posSalesController = require("../controllers/posSales.controller");
 
-// Detalle
-router.get("/sales/:id", requireAuth, getSaleById);
+// ===== CONTEXTO POS =====
+router.get("/context", requireAuth, posController.getContext);
 
-// Crear
-router.post("/sales", requireAuth, createSale);
+// ===== PRODUCTOS POS (por depósito) =====
+router.get("/products", requireAuth, posController.listProductsForPos);
 
-// Borrar
-router.delete("/sales/:id", requireAuth, deleteSale);
+// ===== VENTAS =====
+router.get("/sales", requireAuth, posSalesController.listSales);
+router.get("/sales/:id", requireAuth, posSalesController.getSaleById);
+
+// ✅ CLAVE: crear venta usando el controller que descuenta stock
+router.post("/sales", requireAuth, posController.createSale);
+
+router.delete("/sales/:id", requireAuth, posSalesController.deleteSale);
 
 module.exports = router;

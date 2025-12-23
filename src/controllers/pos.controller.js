@@ -86,6 +86,7 @@ async function getContext(req, res) {
   });
 }
 
+// REEMPLAZAR SOLO ESTA FUNCIÓN en src/controllers/pos.controller.js
 async function listProductsForPos(req, res) {
   try {
     const { warehouseId } = resolvePosContext(req);
@@ -103,6 +104,9 @@ async function listProductsForPos(req, res) {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const offset = (page - 1) * limit;
 
+    // ✅ por defecto NO mostrar sin stock
+    const inStock = String(req.query.in_stock ?? "1") === "1";
+
     const like = `%${q}%`;
 
     const whereQ = q
@@ -111,6 +115,8 @@ async function listProductsForPos(req, res) {
           OR p.brand LIKE :like OR p.model LIKE :like
         )`
       : "";
+
+    const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
     const [rows] = await sequelize.query(
       `
@@ -132,6 +138,7 @@ async function listProductsForPos(req, res) {
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
       WHERE p.is_active = 1
       ${whereQ}
+      ${whereStock}
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
@@ -140,21 +147,18 @@ async function listProductsForPos(req, res) {
       }
     );
 
+    // ✅ count consistente con el listado (incluye filtro de stock)
     const [[countRow]] = await sequelize.query(
       `
       SELECT COUNT(*) AS total
       FROM products p
+      LEFT JOIN stock_balances sb
+        ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
       WHERE p.is_active = 1
-      ${
-        q
-          ? `AND (
-        p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
-        OR p.brand LIKE :like OR p.model LIKE :like
-      )`
-          : ""
-      }
+      ${whereQ}
+      ${whereStock}
       `,
-      { replacements: { like } }
+      { replacements: { warehouseId, like } }
     );
 
     return res.json({
@@ -167,6 +171,7 @@ async function listProductsForPos(req, res) {
     return res.status(500).json({ ok: false, code: "POS_PRODUCTS_ERROR", message: e.message });
   }
 }
+
 
 async function createSale(req, res) {
   let t;
