@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category } = require("../models");
+const { Product, Category, ProductImage, Branch } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -30,21 +30,40 @@ function getBranchId(req) {
 
 // ✅ detecta si Product tiene branch_id real en el modelo
 function productHasBranch() {
-  return !!(
-    Product?.rawAttributes &&
-    Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id")
-  );
+  return !!(Product?.rawAttributes && Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id"));
+}
+
+// ✅ roles
+function getRoles(req) {
+  if (Array.isArray(req?.user?.roles)) return req.user.roles;
+  if (Array.isArray(req?.user?.role_names)) return req.user.role_names;
+  return [];
+}
+
+function isAdminLike(req) {
+  const roles = getRoles(req);
+  return roles.includes("admin") || roles.includes("super_admin");
+}
+
+function requireAdmin(req, res) {
+  if (!isAdminLike(req)) {
+    res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo admin puede realizar esta acción." });
+    return false;
+  }
+  return true;
 }
 
 // ✅ arma includes sólo si la asociación existe en Product.associations
-function buildProductIncludes() {
+function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
   const A = Product?.associations || {};
 
-  // category + parent
+  // category
   const catAs = A.category ? "category" : A.Category ? "Category" : null;
   if (catAs) {
     const catInclude = { association: catAs, required: false };
+
+    // parent dentro de category
     try {
       const CatModel = A[catAs]?.target || Category;
       const CA = CatModel?.associations || {};
@@ -53,10 +72,11 @@ function buildProductIncludes() {
     } catch {
       // no-op
     }
+
     inc.push(catInclude);
   }
 
-  // subcategory (si existe)
+  // subcategory
   const subAs =
     A.subcategory ? "subcategory" :
     A.sub_category ? "sub_category" :
@@ -64,13 +84,42 @@ function buildProductIncludes() {
     null;
   if (subAs) inc.push({ association: subAs, required: false });
 
-  // images (si existe)
+  // images
   const imgAs =
     A.images ? "images" :
     A.productImages ? "productImages" :
     A.ProductImages ? "ProductImages" :
     null;
   if (imgAs) inc.push({ association: imgAs, required: false });
+
+  // ✅ branch (para que admin vea en qué sucursal está cada producto)
+  if (includeBranch && Branch) {
+    const bAs =
+      A.branch ? "branch" :
+      A.Branch ? "Branch" :
+      null;
+
+    if (bAs) {
+      inc.push({
+        association: bAs,
+        required: false,
+        attributes: ["id", "code", "name"],
+      });
+    } else {
+      // fallback por si no hay association, pero existe modelo Branch:
+      // incluir por FK estándar branch_id -> Branch.id
+      // (esto requiere que Product tenga branch_id y que Sequelize pueda resolver la relación vía model)
+      // Si te da "Include unexpected", entonces te falta la asociación en models.
+      if (productHasBranch()) {
+        inc.push({
+          model: Branch,
+          as: "branch",
+          required: false,
+          attributes: ["id", "code", "name"],
+        });
+      }
+    }
+  }
 
   return inc;
 }
@@ -100,6 +149,7 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "tax_rate",
+    "branch_id", // 👈 lo controlamos abajo (solo admin)
   ];
 
   for (const k of fields) {
@@ -120,44 +170,23 @@ function pickBody(body = {}) {
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
 
+  if (out.branch_id != null) out.branch_id = toInt(out.branch_id, null);
+
   return out;
-}
-
-function requireAdmin(req, res) {
-  const roles = Array.isArray(req?.user?.roles) ? req.user.roles : [];
-  if (!roles.includes("admin") && !roles.includes("super_admin")) {
-    res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo admin puede realizar esta acción." });
-    return false;
-  }
-  return true;
-}
-
-/**
- * helper: aplica regla cross-branch si corresponde
- */
-function ensureSameBranchOr403(req, res, product) {
-  if (!productHasBranch()) return true; // si el modelo no tiene branch_id, no bloqueamos
-  const branch_id = getBranchId(req);
-  const pb = toInt(product?.branch_id, 0);
-  if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
-    res.status(403).json({
-      ok: false,
-      code: "CROSS_BRANCH_PRODUCT",
-      message: "No podés acceder a un producto de otra sucursal.",
-    });
-    return false;
-  }
-  return true;
 }
 
 // ============================
 // GET /api/v1/products
-// ✅ FILTRA por sucursal (branch_id)
+// ✅ USER normal: SOLO SU branch
+// ✅ ADMIN: TODOS + incluye branch
 // ============================
 async function list(req, res, next) {
   try {
+    const admin = isAdminLike(req);
     const branch_id = getBranchId(req);
-    if (!branch_id) {
+
+    // user normal necesita branch sí o sí
+    if (!admin && !branch_id) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -171,9 +200,10 @@ async function list(req, res, next) {
 
     const q = String(req.query.q || "").trim();
 
-    const where = productHasBranch() ? { branch_id } : {};
+    // ✅ filtro por sucursal solo para NO admin
+    const where = admin ? {} : { branch_id };
 
-    // opcional: solo activos
+    // opcional: only actives
     // where.is_active = 1;
 
     if (q) {
@@ -189,7 +219,7 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    const include = buildProductIncludes();
+    const include = buildProductIncludes({ includeBranch: admin });
 
     const { count, rows } = await Product.findAndCountAll({
       where,
@@ -197,7 +227,7 @@ async function list(req, res, next) {
       limit,
       offset,
       include,
-      distinct: true, // ✅ count correcto con includes
+      distinct: true,
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
@@ -214,17 +244,39 @@ async function list(req, res, next) {
 
 // ============================
 // GET /api/v1/products/:id
+// ✅ USER normal: solo su branch
+// ✅ ADMIN: cualquiera
 // ============================
 async function getOne(req, res, next) {
   try {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
-    const include = buildProductIncludes();
+    const admin = isAdminLike(req);
+    const include = buildProductIncludes({ includeBranch: admin });
+
     const p = await Product.findByPk(id, { include });
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (!ensureSameBranchOr403(req, res, p)) return;
+    if (!admin && productHasBranch()) {
+      const branch_id = getBranchId(req);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
+      }
+
+      const pb = toInt(p.branch_id, 0);
+      if (pb > 0 && pb !== toInt(branch_id, 0)) {
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_PRODUCT",
+          message: "No podés ver un producto de otra sucursal.",
+        });
+      }
+    }
 
     return res.json({ ok: true, data: p });
   } catch (e) {
@@ -234,6 +286,8 @@ async function getOne(req, res, next) {
 
 // ============================
 // POST /api/v1/products
+// ✅ USER normal: crea en SU branch
+// ✅ ADMIN: puede mandar branch_id (si no manda, usa su branch)
 // ============================
 async function create(req, res, next) {
   try {
@@ -246,16 +300,27 @@ async function create(req, res, next) {
       });
     }
 
+    const admin = isAdminLike(req);
+
     if (productHasBranch()) {
       const branch_id = getBranchId(req);
-      if (!branch_id) {
-        return res.status(400).json({
-          ok: false,
-          code: "BRANCH_REQUIRED",
-          message: "No se pudo determinar la sucursal del usuario (branch_id).",
-        });
+
+      if (admin) {
+        // admin puede elegir branch_id, si no viene, usa su branch
+        payload.branch_id = payload.branch_id || branch_id || null;
+      } else {
+        if (!branch_id) {
+          return res.status(400).json({
+            ok: false,
+            code: "BRANCH_REQUIRED",
+            message: "No se pudo determinar la sucursal del usuario (branch_id).",
+          });
+        }
+        payload.branch_id = branch_id;
       }
-      payload.branch_id = branch_id;
+    } else {
+      // si no existe branch_id en Product, lo removemos para que no rompa
+      delete payload.branch_id;
     }
 
     const created = await Product.create(payload);
@@ -267,23 +332,50 @@ async function create(req, res, next) {
 
 // ============================
 // PATCH /api/v1/products/:id
+// ✅ USER normal: solo su branch + NO puede cambiar branch_id
+// ✅ ADMIN: puede editar cualquiera y puede cambiar branch_id
 // ============================
 async function update(req, res, next) {
   try {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
+    const admin = isAdminLike(req);
+
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (!ensureSameBranchOr403(req, res, p)) return;
+    if (!admin && productHasBranch()) {
+      const branch_id = getBranchId(req);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
+      }
+
+      const pb = toInt(p.branch_id, 0);
+      if (pb > 0 && pb !== toInt(branch_id, 0)) {
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_PRODUCT",
+          message: "No podés modificar un producto de otra sucursal.",
+        });
+      }
+    }
 
     const patch = pickBody(req.body || {});
-    delete patch.branch_id;
+
+    // user normal NO cambia branch
+    if (!admin) delete patch.branch_id;
+
+    // si el modelo ni tiene branch_id, removemos siempre
+    if (!productHasBranch()) delete patch.branch_id;
 
     await p.update(patch);
 
-    const include = buildProductIncludes();
+    const include = buildProductIncludes({ includeBranch: admin });
     const updated = await Product.findByPk(id, { include });
 
     return res.json({ ok: true, message: "Producto actualizado", data: updated });
@@ -304,8 +396,6 @@ async function remove(req, res, next) {
 
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
-
-    if (!ensureSameBranchOr403(req, res, p)) return;
 
     await p.destroy();
     return res.json({ ok: true, message: "Producto eliminado" });
