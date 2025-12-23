@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op } = require("sequelize");
-const { Product, Category, ProductImage } = require("../models");
+const { Product, Category } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -30,7 +30,10 @@ function getBranchId(req) {
 
 // ✅ detecta si Product tiene branch_id real en el modelo
 function productHasBranch() {
-  return !!(Product?.rawAttributes && Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id"));
+  return !!(
+    Product?.rawAttributes &&
+    Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id")
+  );
 }
 
 // ✅ arma includes sólo si la asociación existe en Product.associations
@@ -38,10 +41,10 @@ function buildProductIncludes() {
   const inc = [];
   const A = Product?.associations || {};
 
+  // category + parent
   const catAs = A.category ? "category" : A.Category ? "Category" : null;
   if (catAs) {
     const catInclude = { association: catAs, required: false };
-
     try {
       const CatModel = A[catAs]?.target || Category;
       const CA = CatModel?.associations || {};
@@ -50,10 +53,10 @@ function buildProductIncludes() {
     } catch {
       // no-op
     }
-
     inc.push(catInclude);
   }
 
+  // subcategory (si existe)
   const subAs =
     A.subcategory ? "subcategory" :
     A.sub_category ? "sub_category" :
@@ -61,12 +64,12 @@ function buildProductIncludes() {
     null;
   if (subAs) inc.push({ association: subAs, required: false });
 
+  // images (si existe)
   const imgAs =
     A.images ? "images" :
     A.productImages ? "productImages" :
     A.ProductImages ? "ProductImages" :
     null;
-
   if (imgAs) inc.push({ association: imgAs, required: false });
 
   return inc;
@@ -129,13 +132,30 @@ function requireAdmin(req, res) {
   return true;
 }
 
+/**
+ * helper: aplica regla cross-branch si corresponde
+ */
+function ensureSameBranchOr403(req, res, product) {
+  if (!productHasBranch()) return true; // si el modelo no tiene branch_id, no bloqueamos
+  const branch_id = getBranchId(req);
+  const pb = toInt(product?.branch_id, 0);
+  if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
+    res.status(403).json({
+      ok: false,
+      code: "CROSS_BRANCH_PRODUCT",
+      message: "No podés acceder a un producto de otra sucursal.",
+    });
+    return false;
+  }
+  return true;
+}
+
 // ============================
 // GET /api/v1/products
-// ✅ Catálogo GLOBAL (no filtra por products.branch_id)
+// ✅ FILTRA por sucursal (branch_id)
 // ============================
 async function list(req, res, next) {
   try {
-    // fuerza a que exista contexto (si querés, si no, podés removerlo)
     const branch_id = getBranchId(req);
     if (!branch_id) {
       return res.status(400).json({
@@ -150,9 +170,10 @@ async function list(req, res, next) {
     const offset = (page - 1) * limit;
 
     const q = String(req.query.q || "").trim();
-    const where = {}; // ✅ sin branch_id
 
-    // (opcional) mostrar solo activos:
+    const where = productHasBranch() ? { branch_id } : {};
+
+    // opcional: solo activos
     // where.is_active = 1;
 
     if (q) {
@@ -203,18 +224,7 @@ async function getOne(req, res, next) {
     const p = await Product.findByPk(id, { include });
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    // ✅ Cross-branch solo si existe branch_id real
-    if (productHasBranch()) {
-      const branch_id = getBranchId(req);
-      const pb = toInt(p.branch_id, 0);
-      if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
-        return res.status(403).json({
-          ok: false,
-          code: "CROSS_BRANCH_PRODUCT",
-          message: "No podés ver un producto de otra sucursal.",
-        });
-      }
-    }
+    if (!ensureSameBranchOr403(req, res, p)) return;
 
     return res.json({ ok: true, data: p });
   } catch (e) {
@@ -236,7 +246,6 @@ async function create(req, res, next) {
       });
     }
 
-    // ✅ solo si existe branch_id en Product
     if (productHasBranch()) {
       const branch_id = getBranchId(req);
       if (!branch_id) {
@@ -267,17 +276,7 @@ async function update(req, res, next) {
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (productHasBranch()) {
-      const branch_id = getBranchId(req);
-      const pb = toInt(p.branch_id, 0);
-      if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
-        return res.status(403).json({
-          ok: false,
-          code: "CROSS_BRANCH_PRODUCT",
-          message: "No podés modificar un producto de otra sucursal.",
-        });
-      }
-    }
+    if (!ensureSameBranchOr403(req, res, p)) return;
 
     const patch = pickBody(req.body || {});
     delete patch.branch_id;
@@ -306,17 +305,7 @@ async function remove(req, res, next) {
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (productHasBranch()) {
-      const branch_id = getBranchId(req);
-      const pb = toInt(p.branch_id, 0);
-      if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
-        return res.status(403).json({
-          ok: false,
-          code: "CROSS_BRANCH_PRODUCT",
-          message: "No podés eliminar un producto de otra sucursal.",
-        });
-      }
-    }
+    if (!ensureSameBranchOr403(req, res, p)) return;
 
     await p.destroy();
     return res.json({ ok: true, message: "Producto eliminado" });
