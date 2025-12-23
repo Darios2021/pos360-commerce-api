@@ -35,17 +35,33 @@ const SaleItem = require("./sale_item.model")(sequelize, DataTypes);
 const Payment = require("./payment.model")(sequelize, DataTypes);
 
 // ==========================================
+// Helpers anti-duplicado de asociaciones
+// ==========================================
+function hasAssoc(model, name) {
+  return !!(model && model.associations && model.associations[name]);
+}
+function safeBelongsTo(model, target, opts) {
+  if (!hasAssoc(model, opts.as)) model.belongsTo(target, opts);
+}
+function safeHasMany(model, target, opts) {
+  if (!hasAssoc(model, opts.as)) model.hasMany(target, opts);
+}
+function safeBelongsToMany(model, target, opts) {
+  if (!hasAssoc(model, opts.as)) model.belongsToMany(target, opts);
+}
+
+// ==========================================
 // ASOCIACIONES
 // ==========================================
 
 // Auth: Users ↔ Roles
-User.belongsToMany(Role, {
+safeBelongsToMany(User, Role, {
   through: { model: UserRole, timestamps: false },
   foreignKey: "user_id",
   otherKey: "role_id",
   as: "roles",
 });
-Role.belongsToMany(User, {
+safeBelongsToMany(Role, User, {
   through: { model: UserRole, timestamps: false },
   foreignKey: "role_id",
   otherKey: "user_id",
@@ -54,13 +70,13 @@ Role.belongsToMany(User, {
 
 // Roles ↔ Permissions (si existe tabla puente)
 if (RolePermission) {
-  Role.belongsToMany(Permission, {
+  safeBelongsToMany(Role, Permission, {
     through: { model: RolePermission, timestamps: false },
     foreignKey: "role_id",
     otherKey: "permission_id",
     as: "permissions",
   });
-  Permission.belongsToMany(Role, {
+  safeBelongsToMany(Permission, Role, {
     through: { model: RolePermission, timestamps: false },
     foreignKey: "permission_id",
     otherKey: "role_id",
@@ -69,13 +85,13 @@ if (RolePermission) {
 }
 
 // ✅ Users ↔ Branches (user_branches)
-User.belongsToMany(Branch, {
+safeBelongsToMany(User, Branch, {
   through: { model: UserBranch, timestamps: false },
   foreignKey: "user_id",
   otherKey: "branch_id",
   as: "branches",
 });
-Branch.belongsToMany(User, {
+safeBelongsToMany(Branch, User, {
   through: { model: UserBranch, timestamps: false },
   foreignKey: "branch_id",
   otherKey: "user_id",
@@ -83,55 +99,52 @@ Branch.belongsToMany(User, {
 });
 
 // Categorías (recursivo)
-Category.belongsTo(Category, { foreignKey: "parent_id", as: "parent" });
-Category.hasMany(Category, { foreignKey: "parent_id", as: "children" });
+safeBelongsTo(Category, Category, { foreignKey: "parent_id", as: "parent" });
+safeHasMany(Category, Category, { foreignKey: "parent_id", as: "children" });
 
-// Productos
-Product.belongsTo(Category, { foreignKey: "category_id", as: "category" });
-Category.hasMany(Product, { foreignKey: "category_id", as: "products" });
+// ✅ Product ↔ Branch  (ESTO TE FALTABA)
+safeBelongsTo(Product, Branch, { foreignKey: "branch_id", as: "branch" });
+safeHasMany(Branch, Product, { foreignKey: "branch_id", as: "products" });
 
-Product.hasMany(ProductImage, { foreignKey: "product_id", as: "images" });
-ProductImage.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+// Productos ↔ Category
+safeBelongsTo(Product, Category, { foreignKey: "category_id", as: "category" });
+safeHasMany(Category, Product, { foreignKey: "category_id", as: "products" });
 
-// ✅ Product ↔ Branch  (esto evita: "Branch is not associated to Product!")
-Product.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
-Branch.hasMany(Product, { foreignKey: "branch_id", as: "products" });
-
-
-Product.hasMany(ProductImage, { foreignKey: "product_id", as: "images" });
-ProductImage.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+// ✅ Product ↔ Images (blindado para no duplicar alias "images")
+safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
+safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
 // Branch/Warehouse
-Warehouse.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
-Branch.hasMany(Warehouse, { foreignKey: "branch_id", as: "warehouses" });
+safeBelongsTo(Warehouse, Branch, { foreignKey: "branch_id", as: "branch" });
+safeHasMany(Branch, Warehouse, { foreignKey: "branch_id", as: "warehouses" });
 
 // Stock
-StockBalance.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
-StockBalance.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+safeBelongsTo(StockBalance, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
+safeBelongsTo(StockBalance, Product, { foreignKey: "product_id", as: "product" });
 
 // POS: Sale
-Sale.belongsTo(Branch, { foreignKey: "branch_id", as: "branch" });
-Sale.belongsTo(User, { foreignKey: "user_id", as: "user" });
+safeBelongsTo(Sale, Branch, { foreignKey: "branch_id", as: "branch" });
+safeBelongsTo(Sale, User, { foreignKey: "user_id", as: "user" });
 
-Sale.hasMany(SaleItem, { foreignKey: "sale_id", as: "items" });
-SaleItem.belongsTo(Sale, { foreignKey: "sale_id", as: "sale" });
+safeHasMany(Sale, SaleItem, { foreignKey: "sale_id", as: "items" });
+safeBelongsTo(SaleItem, Sale, { foreignKey: "sale_id", as: "sale" });
 
-SaleItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+safeBelongsTo(SaleItem, Product, { foreignKey: "product_id", as: "product" });
 
 // ✅ warehouse_id NOT NULL + FK en BD
-SaleItem.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
+safeBelongsTo(SaleItem, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 
 // ✅ Pagos (ALIAS CLAVE para dashboard)
-Sale.hasMany(Payment, { foreignKey: "sale_id", as: "payments" });
-Payment.belongsTo(Sale, { foreignKey: "sale_id", as: "sale" });
+safeHasMany(Sale, Payment, { foreignKey: "sale_id", as: "payments" });
+safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 
 // Movimientos
-StockMovement.hasMany(StockMovementItem, { foreignKey: "movement_id", as: "items" });
-StockMovementItem.belongsTo(StockMovement, { foreignKey: "movement_id", as: "movement" });
+safeHasMany(StockMovement, StockMovementItem, { foreignKey: "movement_id", as: "items" });
+safeBelongsTo(StockMovementItem, StockMovement, { foreignKey: "movement_id", as: "movement" });
 
 // ✅ Auditoría
-StockMovement.belongsTo(Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
-StockMovement.belongsTo(User, { foreignKey: "created_by", as: "creator" });
+safeBelongsTo(StockMovement, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
+safeBelongsTo(StockMovement, User, { foreignKey: "created_by", as: "creator" });
 
 module.exports = {
   sequelize,

@@ -12,6 +12,10 @@ function toFloat(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+/**
+ * branchId viene del middleware branchContext (recomendado)
+ * fallback a user.branch_id
+ */
 function getBranchId(req) {
   return (
     toInt(req?.ctx?.branchId, 0) ||
@@ -24,15 +28,8 @@ function getBranchId(req) {
   );
 }
 
-function getRoles(req) {
-  const r = req?.user?.roles;
-  if (Array.isArray(r)) return r;
-  if (Array.isArray(req?.user?.Roles)) return req.user.Roles;
-  return [];
-}
-
-function isAdminReq(req) {
-  const roles = getRoles(req);
+function isAdminUser(req) {
+  const roles = Array.isArray(req?.user?.roles) ? req.user.roles : [];
   return roles.includes("admin") || roles.includes("super_admin");
 }
 
@@ -44,7 +41,7 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
   const A = Product?.associations || {};
 
-  // category + parent
+  // category (+ parent)
   const catAs = A.category ? "category" : A.Category ? "Category" : null;
   if (catAs) {
     const catInclude = { association: catAs, required: false };
@@ -53,24 +50,22 @@ function buildProductIncludes({ includeBranch = false } = {}) {
       const CA = CatModel?.associations || {};
       const parentAs = CA.parent ? "parent" : CA.Parent ? "Parent" : null;
       if (parentAs) catInclude.include = [{ association: parentAs, required: false }];
-    } catch {
-      // ignore
-    }
+    } catch {}
     inc.push(catInclude);
   }
 
   // images
-  const imgAs =
-    A.images ? "images" :
-    A.productImages ? "productImages" :
-    A.ProductImages ? "ProductImages" :
-    null;
+  const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
 
-  // ✅ branch (solo si existe y lo pedimos)
+  // ✅ branch (solo si existe asociación y lo pedimos)
   if (includeBranch) {
     const brAs = A.branch ? "branch" : A.Branch ? "Branch" : null;
     if (brAs) inc.push({ association: brAs, required: false });
+    else {
+      // fallback por si el modelo existe pero la asociación no está registrada:
+      // NO meter include model porque revienta con "not associated"
+    }
   }
 
   return inc;
@@ -101,7 +96,7 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "tax_rate",
-    "branch_id", // ojo: lo vamos a borrar en update si no sos admin
+    "branch_id", // 👈 permitimos para admin (si querés)
   ];
 
   for (const k of fields) {
@@ -127,7 +122,7 @@ function pickBody(body = {}) {
 }
 
 function requireAdmin(req, res) {
-  if (!isAdminReq(req)) {
+  if (!isAdminUser(req)) {
     res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo admin puede realizar esta acción." });
     return false;
   }
@@ -136,14 +131,16 @@ function requireAdmin(req, res) {
 
 // ============================
 // GET /api/v1/products
-// - USER: ve SOLO su branch_id
-// - ADMIN: ve TODO + branch incluido
+// ✅ user: solo su branch
+// ✅ admin: todo + puede filtrar por ?branch_id=
+// + devuelve branch + stock_qty
 // ============================
 async function list(req, res, next) {
   try {
-    const admin = isAdminReq(req);
-
+    const admin = isAdminUser(req);
     const branch_id = getBranchId(req);
+
+    // user normal: necesito branch sí o sí
     if (!admin && !branch_id) {
       return res.status(400).json({
         ok: false,
@@ -159,12 +156,14 @@ async function list(req, res, next) {
     const q = String(req.query.q || "").trim();
 
     const where = {};
-    // ✅ clave: el NO admin queda filtrado por sucursal
-    if (!admin && productHasBranch()) where.branch_id = branch_id;
-
-    // opcional: filtro por sucursal para admin (?branch_id=2)
-    const branchFilter = toInt(req.query.branch_id, 0);
-    if (admin && branchFilter > 0 && productHasBranch()) where.branch_id = branchFilter;
+    // ✅ filtro de branch
+    if (!admin) {
+      if (productHasBranch()) where.branch_id = branch_id;
+    } else {
+      // admin puede filtrar por query
+      const qb = toInt(req.query.branch_id, 0);
+      if (qb && productHasBranch()) where.branch_id = qb;
+    }
 
     if (q) {
       const qNum = toFloat(q, NaN);
@@ -181,6 +180,17 @@ async function list(req, res, next) {
 
     const include = buildProductIncludes({ includeBranch: admin });
 
+    // ✅ stock_qty por branch del producto (Product.branch_id)
+    const stockLiteral = `
+      (
+        SELECT COALESCE(SUM(sb.qty), 0)
+        FROM stock_balances sb
+        JOIN warehouses w ON w.id = sb.warehouse_id
+        WHERE sb.product_id = Product.id
+        ${productHasBranch() ? "AND w.branch_id = Product.branch_id" : ""}
+      )
+    `;
+
     const { count, rows } = await Product.findAndCountAll({
       where,
       order: [["id", "DESC"]],
@@ -188,6 +198,9 @@ async function list(req, res, next) {
       offset,
       include,
       distinct: true,
+      attributes: {
+        include: [[Product.sequelize.literal(stockLiteral), "stock_qty"]],
+      },
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
@@ -207,27 +220,20 @@ async function list(req, res, next) {
 // ============================
 async function getOne(req, res, next) {
   try {
-    const admin = isAdminReq(req);
-
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
+    const admin = isAdminUser(req);
+
     const include = buildProductIncludes({ includeBranch: admin });
     const p = await Product.findByPk(id, { include });
+
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    // ✅ Cross-branch SOLO para NO admin
     if (!admin && productHasBranch()) {
       const branch_id = getBranchId(req);
-      if (!branch_id) {
-        return res.status(400).json({
-          ok: false,
-          code: "BRANCH_REQUIRED",
-          message: "No se pudo determinar la sucursal del usuario (branch_id).",
-        });
-      }
       const pb = toInt(p.branch_id, 0);
-      if (pb > 0 && pb !== toInt(branch_id, 0)) {
+      if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
         return res.status(403).json({
           ok: false,
           code: "CROSS_BRANCH_PRODUCT",
@@ -244,12 +250,14 @@ async function getOne(req, res, next) {
 
 // ============================
 // POST /api/v1/products
+// ✅ user: crea en su branch
+// ✅ admin: puede mandar branch_id (si no manda, cae al branch del user)
 // ============================
 async function create(req, res, next) {
   try {
-    const admin = isAdminReq(req);
-
+    const admin = isAdminUser(req);
     const payload = pickBody(req.body || {});
+
     if (!payload.sku || !payload.name) {
       return res.status(400).json({
         ok: false,
@@ -258,7 +266,6 @@ async function create(req, res, next) {
       });
     }
 
-    // ✅ Si NO admin, forzamos branch_id del user
     if (productHasBranch()) {
       if (!admin) {
         const branch_id = getBranchId(req);
@@ -271,8 +278,11 @@ async function create(req, res, next) {
         }
         payload.branch_id = branch_id;
       } else {
-        // admin puede setear branch_id si lo manda; si no manda, queda null/lo que tengas
-        if (payload.branch_id == null) payload.branch_id = null;
+        // admin: si no envía branch_id, usamos el branch del contexto si existe
+        if (!payload.branch_id) {
+          const branch_id = getBranchId(req);
+          if (branch_id) payload.branch_id = branch_id;
+        }
       }
     } else {
       delete payload.branch_id;
@@ -290,7 +300,7 @@ async function create(req, res, next) {
 // ============================
 async function update(req, res, next) {
   try {
-    const admin = isAdminReq(req);
+    const admin = isAdminUser(req);
 
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
@@ -311,8 +321,9 @@ async function update(req, res, next) {
     }
 
     const patch = pickBody(req.body || {});
-    // ✅ no admin NO puede cambiar branch_id
+    // user normal: nunca puede tocar branch_id
     if (!admin) delete patch.branch_id;
+    if (!productHasBranch()) delete patch.branch_id;
 
     await p.update(patch);
 
