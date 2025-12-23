@@ -76,7 +76,13 @@ async function getContext(req, res) {
     ok: true,
     data: {
       user: req.user
-        ? { id: req.user.id, email: req.user.email, username: req.user.username, branch_id: req.user.branch_id, roles: req.user.roles }
+        ? {
+            id: req.user.id,
+            email: req.user.email,
+            username: req.user.username,
+            branch_id: req.user.branch_id,
+            roles: req.user.roles,
+          }
         : null,
       branch: req?.ctx?.branch || (branchId ? { id: branchId } : null),
       warehouse: req?.ctx?.warehouse || (warehouseId ? { id: warehouseId } : null),
@@ -86,7 +92,20 @@ async function getContext(req, res) {
   });
 }
 
-// REEMPLAZAR SOLO ESTA FUNCIÓN en src/controllers/pos.controller.js
+/**
+ * ✅ POS PRODUCTS:
+ * Por defecto devuelve SOLO "vendibles":
+ * - activo
+ * - con stock (si in_stock=1)
+ * - con precio efectivo > 0 según price_mode (si sellable=1)
+ *
+ * Query params:
+ * - warehouse_id (required)
+ * - q, page, limit
+ * - in_stock=1|0   (default 1)
+ * - sellable=1|0   (default 1)  -> filtra por precio efectivo > 0
+ * - price_mode=LIST|BASE|DISCOUNT|RESELLER (default LIST)
+ */
 async function listProductsForPos(req, res) {
   try {
     const { warehouseId } = resolvePosContext(req);
@@ -104,8 +123,9 @@ async function listProductsForPos(req, res) {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const offset = (page - 1) * limit;
 
-    // ✅ por defecto NO mostrar sin stock
     const inStock = String(req.query.in_stock ?? "1") === "1";
+    const sellable = String(req.query.sellable ?? "1") === "1";
+    const priceMode = String(req.query.price_mode || "LIST").trim().toUpperCase();
 
     const like = `%${q}%`;
 
@@ -118,6 +138,20 @@ async function listProductsForPos(req, res) {
 
     const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
+    // ✅ precio efectivo según modo (coincide con tu frontend)
+    const priceExpr =
+      priceMode === "BASE"
+        ? `COALESCE(p.price, 0)`
+        : priceMode === "DISCOUNT"
+        ? `COALESCE(NULLIF(p.price_discount,0), NULLIF(p.price_list,0), p.price, 0)`
+        : priceMode === "RESELLER"
+        ? `COALESCE(NULLIF(p.price_reseller,0), NULLIF(p.price_list,0), p.price, 0)`
+        : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`; // LIST
+
+    // ✅ activo siempre (POS)
+    // ✅ sellable=1 => además exige precio>0
+    const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
+
     const [rows] = await sequelize.query(
       `
       SELECT
@@ -128,10 +162,12 @@ async function listProductsForPos(req, res) {
         p.name,
         p.brand,
         p.model,
+        p.is_active,
         p.price,
         p.price_list,
         p.price_discount,
         p.price_reseller,
+        (${priceExpr}) AS effective_price,
         COALESCE(sb.qty, 0) AS qty
       FROM products p
       LEFT JOIN stock_balances sb
@@ -139,15 +175,13 @@ async function listProductsForPos(req, res) {
       WHERE p.is_active = 1
       ${whereQ}
       ${whereStock}
+      ${whereSellable}
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
-      {
-        replacements: { warehouseId, like, limit, offset },
-      }
+      { replacements: { warehouseId, like, limit, offset } }
     );
 
-    // ✅ count consistente con el listado (incluye filtro de stock)
     const [[countRow]] = await sequelize.query(
       `
       SELECT COUNT(*) AS total
@@ -157,6 +191,7 @@ async function listProductsForPos(req, res) {
       WHERE p.is_active = 1
       ${whereQ}
       ${whereStock}
+      ${whereSellable}
       `,
       { replacements: { warehouseId, like } }
     );
@@ -171,7 +206,6 @@ async function listProductsForPos(req, res) {
     return res.status(500).json({ ok: false, code: "POS_PRODUCTS_ERROR", message: e.message });
   }
 }
-
 
 async function createSale(req, res) {
   let t;
@@ -255,7 +289,7 @@ async function createSale(req, res) {
     const sale = await Sale.create(
       {
         branch_id: resolvedBranchId,
-        user_id: userId, // ✅ siempre registra el usuario logueado
+        user_id: userId,
         status: "PAID",
         sale_number: null,
         customer_name,
@@ -300,9 +334,7 @@ async function createSale(req, res) {
 
       if (!sb) {
         throw Object.assign(
-          new Error(
-            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
-          ),
+          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`),
           { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
         );
       }
