@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, ProductImage, Branch, Warehouse, StockBalance } = require("../models");
+const { Product, Category, ProductImage } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -25,7 +25,10 @@ function getBranchId(req) {
 }
 
 function productHasBranch() {
-  return !!(Product?.rawAttributes && Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id"));
+  return !!(
+    Product?.rawAttributes &&
+    Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id")
+  );
 }
 
 function isAdminReq(req) {
@@ -35,7 +38,11 @@ function isAdminReq(req) {
 
 function requireAdmin(req, res) {
   if (!isAdminReq(req)) {
-    res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo admin puede realizar esta acción." });
+    res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN",
+      message: "Solo admin puede realizar esta acción.",
+    });
     return false;
   }
   return true;
@@ -68,12 +75,19 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     A.productImages ? "productImages" :
     A.ProductImages ? "ProductImages" :
     null;
+
   if (imgAs) inc.push({ association: imgAs, required: false });
 
-  // ✅ Branch (solo si existe asociación y lo pedimos)
+  // ✅ Branch (solo si existe y lo pedimos) + LIMITAR COLUMNAS (evita branch.phone)
   if (includeBranch) {
     const brAs = A.branch ? "branch" : A.Branch ? "Branch" : null;
-    if (brAs) inc.push({ association: brAs, required: false });
+    if (brAs) {
+      inc.push({
+        association: brAs,
+        required: false,
+        attributes: ["id", "code", "name"], // 👈 CLAVE (no trae phone aunque el modelo lo tenga)
+      });
+    }
   }
 
   return inc;
@@ -104,7 +118,7 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "tax_rate",
-    "branch_id", // 👈 lo dejamos, pero lo bloqueamos abajo para no-admin
+    "branch_id", // admin puede; no-admin se bloquea abajo
   ];
 
   for (const k of fields) {
@@ -132,9 +146,8 @@ function pickBody(body = {}) {
 
 // =====================================
 // GET /api/v1/products
-// - admin: todos + branch
-// - no admin: solo su branch
-// - agrega stock_qty (para Inventario)
+// - admin: todos + branch + stock_qty
+// - no admin: solo su branch + stock_qty
 // =====================================
 async function list(req, res, next) {
   try {
@@ -146,7 +159,6 @@ async function list(req, res, next) {
 
     const q = String(req.query.q || "").trim();
 
-    // ✅ si no es admin, exigimos branchId
     const branch_id = getBranchId(req);
     if (!admin && !branch_id) {
       return res.status(400).json({
@@ -158,7 +170,7 @@ async function list(req, res, next) {
 
     const where = {};
 
-    // ✅ filtro por branch para no-admin (si la tabla tiene branch_id)
+    // ✅ no-admin: filtra por branch (si existe columna)
     if (!admin && productHasBranch()) {
       where.branch_id = branch_id;
     }
@@ -178,8 +190,8 @@ async function list(req, res, next) {
 
     const include = buildProductIncludes({ includeBranch: admin });
 
-    // ✅ stock_qty: suma stock_balances del branch del producto (por warehouses del branch)
-    // Nota: esto es para Inventario (no POS). Para POS vas a usar stock por warehouse seleccionado.
+    // ✅ stock_qty (por branch del producto)
+    // OJO: requiere products.branch_id y warehouses.branch_id
     const stockQtyLiteral = Sequelize.literal(`(
       SELECT COALESCE(SUM(sb.qty), 0)
       FROM stock_balances sb
@@ -248,7 +260,7 @@ async function getOne(req, res, next) {
 
 // =====================================
 // POST /api/v1/products
-// admin puede elegir branch_id (si existe)
+// admin puede elegir branch_id
 // no-admin: branch_id = su branch
 // =====================================
 async function create(req, res, next) {
@@ -276,7 +288,6 @@ async function create(req, res, next) {
         }
         payload.branch_id = branch_id;
       } else {
-        // admin: si no mandó branch_id, usa su branch (fallback)
         if (!payload.branch_id) payload.branch_id = branch_id || null;
       }
     } else {
@@ -292,8 +303,8 @@ async function create(req, res, next) {
 
 // =====================================
 // PATCH /api/v1/products/:id
-// admin: puede editar (y mover branch si querés)
-// no-admin: solo su branch + no puede cambiar branch_id
+// admin: edita todo (incl branch_id)
+// no-admin: solo su branch + no cambia branch_id
 // =====================================
 async function update(req, res, next) {
   try {
@@ -332,7 +343,7 @@ async function update(req, res, next) {
 }
 
 // =====================================
-// DELETE /api/v1/products/:id  (solo admin)
+// DELETE /api/v1/products/:id (solo admin)
 // =====================================
 async function remove(req, res, next) {
   try {
