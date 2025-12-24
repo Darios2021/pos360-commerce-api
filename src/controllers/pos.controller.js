@@ -33,21 +33,24 @@ function isAdminReq(req) {
 }
 
 /**
- * Resuelve branchId/warehouseId de forma robusta:
- * 1) req.ctx (si existe)
- * 2) req.body.branch_id / req.body.warehouse_id
- * 3) req.query.branch_id / req.query.warehouse_id
+ * ✅ Resuelve branchId/warehouseId de forma robusta:
+ * PRIORIDAD CORRECTA:
+ * 1) req.body (lo que manda el POS al confirmar)
+ * 2) req.query
+ * 3) req.ctx (fallback si no mandaron nada)
+ *
+ * Esto evita que un req.ctx "viejo" o mal seteado pise el depósito elegido por el usuario.
  */
 function resolvePosContext(req) {
   const branchId =
-    toInt(req?.ctx?.branchId, 0) ||
     toInt(req?.body?.branch_id, 0) ||
-    toInt(req?.query?.branch_id, 0);
+    toInt(req?.query?.branch_id, 0) ||
+    toInt(req?.ctx?.branchId, 0);
 
   const warehouseId =
-    toInt(req?.ctx?.warehouseId, 0) ||
     toInt(req?.body?.warehouse_id, 0) ||
-    toInt(req?.query?.warehouse_id, 0);
+    toInt(req?.query?.warehouse_id, 0) ||
+    toInt(req?.ctx?.warehouseId, 0);
 
   return { branchId, warehouseId };
 }
@@ -238,7 +241,7 @@ async function createSale(req, res) {
       });
     }
 
-    // ✅ warehouse: si no viene, intentamos resolver por branch
+    // ✅ warehouse: si no viene, intentamos resolver por branch (fallback)
     let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
     if (!resolvedWarehouseId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
@@ -334,7 +337,9 @@ async function createSale(req, res) {
 
       if (!sb) {
         throw Object.assign(
-          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`),
+          new Error(
+            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
+          ),
           { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
         );
       }
