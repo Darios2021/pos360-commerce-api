@@ -29,17 +29,39 @@ function normalizeRoles(raw) {
 
 function isAdminReq(req) {
   const roles = normalizeRoles(req?.user?.roles);
-  return roles.includes("admin");
+  return roles.includes("admin") || roles.includes("super_admin");
+}
+
+/**
+ * Log helper (no expone data sensible)
+ */
+function logCtx(req, label, extra = {}) {
+  try {
+    const rid = req.id || req.headers["x-request-id"] || "-";
+    const u = req.user ? { id: req.user.id, email: req.user.email, branch_id: req.user.branch_id, roles: req.user.roles } : null;
+
+    console.log(
+      `ℹ️ [POS] ${label} rid=${rid} method=${req.method} path=${req.originalUrl}`,
+      {
+        user: u,
+        body_branch_id: req?.body?.branch_id,
+        body_warehouse_id: req?.body?.warehouse_id,
+        query_branch_id: req?.query?.branch_id,
+        query_warehouse_id: req?.query?.warehouse_id,
+        ctx_branchId: req?.ctx?.branchId,
+        ctx_warehouseId: req?.ctx?.warehouseId,
+        ...extra,
+      }
+    );
+  } catch {}
 }
 
 /**
  * ✅ Resuelve branchId/warehouseId de forma robusta:
- * PRIORIDAD CORRECTA:
- * 1) req.body (lo que manda el POS al confirmar)
+ * PRIORIDAD:
+ * 1) req.body
  * 2) req.query
- * 3) req.ctx (fallback si no mandaron nada)
- *
- * Esto evita que un req.ctx "viejo" o mal seteado pise el depósito elegido por el usuario.
+ * 3) req.ctx
  */
 function resolvePosContext(req) {
   const branchId =
@@ -56,8 +78,7 @@ function resolvePosContext(req) {
 }
 
 /**
- * ✅ si no viene warehouse_id:
- * - intenta tomar el "primer warehouse" de la sucursal (branch_id)
+ * ✅ Si no viene warehouse_id, toma el primer depósito de la sucursal.
  */
 async function resolveWarehouseForBranch(branchId) {
   const bid = toInt(branchId, 0);
@@ -72,52 +93,85 @@ async function resolveWarehouseForBranch(branchId) {
   return toInt(w?.id, 0);
 }
 
-async function getContext(req, res) {
+/**
+ * ✅ Arma contexto final consistente para TODOS:
+ * - branch: user normal => SIEMPRE su branch_id
+ * - branch: admin/super_admin => puede venir por body/query/ctx; si no, su branch_id
+ * - warehouse: si no viene => resuelve por branch
+ */
+async function resolveEffectiveContext(req, { allowBodyBranch = true, allowBodyWarehouse = true } = {}) {
+  const admin = isAdminReq(req);
+
+  // branch base: user normal siempre su branch_id
+  const userBranchId = toInt(req?.user?.branch_id, 0);
+
   const { branchId, warehouseId } = resolvePosContext(req);
 
-  return res.json({
-    ok: true,
-    data: {
-      user: req.user
-        ? {
-            id: req.user.id,
-            email: req.user.email,
-            username: req.user.username,
-            branch_id: req.user.branch_id,
-            roles: req.user.roles,
-          }
-        : null,
-      branch: req?.ctx?.branch || (branchId ? { id: branchId } : null),
-      warehouse: req?.ctx?.warehouse || (warehouseId ? { id: warehouseId } : null),
-      branchId: branchId || null,
-      warehouseId: warehouseId || null,
-    },
-  });
+  const candidateBranch = allowBodyBranch ? toInt(branchId, 0) : toInt(req?.ctx?.branchId, 0) || toInt(req?.query?.branch_id, 0);
+  const resolvedBranchId = admin ? (candidateBranch || userBranchId) : userBranchId;
+
+  let candidateWarehouse = allowBodyWarehouse ? toInt(warehouseId, 0) : toInt(req?.ctx?.warehouseId, 0) || toInt(req?.query?.warehouse_id, 0);
+  let resolvedWarehouseId = candidateWarehouse;
+
+  if (!resolvedWarehouseId && resolvedBranchId) {
+    resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+  }
+
+  return {
+    admin,
+    userBranchId,
+    branchId: resolvedBranchId || 0,
+    warehouseId: resolvedWarehouseId || 0,
+  };
+}
+
+async function getContext(req, res) {
+  try {
+    const ctx = await resolveEffectiveContext(req);
+
+    logCtx(req, "getContext", { resolved: ctx });
+
+    return res.json({
+      ok: true,
+      data: {
+        user: req.user
+          ? {
+              id: req.user.id,
+              email: req.user.email,
+              username: req.user.username,
+              branch_id: req.user.branch_id,
+              roles: req.user.roles,
+            }
+          : null,
+        branch: ctx.branchId ? { id: ctx.branchId } : null,
+        warehouse: ctx.warehouseId ? { id: ctx.warehouseId } : null,
+        branchId: ctx.branchId || null,
+        warehouseId: ctx.warehouseId || null,
+      },
+    });
+  } catch (e) {
+    console.error("❌ [POS] getContext error:", e);
+    return res.status(500).json({ ok: false, code: "POS_CONTEXT_ERROR", message: e.message });
+  }
 }
 
 /**
  * ✅ POS PRODUCTS:
- * Por defecto devuelve SOLO "vendibles":
- * - activo
- * - con stock (si in_stock=1)
- * - con precio efectivo > 0 según price_mode (si sellable=1)
- *
- * Query params:
- * - warehouse_id (required)
- * - q, page, limit
- * - in_stock=1|0   (default 1)
- * - sellable=1|0   (default 1)  -> filtra por precio efectivo > 0
- * - price_mode=LIST|BASE|DISCOUNT|RESELLER (default LIST)
+ * - requiere warehouse_id (si no viene => 400)
+ * - soporta branch_id (no es obligatorio) sólo para logging/consistencia
  */
 async function listProductsForPos(req, res) {
   try {
-    const { warehouseId } = resolvePosContext(req);
+    const ctx = await resolveEffectiveContext(req);
 
-    if (!warehouseId) {
+    logCtx(req, "listProductsForPos:start", { resolved: ctx });
+
+    if (!ctx.warehouseId) {
+      console.warn("⚠️ [POS] listProductsForPos WAREHOUSE_REQUIRED", { resolved: ctx });
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
-        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá req.ctx.warehouseId.",
+        message: "Falta warehouse_id (depósito). El POS debe tener depósito seleccionado o resolverse por sucursal.",
       });
     }
 
@@ -141,7 +195,6 @@ async function listProductsForPos(req, res) {
 
     const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
-    // ✅ precio efectivo según modo (coincide con tu frontend)
     const priceExpr =
       priceMode === "BASE"
         ? `COALESCE(p.price, 0)`
@@ -151,8 +204,6 @@ async function listProductsForPos(req, res) {
         ? `COALESCE(NULLIF(p.price_reseller,0), NULLIF(p.price_list,0), p.price, 0)`
         : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`; // LIST
 
-    // ✅ activo siempre (POS)
-    // ✅ sellable=1 => además exige precio>0
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
     const [rows] = await sequelize.query(
@@ -182,7 +233,7 @@ async function listProductsForPos(req, res) {
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
-      { replacements: { warehouseId, like, limit, offset } }
+      { replacements: { warehouseId: ctx.warehouseId, like, limit, offset } }
     );
 
     const [[countRow]] = await sequelize.query(
@@ -196,8 +247,13 @@ async function listProductsForPos(req, res) {
       ${whereStock}
       ${whereSellable}
       `,
-      { replacements: { warehouseId, like } }
+      { replacements: { warehouseId: ctx.warehouseId, like } }
     );
+
+    logCtx(req, "listProductsForPos:ok", {
+      resolved: ctx,
+      meta: { page, limit, total: Number(countRow?.total || 0), returned: rows.length },
+    });
 
     return res.json({
       ok: true,
@@ -225,15 +281,13 @@ async function createSale(req, res) {
     }
 
     const userId = toInt(req.user.id, 0);
-    const admin = isAdminReq(req);
 
-    // ✅ branch: user normal = SIEMPRE su branch_id. admin: puede mandar branch_id, si no usa el suyo
-    const userBranchId = toInt(req.user.branch_id, 0);
-    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
+    // En createSale: permitimos branch/warehouse desde body (admin puede elegir)
+    const ctx = await resolveEffectiveContext(req, { allowBodyBranch: true, allowBodyWarehouse: true });
 
-    const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
+    logCtx(req, "createSale:start", { resolved: ctx, itemsCount: items.length, paymentsCount: payments.length });
 
-    if (!resolvedBranchId) {
+    if (!ctx.branchId) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -241,13 +295,7 @@ async function createSale(req, res) {
       });
     }
 
-    // ✅ warehouse: si no viene, intentamos resolver por branch (fallback)
-    let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
-    if (!resolvedWarehouseId) {
-      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
-    }
-
-    if (!resolvedWarehouseId) {
+    if (!ctx.warehouseId) {
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
@@ -268,20 +316,11 @@ async function createSale(req, res) {
 
     for (const it of normalizedItems) {
       if (!it.product_id)
-        throw Object.assign(new Error("Item inválido: falta product_id"), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
+        throw Object.assign(new Error("Item inválido: falta product_id"), { httpStatus: 400, code: "INVALID_ITEM" });
       if (!Number.isFinite(it.quantity) || it.quantity <= 0)
-        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
+        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), { httpStatus: 400, code: "INVALID_ITEM" });
       if (!Number.isFinite(it.unit_price) || it.unit_price <= 0)
-        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
+        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), { httpStatus: 400, code: "INVALID_ITEM" });
     }
 
     let subtotal = 0;
@@ -291,7 +330,7 @@ async function createSale(req, res) {
 
     const sale = await Sale.create(
       {
-        branch_id: resolvedBranchId,
+        branch_id: ctx.branchId,
         user_id: userId,
         status: "PAID",
         sale_number: null,
@@ -311,7 +350,7 @@ async function createSale(req, res) {
     const movement = await StockMovement.create(
       {
         type: "out",
-        warehouse_id: resolvedWarehouseId,
+        warehouse_id: ctx.warehouseId,
         ref_type: "sale",
         ref_id: String(sale.id),
         note: `Venta POS #${sale.id}`,
@@ -323,30 +362,25 @@ async function createSale(req, res) {
     for (const it of normalizedItems) {
       const p = await Product.findByPk(it.product_id, { transaction: t });
       if (!p) {
-        throw Object.assign(new Error(`Producto no existe: id=${it.product_id}`), {
-          httpStatus: 400,
-          code: "PRODUCT_NOT_FOUND",
-        });
+        throw Object.assign(new Error(`Producto no existe: id=${it.product_id}`), { httpStatus: 400, code: "PRODUCT_NOT_FOUND" });
       }
 
       const sb = await StockBalance.findOne({
-        where: { warehouse_id: resolvedWarehouseId, product_id: it.product_id },
+        where: { warehouse_id: ctx.warehouseId, product_id: it.product_id },
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
 
       if (!sb) {
         throw Object.assign(
-          new Error(
-            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
-          ),
+          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${ctx.warehouseId}`),
           { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
         );
       }
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
+          new Error(`Stock insuficiente (depósito ${ctx.warehouseId}) para producto ${p.sku || p.id}`),
           { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
         );
       }
@@ -359,7 +393,7 @@ async function createSale(req, res) {
         {
           sale_id: sale.id,
           product_id: it.product_id,
-          warehouse_id: resolvedWarehouseId,
+          warehouse_id: ctx.warehouseId,
           quantity: it.quantity,
           unit_price: it.unit_price,
           discount_amount: 0,
@@ -390,17 +424,11 @@ async function createSale(req, res) {
       const method = String(pay.method || "CASH").toUpperCase();
 
       if (!Number.isFinite(amount) || amount <= 0) {
-        throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), {
-          httpStatus: 400,
-          code: "INVALID_PAYMENT",
-        });
+        throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), { httpStatus: 400, code: "INVALID_PAYMENT" });
       }
 
       if (!["CASH", "TRANSFER", "CARD", "QR", "OTHER"].includes(method)) {
-        throw Object.assign(new Error(`Pago inválido: method=${method}`), {
-          httpStatus: 400,
-          code: "INVALID_PAYMENT_METHOD",
-        });
+        throw Object.assign(new Error(`Pago inválido: method=${method}`), { httpStatus: 400, code: "INVALID_PAYMENT_METHOD" });
       }
 
       totalPaid += amount;
@@ -426,13 +454,21 @@ async function createSale(req, res) {
 
     await t.commit();
 
+    logCtx(req, "createSale:ok", {
+      resolved: ctx,
+      sale_id: sale.id,
+      subtotal: sale.subtotal,
+      paid_total: sale.paid_total,
+      change_total: sale.change_total,
+    });
+
     return res.json({
       ok: true,
       data: {
         sale_id: sale.id,
         branch_id: sale.branch_id,
         user_id: sale.user_id,
-        warehouse_id: resolvedWarehouseId,
+        warehouse_id: ctx.warehouseId,
         subtotal: sale.subtotal,
         total: sale.total,
         paid_total: sale.paid_total,
@@ -447,7 +483,16 @@ async function createSale(req, res) {
     const status = e.httpStatus || 500;
     const code = e.code || "POS_CREATE_SALE_ERROR";
 
-    console.error("❌ [POS] createSale error:", e);
+    console.error("❌ [POS] createSale error:", {
+      code,
+      status,
+      message: e.message,
+      stack: e.stack,
+      user: req.user ? { id: req.user.id, email: req.user.email, branch_id: req.user.branch_id, roles: req.user.roles } : null,
+      body_branch_id: req?.body?.branch_id,
+      body_warehouse_id: req?.body?.warehouse_id,
+    });
+
     return res.status(status).json({ ok: false, code, message: e.message });
   }
 }
