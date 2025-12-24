@@ -12,13 +12,11 @@ const {
   Warehouse,
 } = require("../models");
 
-// =====================
-// helpers
-// =====================
 function toNum(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
 }
+
 function toInt(v, def = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : def;
@@ -28,22 +26,33 @@ function normalizeRoles(raw) {
   if (!raw || !Array.isArray(raw)) return [];
   return raw.map((r) => String(r || "").toLowerCase()).filter(Boolean);
 }
+
 function isAdminReq(req) {
   const roles = normalizeRoles(req?.user?.roles);
-  return roles.includes("admin") || roles.includes("super_admin");
+  return roles.includes("admin");
 }
 
-function rid() {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+function rid(req) {
+  return (
+    req?.headers?.["x-request-id"] ||
+    req?.headers?.["x-correlation-id"] ||
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
 }
-function logInfo(rid, msg, extra) {
-  console.log(`ℹ️ [POS][${rid}] ${msg}${extra ? " " + JSON.stringify(extra) : ""}`);
-}
-function logWarn(rid, msg, extra) {
-  console.warn(`⚠️ [POS][${rid}] ${msg}${extra ? " " + JSON.stringify(extra) : ""}`);
-}
-function logErr(rid, msg, err, extra) {
-  console.error(`❌ [POS][${rid}] ${msg}${extra ? " " + JSON.stringify(extra) : ""}`, err);
+
+function logPos(req, level, msg, extra = {}) {
+  const base = {
+    rid: req._rid,
+    path: req.originalUrl,
+    method: req.method,
+    user_id: req?.user?.id ?? null,
+    user_email: req?.user?.email ?? null,
+    user_branch_id: req?.user?.branch_id ?? null,
+    ctx_branchId: req?.ctx?.branchId ?? null,
+    ctx_warehouseId: req?.ctx?.warehouseId ?? null,
+  };
+  // eslint-disable-next-line no-console
+  console[level](`[POS] ${msg}`, { ...base, ...extra });
 }
 
 /**
@@ -51,15 +60,13 @@ function logErr(rid, msg, err, extra) {
  * PRIORIDAD:
  * 1) req.body
  * 2) req.query
- * 3) req.ctx
- * 4) req.user (branch)
+ * 3) req.ctx (fallback)
  */
 function resolvePosContext(req) {
   const branchId =
     toInt(req?.body?.branch_id, 0) ||
     toInt(req?.query?.branch_id, 0) ||
-    toInt(req?.ctx?.branchId, 0) ||
-    toInt(req?.user?.branch_id, 0);
+    toInt(req?.ctx?.branchId, 0);
 
   const warehouseId =
     toInt(req?.body?.warehouse_id, 0) ||
@@ -87,44 +94,42 @@ async function resolveWarehouseForBranch(branchId) {
 }
 
 /**
- * ✅ Valida coherencia: si viene warehouse_id, chequea que pertenezca al branch_id (si branch existe)
- * - No rompe la operación; solo loggea.
+ * ✅ Devuelve contexto POS RESUELTO:
+ * - user normal: branch = su branch_id
+ * - admin: puede mandar branch_id (si no, usa el suyo)
+ * - warehouse: si no viene, intenta resolver por sucursal (primer depósito)
+ *
+ * ESTO arregla tu problema: el store hoy recibe warehouseId=null.
  */
-async function warnIfWarehouseNotInBranch(rid, branchId, warehouseId) {
-  const bid = toInt(branchId, 0);
-  const wid = toInt(warehouseId, 0);
-  if (!bid || !wid) return;
-
-  const w = await Warehouse.findByPk(wid, { attributes: ["id", "branch_id", "name"] });
-  if (!w) {
-    logWarn(rid, "warehouse_id no existe", { warehouse_id: wid });
-    return;
-  }
-  if (toInt(w.branch_id, 0) !== bid) {
-    logWarn(rid, "warehouse_id NO pertenece al branch_id (posible contexto cruzado)", {
-      branch_id: bid,
-      warehouse_id: wid,
-      warehouse_branch_id: toInt(w.branch_id, 0),
-      warehouse_name: w.name,
-    });
-  }
-}
-
-// =====================
-// endpoints
-// =====================
 async function getContext(req, res) {
-  const _rid = rid();
-  try {
-    const { branchId, warehouseId } = resolvePosContext(req);
+  req._rid = req._rid || rid(req);
 
-    logInfo(_rid, "getContext", {
-      user_id: toInt(req?.user?.id, 0) || null,
-      user_branch_id: toInt(req?.user?.branch_id, 0) || null,
-      ctx_branchId: toInt(req?.ctx?.branchId, 0) || null,
-      ctx_warehouseId: toInt(req?.ctx?.warehouseId, 0) || null,
-      resolved: { branchId: branchId || null, warehouseId: warehouseId || null },
+  try {
+    const admin = isAdminReq(req);
+    const userBranchId = toInt(req?.user?.branch_id, 0);
+    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
+
+    const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
+
+    let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
+    if (!resolvedWarehouseId && resolvedBranchId) {
+      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+    }
+
+    logPos(req, "info", "getContext resolved", {
+      admin,
+      resolvedBranchId,
+      resolvedWarehouseId,
     });
+
+    // opcional: cargar datos del warehouse (para UI si querés)
+    let warehouseObj = null;
+    if (resolvedWarehouseId) {
+      const w = await Warehouse.findByPk(resolvedWarehouseId, {
+        attributes: ["id", "branch_id", "name"],
+      });
+      if (w) warehouseObj = w.toJSON();
+    }
 
     return res.json({
       ok: true,
@@ -138,55 +143,41 @@ async function getContext(req, res) {
               roles: req.user.roles,
             }
           : null,
-        branch: req?.ctx?.branch || (branchId ? { id: branchId } : null),
-        warehouse: req?.ctx?.warehouse || (warehouseId ? { id: warehouseId } : null),
-        branchId: branchId || null,
-        warehouseId: warehouseId || null,
+        branch: resolvedBranchId ? { id: resolvedBranchId } : null,
+        warehouse: warehouseObj || (resolvedWarehouseId ? { id: resolvedWarehouseId } : null),
+        branchId: resolvedBranchId || null,
+        warehouseId: resolvedWarehouseId || null,
       },
     });
   } catch (e) {
-    logErr(_rid, "getContext error", e);
+    logPos(req, "error", "getContext error", { err: e.message });
     return res.status(500).json({ ok: false, code: "POS_CONTEXT_ERROR", message: e.message });
   }
 }
 
 /**
- * ✅ POS PRODUCTS:
- * - Si NO viene warehouse_id -> intenta resolver por branch_id (para TODOS los users)
- * - Mantiene filtros in_stock / sellable / price_mode
+ * ✅ POS PRODUCTS
+ * Query params:
+ * - warehouse_id (required)
+ * - q, page, limit
+ * - in_stock=1|0   (default 1)
+ * - sellable=1|0   (default 1)
+ * - price_mode=LIST|BASE|DISCOUNT|RESELLER (default LIST)
  */
 async function listProductsForPos(req, res) {
-  const _rid = rid();
+  req._rid = req._rid || rid(req);
+
   try {
-    let { branchId, warehouseId } = resolvePosContext(req);
-
-    // ✅ si no viene warehouse_id, intentamos por branch (esto soluciona "No hay depósito seleccionado" para users)
-    if (!warehouseId) {
-      const fallback = await resolveWarehouseForBranch(branchId);
-      if (fallback) {
-        warehouseId = fallback;
-        logWarn(_rid, "warehouse_id faltante: resuelto por branch (fallback)", {
-          branch_id: branchId || null,
-          warehouse_id: warehouseId,
-        });
-      }
-    }
+    const { warehouseId } = resolvePosContext(req);
 
     if (!warehouseId) {
-      logWarn(_rid, "WAREHOUSE_REQUIRED (no se pudo resolver)", {
-        branch_id: branchId || null,
-        query: req.query,
-      });
+      logPos(req, "warn", "listProductsForPos blocked: warehouse missing");
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
-        message:
-          "Falta warehouse_id (depósito). Enviá warehouse_id o asegurate de tener al menos 1 depósito creado para la sucursal.",
+        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá el depósito en el POS.",
       });
     }
-
-    // solo warn (no bloquea)
-    await warnIfWarehouseNotInBranch(_rid, branchId, warehouseId);
 
     const q = String(req.query.q || "").trim();
     const limit = Math.min(Math.max(parseInt(req.query.limit || "24", 10), 1), 200);
@@ -219,15 +210,14 @@ async function listProductsForPos(req, res) {
 
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
-    logInfo(_rid, "listProductsForPos", {
-      branch_id: branchId || null,
-      warehouse_id: warehouseId,
+    logPos(req, "info", "listProductsForPos query", {
+      warehouseId,
       q,
       page,
       limit,
-      in_stock: inStock ? 1 : 0,
-      sellable: sellable ? 1 : 0,
-      price_mode: priceMode,
+      inStock,
+      sellable,
+      priceMode,
     });
 
     const [rows] = await sequelize.query(
@@ -246,8 +236,7 @@ async function listProductsForPos(req, res) {
         p.price_discount,
         p.price_reseller,
         (${priceExpr}) AS effective_price,
-        COALESCE(sb.qty, 0) AS qty,
-        :warehouseId AS warehouse_id
+        COALESCE(sb.qty, 0) AS qty
       FROM products p
       LEFT JOIN stock_balances sb
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
@@ -275,26 +264,20 @@ async function listProductsForPos(req, res) {
       { replacements: { warehouseId, like } }
     );
 
-    logInfo(_rid, "listProductsForPos result", {
-      returned: Array.isArray(rows) ? rows.length : 0,
-      total: Number(countRow?.total || 0),
-      warehouse_id: warehouseId,
-    });
-
     return res.json({
       ok: true,
       data: rows,
       meta: { page, limit, total: Number(countRow?.total || 0) },
-      ctx: { branch_id: branchId || null, warehouse_id: warehouseId },
     });
   } catch (e) {
-    logErr(_rid, "listProductsForPos error", e);
+    logPos(req, "error", "listProductsForPos error", { err: e.message });
     return res.status(500).json({ ok: false, code: "POS_PRODUCTS_ERROR", message: e.message });
   }
 }
 
 async function createSale(req, res) {
-  const _rid = rid();
+  req._rid = req._rid || rid(req);
+
   let t;
   try {
     const body = req.body || {};
@@ -305,7 +288,7 @@ async function createSale(req, res) {
     const note = body.note || null;
 
     if (!req.user?.id) {
-      logWarn(_rid, "UNAUTHORIZED");
+      logPos(req, "warn", "createSale blocked: unauthorized");
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No autenticado" });
     }
 
@@ -318,11 +301,7 @@ async function createSale(req, res) {
     const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
 
     if (!resolvedBranchId) {
-      logWarn(_rid, "BRANCH_REQUIRED (user sin sucursal)", {
-        user_id: userId,
-        user_branch_id: userBranchId || null,
-        admin,
-      });
+      logPos(req, "warn", "createSale blocked: missing branch", { admin, userBranchId, ctxBranchId });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -330,23 +309,15 @@ async function createSale(req, res) {
       });
     }
 
-    // ✅ warehouse: prioridad body/query/ctx. Si falta, fallback por branch
     let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
     if (!resolvedWarehouseId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
-      if (resolvedWarehouseId) {
-        logWarn(_rid, "warehouse_id faltante en venta: resuelto por branch (fallback)", {
-          branch_id: resolvedBranchId,
-          warehouse_id: resolvedWarehouseId,
-        });
-      }
     }
 
     if (!resolvedWarehouseId) {
-      logWarn(_rid, "WAREHOUSE_REQUIRED (venta)", {
-        user_id: userId,
-        branch_id: resolvedBranchId,
-        admin,
+      logPos(req, "warn", "createSale blocked: missing warehouse", {
+        resolvedBranchId,
+        ctxWarehouseId,
       });
       return res.status(400).json({
         ok: false,
@@ -356,10 +327,8 @@ async function createSale(req, res) {
       });
     }
 
-    await warnIfWarehouseNotInBranch(_rid, resolvedBranchId, resolvedWarehouseId);
-
     if (items.length === 0) {
-      logWarn(_rid, "EMPTY_ITEMS", { user_id: userId, branch_id: resolvedBranchId, warehouse_id: resolvedWarehouseId });
+      logPos(req, "warn", "createSale blocked: empty items");
       return res.status(400).json({ ok: false, code: "EMPTY_ITEMS", message: "Venta sin items" });
     }
 
@@ -371,22 +340,31 @@ async function createSale(req, res) {
 
     for (const it of normalizedItems) {
       if (!it.product_id)
-        throw Object.assign(new Error("Item inválido: falta product_id"), { httpStatus: 400, code: "INVALID_ITEM" });
+        throw Object.assign(new Error("Item inválido: falta product_id"), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       if (!Number.isFinite(it.quantity) || it.quantity <= 0)
-        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), { httpStatus: 400, code: "INVALID_ITEM" });
+        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       if (!Number.isFinite(it.unit_price) || it.unit_price <= 0)
-        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), { httpStatus: 400, code: "INVALID_ITEM" });
+        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
     }
 
     let subtotal = 0;
     for (const it of normalizedItems) subtotal += it.quantity * it.unit_price;
 
-    logInfo(_rid, "createSale start", {
-      user_id: userId,
+    logPos(req, "info", "createSale start", {
       admin,
-      branch_id: resolvedBranchId,
-      warehouse_id: resolvedWarehouseId,
+      resolvedBranchId,
+      resolvedWarehouseId,
       items: normalizedItems.length,
+      payments: payments.length,
       subtotal,
     });
 
@@ -527,14 +505,12 @@ async function createSale(req, res) {
 
     await t.commit();
 
-    logInfo(_rid, "createSale OK", {
+    logPos(req, "info", "createSale done", {
       sale_id: sale.id,
-      branch_id: sale.branch_id,
-      user_id: sale.user_id,
-      warehouse_id: resolvedWarehouseId,
-      total: sale.total,
-      paid_total: sale.paid_total,
-      change_total: sale.change_total,
+      resolvedBranchId,
+      resolvedWarehouseId,
+      totalPaid,
+      change: sale.change_total,
     });
 
     return res.json({
@@ -558,7 +534,7 @@ async function createSale(req, res) {
     const status = e.httpStatus || 500;
     const code = e.code || "POS_CREATE_SALE_ERROR";
 
-    logErr(_rid, "createSale error", e, { code, status });
+    logPos(req, "error", "createSale error", { code, err: e.message });
     return res.status(status).json({ ok: false, code, message: e.message });
   }
 }
