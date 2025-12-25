@@ -19,7 +19,7 @@ async function bootstrap() {
   } catch (err) {
     console.error("❌ Error al conectar DB:", err.message);
 
-    // ⛑️ Modo emergencia: levantamos igual para que CapRover no mate el contenedor
+    // ⛑️ Modo emergencia
     app.listen(PORT, () => {
       console.log(`🚨 API en modo emergencia (sin DB) en puerto ${PORT}`);
     });

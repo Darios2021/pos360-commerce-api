@@ -8,7 +8,7 @@ function createApp() {
   const app = express();
 
   // =====================
-  // 1) CORS
+  // CORS
   // =====================
   const allowedOrigins = (process.env.CORS_ORIGINS || "")
     .split(",")
@@ -17,14 +17,10 @@ function createApp() {
 
   const corsOptions = {
     origin: (origin, callback) => {
-      // sin origin: curl/postman/healthchecks
       if (!origin) return callback(null, true);
-
-      // dev local
       if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
         return callback(null, true);
       }
-
       if (
         allowedOrigins.length === 0 ||
         allowedOrigins.includes("*") ||
@@ -32,7 +28,6 @@ function createApp() {
       ) {
         return callback(null, true);
       }
-
       return callback(new Error(`CORS blocked by pos360: ${origin}`));
     },
     credentials: true,
@@ -44,13 +39,13 @@ function createApp() {
   app.options("*", cors(corsOptions));
 
   // =====================
-  // 2) Parsers
+  // Parsers
   // =====================
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true }));
 
   // =====================
-  // 3) Root
+  // Root
   // =====================
   app.get("/", (req, res) => {
     res.json({
@@ -62,12 +57,12 @@ function createApp() {
   });
 
   // =====================
-  // 4) API v1
+  // API v1
   // =====================
   app.use("/api/v1", v1Routes);
 
   // =====================
-  // 5) 404
+  // 404
   // =====================
   app.use((req, res) => {
     res.status(404).json({
@@ -78,7 +73,7 @@ function createApp() {
   });
 
   // =====================
-  // 6) Error handler FINAL
+  // Error handler FINAL
   // =====================
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {

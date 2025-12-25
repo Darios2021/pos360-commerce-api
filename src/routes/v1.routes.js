@@ -16,7 +16,7 @@ const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 const dashboardRoutes = require("./dashboard.routes");
 
-// ✅ POS (este archivo: src/routes/pos.routes.js)
+// POS
 const posRoutes = require("./pos.routes");
 
 // Public primero
@@ -29,7 +29,7 @@ router.use("/categories", requireAuth, categoriesRoutes);
 router.use("/subcategories", requireAuth, subcategoriesRoutes);
 router.use("/branches", requireAuth, branchesRoutes);
 router.use("/warehouses", requireAuth, warehousesRoutes);
-router.use("/stock", requireAuth, stockRoutes);
+router.use("/stock", requireAuth, stockRoutes);      // ✅ OK
 router.use("/dashboard", requireAuth, dashboardRoutes);
 router.use("/pos", requireAuth, posRoutes);
 
