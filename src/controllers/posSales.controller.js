@@ -9,8 +9,8 @@ const {
   Category,
   ProductImage,
   Warehouse,
-  Branch, // ✅ NUEVO
-  User,   // ✅ NUEVO
+  Branch,
+  User,
 } = require("../models");
 
 function toInt(v, d = 0) {
@@ -98,11 +98,11 @@ function getAuthUserId(req) {
  */
 function getAuthBranchId(req) {
   return (
-    // ✅ NUEVO: soportar branchContext.middleware.js (req.ctx.branchId)
+    // soportar branchContext.middleware.js
     toInt(req?.ctx?.branchId, 0) ||
     toInt(req?.ctx?.branch_id, 0) ||
 
-    // ✅ si algún día lo agregás al token o a req.user
+    // si algún día lo agregás al token o a req.user
     toInt(req?.user?.branch_id, 0) ||
     toInt(req?.user?.branchId, 0) ||
 
@@ -116,26 +116,34 @@ function getAuthBranchId(req) {
   );
 }
 
-// ✅ ADMIN detector (simple y efectivo; si querés lo hago ultra-robusto como en front)
+/**
+ * ✅ Admin detector (robusto)
+ */
 function isAdminReq(req) {
-  const u = req?.user || {};
+  const u = req?.user || req?.auth || {};
+  const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
+  if (email === "admin@360pos.local" || email.includes("admin@360pos.local")) return true;
+
   if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
 
-  const role = String(u?.role || u?.Role?.name || "").trim().toLowerCase();
-  if (["admin", "super_admin", "superadmin", "root", "owner"].includes(role)) return true;
+  const roleNames = [];
+  if (typeof u?.role === "string") roleNames.push(u.role);
+  if (typeof u?.rol === "string") roleNames.push(u.rol);
 
-  const roles = Array.isArray(u?.roles) ? u.roles : [];
-  for (const r of roles) {
-    const name = String(typeof r === "string" ? r : (r?.name || r?.role || r?.Role?.name) || "")
-      .trim()
-      .toLowerCase();
-    if (["admin", "super_admin", "superadmin", "root", "owner"].includes(name)) return true;
+  if (Array.isArray(u?.roles)) {
+    for (const r of u.roles) {
+      if (!r) continue;
+      if (typeof r === "string") roleNames.push(r);
+      else if (typeof r?.name === "string") roleNames.push(r.name);
+      else if (typeof r?.role === "string") roleNames.push(r.role);
+      else if (typeof r?.role?.name === "string") roleNames.push(r.role.name);
+    }
   }
 
-  const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
-  if (email === "admin@360pos.local") return true;
-
-  return false;
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  return roleNames.map(norm).some((x) =>
+    ["admin", "super_admin", "superadmin", "root", "owner"].includes(x)
+  );
 }
 
 /**
@@ -149,10 +157,8 @@ async function resolveWarehouseId(req, branch_id, itemWarehouseId, tx) {
   if (direct > 0) return direct;
 
   const fromReq =
-    // ✅ NUEVO: soportar branchContext.middleware.js
     toInt(req?.ctx?.warehouseId, 0) ||
     toInt(req?.ctx?.warehouse_id, 0) ||
-
     toInt(req?.warehouse?.id, 0) ||
     toInt(req?.warehouseId, 0) ||
     toInt(req?.branchContext?.warehouse_id, 0) ||
@@ -190,25 +196,48 @@ async function assertWarehouseInBranch(warehouse_id, branch_id, tx) {
   return { ok: true, warehouse: wh };
 }
 
+/**
+ * ✅ Elegir atributos válidos del User (evita pedir user.name si no existe)
+ */
+function pickUserAttributes() {
+  const attrs = [];
+  const has = (k) => !!User?.rawAttributes?.[k];
+
+  // id siempre
+  attrs.push("id");
+
+  // opciones comunes
+  if (has("name")) attrs.push("name");
+  if (has("full_name")) attrs.push("full_name");
+  if (has("username")) attrs.push("username");
+  if (has("email")) attrs.push("email");
+  if (has("identifier")) attrs.push("identifier");
+  if (has("first_name")) attrs.push("first_name");
+  if (has("last_name")) attrs.push("last_name");
+
+  // si solo quedó id, igual sirve (no rompe)
+  return Array.from(new Set(attrs));
+}
+
+/**
+ * ✅ Elegir atributos válidos del Branch
+ */
+function pickBranchAttributes() {
+  const attrs = [];
+  const has = (k) => !!Branch?.rawAttributes?.[k];
+  attrs.push("id");
+  if (has("name")) attrs.push("name");
+  if (has("title")) attrs.push("title");
+  if (has("label")) attrs.push("label");
+  return Array.from(new Set(attrs));
+}
+
 // ============================
 // GET /api/v1/pos/sales
 // ============================
 async function listSales(req, res, next) {
   try {
     const admin = isAdminReq(req);
-
-    // ✅ branch del usuario (solo obligatorio para NO-admin)
-    const authBranchId = getAuthBranchId(req);
-    if (!admin && !authBranchId) {
-      return res.status(400).json({
-        ok: false,
-        code: "BRANCH_REQUIRED",
-        message: "No se pudo determinar la sucursal del usuario (branch_id).",
-      });
-    }
-
-    // ✅ Admin puede elegir sucursal por query (?branch_id=)
-    const branch_id_query = toInt(req.query.branch_id, 0);
 
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
@@ -220,15 +249,24 @@ async function listSales(req, res, next) {
     const from = parseDateTime(req.query.from);
     const to = parseDateTime(req.query.to);
 
+    // ✅ Branch filter:
+    // - admin: si manda branch_id => filtra, si no => trae todas
+    // - no-admin: siempre su branch del contexto
     const where = {};
 
-    // ✅ SCOPING
     if (admin) {
-      // Admin: si manda branch_id, filtra, si no -> todas
-      if (branch_id_query > 0) where.branch_id = branch_id_query;
+      const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
+      if (requested > 0) where.branch_id = requested;
     } else {
-      // User normal: siempre su branch
-      where.branch_id = authBranchId;
+      const branch_id = getAuthBranchId(req);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
+      }
+      where.branch_id = branch_id;
     }
 
     if (status) where.status = status;
@@ -255,14 +293,19 @@ async function listSales(req, res, next) {
       order: [["id", "DESC"]],
       limit,
       offset,
-      distinct: true,
       include: [
         { model: Payment, as: "payments", required: false },
 
-        // ✅ NUEVO: traer nombres
-        { model: Branch, as: "branch", required: false, attributes: ["id", "name"] },
-        { model: User, as: "user", required: false, attributes: ["id", "name", "email"] },
-      ],
+        // ✅ Sucursal (para mostrar nombre)
+        Branch
+          ? { model: Branch, as: "branch", required: false, attributes: pickBranchAttributes() }
+          : null,
+
+        // ✅ Usuario (para mostrar nombre/email)
+        User
+          ? { model: User, as: "user", required: false, attributes: pickUserAttributes() }
+          : null,
+      ].filter(Boolean),
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
@@ -283,15 +326,6 @@ async function listSales(req, res, next) {
 async function getSaleById(req, res, next) {
   try {
     const admin = isAdminReq(req);
-    const authBranchId = getAuthBranchId(req);
-
-    if (!admin && !authBranchId) {
-      return res.status(400).json({
-        ok: false,
-        code: "BRANCH_REQUIRED",
-        message: "No se pudo determinar la sucursal del usuario (branch_id).",
-      });
-    }
 
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
@@ -300,9 +334,13 @@ async function getSaleById(req, res, next) {
       include: [
         { model: Payment, as: "payments", required: false },
 
-        // ✅ NUEVO: traer nombres
-        { model: Branch, as: "branch", required: false, attributes: ["id", "name"] },
-        { model: User, as: "user", required: false, attributes: ["id", "name", "email"] },
+        Branch
+          ? { model: Branch, as: "branch", required: false, attributes: pickBranchAttributes() }
+          : null,
+
+        User
+          ? { model: User, as: "user", required: false, attributes: pickUserAttributes() }
+          : null,
 
         {
           model: SaleItem,
@@ -326,18 +364,28 @@ async function getSaleById(req, res, next) {
             },
           ],
         },
-      ],
+      ].filter(Boolean),
     });
 
     if (!sale) return res.status(404).json({ ok: false, message: "Venta no encontrada" });
 
-    // ✅ NO-admin: no puede ver otra sucursal. Admin: puede ver cualquiera.
-    if (!admin && toInt(sale.branch_id, 0) !== toInt(authBranchId, 0)) {
-      return res.status(403).json({
-        ok: false,
-        code: "CROSS_BRANCH_SALE",
-        message: "No podés ver una venta de otra sucursal.",
-      });
+    // ✅ No-admin: no puede ver otra sucursal
+    if (!admin) {
+      const branch_id = getAuthBranchId(req);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
+      }
+      if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_SALE",
+          message: "No podés ver una venta de otra sucursal.",
+        });
+      }
     }
 
     return res.json({ ok: true, data: sale });
@@ -521,11 +569,7 @@ async function createSale(req, res, next) {
     await t.commit();
 
     const created = await Sale.findByPk(sale.id, {
-      include: [
-        { model: Payment, as: "payments", required: false },
-        { model: Branch, as: "branch", required: false, attributes: ["id", "name"] },
-        { model: User, as: "user", required: false, attributes: ["id", "name", "email"] },
-      ],
+      include: [{ model: Payment, as: "payments", required: false }],
     });
 
     return res.status(201).json({ ok: true, message: "Venta creada", data: created });
@@ -543,10 +587,8 @@ async function createSale(req, res, next) {
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
-    const admin = isAdminReq(req);
-    const authBranchId = getAuthBranchId(req);
-
-    if (!admin && !authBranchId) {
+    const branch_id = getAuthBranchId(req);
+    if (!branch_id) {
       await t.rollback();
       return res.status(400).json({
         ok: false,
@@ -567,8 +609,7 @@ async function deleteSale(req, res, next) {
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
     }
 
-    // ✅ Admin puede eliminar cualquier sucursal
-    if (!admin && toInt(sale.branch_id, 0) !== toInt(authBranchId, 0)) {
+    if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
       await t.rollback();
       return res.status(403).json({
         ok: false,
