@@ -111,7 +111,7 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "tax_rate",
-    "branch_id",
+    "branch_id", // admin puede; no-admin se bloquea abajo
   ];
 
   for (const k of fields) {
@@ -136,13 +136,9 @@ function pickBody(body = {}) {
   return out;
 }
 
-/**
- * Stock por branch:
- * - Si branchId=0 => total global (todas las sucursales/depósitos)
- * - Si branchId>0 => suma solo donde warehouses.branch_id = branchId
- */
-function stockQtyLiteral(branchId) {
+function stockQtyLiteralByBranch(branchId = 0) {
   const bid = toInt(branchId, 0);
+
   if (bid > 0) {
     return Sequelize.literal(`(
       SELECT COALESCE(SUM(sb.qty), 0)
@@ -153,7 +149,6 @@ function stockQtyLiteral(branchId) {
     )`);
   }
 
-  // total global
   return Sequelize.literal(`(
     SELECT COALESCE(SUM(sb.qty), 0)
     FROM stock_balances sb
@@ -161,10 +156,7 @@ function stockQtyLiteral(branchId) {
   )`);
 }
 
-/**
- * Para users: solo productos con stock > 0 en su branch
- */
-function existsStockInBranchWhere(branchId) {
+function existsStockInBranch(branchId) {
   const bid = toInt(branchId, 0);
   return Sequelize.literal(`EXISTS (
     SELECT 1
@@ -179,7 +171,7 @@ function existsStockInBranchWhere(branchId) {
 // =====================================
 // GET /api/v1/products
 // - admin: todos + branch + stock_qty (total o por branch si manda ?branch_id=)
-// - user: solo productos con stock en SU branch (warehouses.branch_id)
+// - user: solo productos con stock en su branch (warehouses.branch_id)
 // =====================================
 async function list(req, res, next) {
   try {
@@ -191,8 +183,8 @@ async function list(req, res, next) {
 
     const q = String(req.query.q || "").trim();
 
-    const userBranchId = getBranchId(req);
-    if (!admin && !userBranchId) {
+    const ctxBranchId = getBranchId(req);
+    if (!admin && !ctxBranchId) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -200,14 +192,13 @@ async function list(req, res, next) {
       });
     }
 
-    // Admin puede pedir stock por una sucursal específica (opcional)
-    const branchFilterForStock = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) // 0 => total global
-      : userBranchId;
+    // admin puede pedir branch para calcular stock (opcional)
+    const stockBranchId = admin
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) // 0 = total
+      : ctxBranchId;
 
     const where = {};
 
-    // Buscador
     if (q) {
       const qNum = toFloat(q, NaN);
       where[Op.or] = [
@@ -221,10 +212,10 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // ✅ USERS: filtrar por stock en su branch (NO por products.branch_id)
+    // ✅ user: solo productos con stock en su branch (NO products.branch_id)
     if (!admin) {
       where[Op.and] = where[Op.and] || [];
-      where[Op.and].push(existsStockInBranchWhere(userBranchId));
+      where[Op.and].push(existsStockInBranch(ctxBranchId));
     }
 
     const include = buildProductIncludes({ includeBranch: admin });
@@ -237,7 +228,7 @@ async function list(req, res, next) {
       include,
       distinct: true,
       attributes: {
-        include: [[stockQtyLiteral(branchFilterForStock), "stock_qty"]],
+        include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]],
       },
     });
 
@@ -279,11 +270,10 @@ async function getOne(req, res, next) {
         });
       }
 
-      // Validar que haya stock en su branch
       const ok = await Product.findOne({
         where: {
           id,
-          [Op.and]: [existsStockInBranchWhere(branch_id)],
+          [Op.and]: [existsStockInBranch(branch_id)],
         },
         attributes: ["id"],
       });
@@ -322,8 +312,6 @@ async function create(req, res, next) {
     const admin = isAdminReq(req);
     const branch_id = getBranchId(req);
 
-    // Mantengo tu lógica: Product “pertenece” a una branch.
-    // (El stock se controla aparte por warehouses.)
     if (!admin) {
       if (!branch_id) {
         return res.status(400).json({
@@ -334,7 +322,6 @@ async function create(req, res, next) {
       }
       payload.branch_id = branch_id;
     } else {
-      // admin: si no manda branch_id, usa el contexto actual (si existe)
       if (!payload.branch_id) payload.branch_id = branch_id || 1;
     }
 
@@ -347,8 +334,8 @@ async function create(req, res, next) {
 
 // =====================================
 // PATCH /api/v1/products/:id
-// admin: edita todo
-// user: puede editar (según tu criterio) pero no cambia branch_id
+// admin: edita todo (incl branch_id)
+// user: no cambia branch_id
 // =====================================
 async function update(req, res, next) {
   try {
