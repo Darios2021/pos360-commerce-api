@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, ProductImage } = require("../models");
+const { Product, Category } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -21,13 +21,6 @@ function getBranchId(req) {
     toInt(req?.user?.branch_id, 0) ||
     toInt(req?.user?.branchId, 0) ||
     0
-  );
-}
-
-function productHasBranch() {
-  return !!(
-    Product?.rawAttributes &&
-    Object.prototype.hasOwnProperty.call(Product.rawAttributes, "branch_id")
   );
 }
 
@@ -78,14 +71,14 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 
   if (imgAs) inc.push({ association: imgAs, required: false });
 
-  // ✅ Branch (solo si existe y lo pedimos) + LIMITAR COLUMNAS (evita branch.phone)
+  // Branch (solo admin)
   if (includeBranch) {
     const brAs = A.branch ? "branch" : A.Branch ? "Branch" : null;
     if (brAs) {
       inc.push({
         association: brAs,
         required: false,
-        attributes: ["id", "code", "name"], // 👈 CLAVE (no trae phone aunque el modelo lo tenga)
+        attributes: ["id", "code", "name"],
       });
     }
   }
@@ -118,7 +111,7 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "tax_rate",
-    "branch_id", // admin puede; no-admin se bloquea abajo
+    "branch_id",
   ];
 
   for (const k of fields) {
@@ -132,7 +125,6 @@ function pickBody(body = {}) {
 
   if (out.category_id != null) out.category_id = toInt(out.category_id, null);
   if (out.subcategory_id != null) out.subcategory_id = toInt(out.subcategory_id, null);
-
   if (out.branch_id != null) out.branch_id = toInt(out.branch_id, null);
 
   const bools = ["is_new", "is_promo", "track_stock", "sheet_has_stock", "is_active"];
@@ -144,10 +136,50 @@ function pickBody(body = {}) {
   return out;
 }
 
+/**
+ * Stock por branch:
+ * - Si branchId=0 => total global (todas las sucursales/depósitos)
+ * - Si branchId>0 => suma solo donde warehouses.branch_id = branchId
+ */
+function stockQtyLiteral(branchId) {
+  const bid = toInt(branchId, 0);
+  if (bid > 0) {
+    return Sequelize.literal(`(
+      SELECT COALESCE(SUM(sb.qty), 0)
+      FROM stock_balances sb
+      JOIN warehouses w ON w.id = sb.warehouse_id
+      WHERE sb.product_id = Product.id
+        AND w.branch_id = ${bid}
+    )`);
+  }
+
+  // total global
+  return Sequelize.literal(`(
+    SELECT COALESCE(SUM(sb.qty), 0)
+    FROM stock_balances sb
+    WHERE sb.product_id = Product.id
+  )`);
+}
+
+/**
+ * Para users: solo productos con stock > 0 en su branch
+ */
+function existsStockInBranchWhere(branchId) {
+  const bid = toInt(branchId, 0);
+  return Sequelize.literal(`EXISTS (
+    SELECT 1
+    FROM stock_balances sb
+    JOIN warehouses w ON w.id = sb.warehouse_id
+    WHERE sb.product_id = Product.id
+      AND w.branch_id = ${bid}
+      AND sb.qty > 0
+  )`);
+}
+
 // =====================================
 // GET /api/v1/products
-// - admin: todos + branch + stock_qty
-// - no admin: solo su branch + stock_qty
+// - admin: todos + branch + stock_qty (total o por branch si manda ?branch_id=)
+// - user: solo productos con stock en SU branch (warehouses.branch_id)
 // =====================================
 async function list(req, res, next) {
   try {
@@ -159,8 +191,8 @@ async function list(req, res, next) {
 
     const q = String(req.query.q || "").trim();
 
-    const branch_id = getBranchId(req);
-    if (!admin && !branch_id) {
+    const userBranchId = getBranchId(req);
+    if (!admin && !userBranchId) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -168,13 +200,14 @@ async function list(req, res, next) {
       });
     }
 
+    // Admin puede pedir stock por una sucursal específica (opcional)
+    const branchFilterForStock = admin
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) // 0 => total global
+      : userBranchId;
+
     const where = {};
 
-    // ✅ no-admin: filtra por branch (si existe columna)
-    if (!admin && productHasBranch()) {
-      where.branch_id = branch_id;
-    }
-
+    // Buscador
     if (q) {
       const qNum = toFloat(q, NaN);
       where[Op.or] = [
@@ -188,17 +221,13 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    const include = buildProductIncludes({ includeBranch: admin });
+    // ✅ USERS: filtrar por stock en su branch (NO por products.branch_id)
+    if (!admin) {
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push(existsStockInBranchWhere(userBranchId));
+    }
 
-    // ✅ stock_qty (por branch del producto)
-    // OJO: requiere products.branch_id y warehouses.branch_id
-    const stockQtyLiteral = Sequelize.literal(`(
-      SELECT COALESCE(SUM(sb.qty), 0)
-      FROM stock_balances sb
-      JOIN warehouses w ON w.id = sb.warehouse_id
-      WHERE sb.product_id = Product.id
-        AND w.branch_id = Product.branch_id
-    )`);
+    const include = buildProductIncludes({ includeBranch: admin });
 
     const { count, rows } = await Product.findAndCountAll({
       where,
@@ -208,7 +237,7 @@ async function list(req, res, next) {
       include,
       distinct: true,
       attributes: {
-        include: [[stockQtyLiteral, "stock_qty"]],
+        include: [[stockQtyLiteral(branchFilterForStock), "stock_qty"]],
       },
     });
 
@@ -227,7 +256,7 @@ async function list(req, res, next) {
 // =====================================
 // GET /api/v1/products/:id
 // admin: cualquiera
-// no-admin: solo su branch
+// user: solo si el producto tiene stock en su branch
 // =====================================
 async function getOne(req, res, next) {
   try {
@@ -240,14 +269,30 @@ async function getOne(req, res, next) {
     const p = await Product.findByPk(id, { include });
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    if (!admin && productHasBranch()) {
+    if (!admin) {
       const branch_id = getBranchId(req);
-      const pb = toInt(p.branch_id, 0);
-      if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
+      }
+
+      // Validar que haya stock en su branch
+      const ok = await Product.findOne({
+        where: {
+          id,
+          [Op.and]: [existsStockInBranchWhere(branch_id)],
+        },
+        attributes: ["id"],
+      });
+
+      if (!ok) {
         return res.status(403).json({
           ok: false,
-          code: "CROSS_BRANCH_PRODUCT",
-          message: "No podés ver un producto de otra sucursal.",
+          code: "NO_STOCK_IN_BRANCH",
+          message: "No podés ver un producto sin stock en tu sucursal.",
         });
       }
     }
@@ -261,7 +306,7 @@ async function getOne(req, res, next) {
 // =====================================
 // POST /api/v1/products
 // admin puede elegir branch_id
-// no-admin: branch_id = su branch
+// user: branch_id = su branch
 // =====================================
 async function create(req, res, next) {
   try {
@@ -275,23 +320,22 @@ async function create(req, res, next) {
     }
 
     const admin = isAdminReq(req);
+    const branch_id = getBranchId(req);
 
-    if (productHasBranch()) {
-      const branch_id = getBranchId(req);
-      if (!admin) {
-        if (!branch_id) {
-          return res.status(400).json({
-            ok: false,
-            code: "BRANCH_REQUIRED",
-            message: "No se pudo determinar la sucursal del usuario (branch_id).",
-          });
-        }
-        payload.branch_id = branch_id;
-      } else {
-        if (!payload.branch_id) payload.branch_id = branch_id || null;
+    // Mantengo tu lógica: Product “pertenece” a una branch.
+    // (El stock se controla aparte por warehouses.)
+    if (!admin) {
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
       }
+      payload.branch_id = branch_id;
     } else {
-      delete payload.branch_id;
+      // admin: si no manda branch_id, usa el contexto actual (si existe)
+      if (!payload.branch_id) payload.branch_id = branch_id || 1;
     }
 
     const created = await Product.create(payload);
@@ -303,8 +347,8 @@ async function create(req, res, next) {
 
 // =====================================
 // PATCH /api/v1/products/:id
-// admin: edita todo (incl branch_id)
-// no-admin: solo su branch + no cambia branch_id
+// admin: edita todo
+// user: puede editar (según tu criterio) pero no cambia branch_id
 // =====================================
 async function update(req, res, next) {
   try {
@@ -315,18 +359,6 @@ async function update(req, res, next) {
 
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
-
-    if (!admin && productHasBranch()) {
-      const branch_id = getBranchId(req);
-      const pb = toInt(p.branch_id, 0);
-      if (pb > 0 && branch_id > 0 && pb !== toInt(branch_id, 0)) {
-        return res.status(403).json({
-          ok: false,
-          code: "CROSS_BRANCH_PRODUCT",
-          message: "No podés modificar un producto de otra sucursal.",
-        });
-      }
-    }
 
     const patch = pickBody(req.body || {});
     if (!admin) delete patch.branch_id;
