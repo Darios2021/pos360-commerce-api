@@ -158,13 +158,8 @@ async function getContext(req, res) {
  * - warehouse_id (required)
  * - q, page, limit
  * - in_stock=1|0   (default 1)
- * - sellable=1|0   (default 1)
- * - category_id (rubro) optional
- * - subcategory_id optional
- *
- * Devuelve:
- * - category/subcategory nombres
- * - image_url (primer imagen)
+ * - sellable=1|0   (default 1)   ✅ AHORA: "cualquier precio > 0"
+ * - price_mode=LIST|BASE|DISCOUNT|RESELLER (solo para devolver effective_price, NO para filtrar sellable)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
@@ -189,39 +184,43 @@ async function listProductsForPos(req, res) {
     const inStock = String(req.query.in_stock ?? "1") === "1";
     const sellable = String(req.query.sellable ?? "1") === "1";
 
-    const categoryId = toInt(req.query.category_id || req.query.rubro_id, 0) || 0;
-    const subcategoryId = toInt(req.query.subcategory_id || req.query.subrubro_id, 0) || 0;
+    // price_mode queda para "effective_price" (preview), pero SELLABLE ya no depende de esto
+    const priceMode = String(req.query.price_mode || "LIST").trim().toUpperCase();
 
     const like = `%${q}%`;
 
-    // búsqueda
+    // búsqueda por producto + rubro/subrubro
     const whereQ = q
       ? `AND (
           p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
           OR p.brand LIKE :like OR p.model LIKE :like
-          OR c.name LIKE :like OR sc.name LIKE :like OR pc.name LIKE :like
+          OR c.name LIKE :like OR pc.name LIKE :like
         )`
       : "";
 
-    // filtro stock
     const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
-    // ✅ precio: vendible = que exista ALGUNO > 0
-    // Regla: 0 = sin precio.
-    const priceExpr = `
-      GREATEST(
-        COALESCE(p.price,0),
-        COALESCE(p.price_list,0),
-        COALESCE(p.price_discount,0),
-        COALESCE(p.price_reseller,0)
+    // ✅ effective_price para el preview (no para el filtro sellable)
+    const priceExpr =
+      priceMode === "BASE"
+        ? `COALESCE(p.price, 0)`
+        : priceMode === "DISCOUNT"
+        ? `COALESCE(NULLIF(p.price_discount,0), NULLIF(p.price_list,0), p.price, 0)`
+        : priceMode === "RESELLER"
+        ? `COALESCE(NULLIF(p.price_reseller,0), NULLIF(p.price_list,0), p.price, 0)`
+        : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`; // LIST
+
+    // ✅ SELLABLE REAL: cualquier precio > 0 (0 = sin precio)
+    const anyPriceExpr = `
+      (
+        COALESCE(NULLIF(p.price_list,0), 0) > 0
+        OR COALESCE(NULLIF(p.price_discount,0), 0) > 0
+        OR COALESCE(NULLIF(p.price_reseller,0), 0) > 0
+        OR COALESCE(NULLIF(p.price,0), 0) > 0
       )
     `;
 
-    const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
-
-    // rubro/subrubro
-    const whereCat = categoryId ? `AND (p.category_id = :categoryId OR pc.id = :categoryId OR c.id = :categoryId)` : "";
-    const whereSub = subcategoryId ? `AND (p.subcategory_id = :subcategoryId OR sc.id = :subcategoryId)` : "";
+    const whereSellable = sellable ? `AND ${anyPriceExpr}` : "";
 
     logPos(req, "info", "listProductsForPos query", {
       warehouseId,
@@ -230,8 +229,7 @@ async function listProductsForPos(req, res) {
       limit,
       inStock,
       sellable,
-      categoryId,
-      subcategoryId,
+      priceMode,
     });
 
     const [rows] = await sequelize.query(
@@ -248,31 +246,21 @@ async function listProductsForPos(req, res) {
         p.is_active,
 
         p.category_id,
-        p.subcategory_id,
-
         c.name AS category_name,
-        pc.id AS parent_category_id,
+        c.parent_id AS parent_category_id,
         pc.name AS parent_category_name,
-        sc.name AS subcategory_name,
 
         p.price,
         p.price_list,
         p.price_discount,
         p.price_reseller,
-
-        (${priceExpr}) AS any_price,
+        (${priceExpr}) AS effective_price,
 
         COALESCE(sb.qty, 0) AS qty,
 
-        (
-          SELECT pi.url
-          FROM product_images pi
-          WHERE pi.product_id = p.id
-          ORDER BY COALESCE(pi.sort_order,0) ASC, pi.id ASC
-          LIMIT 1
-        ) AS image_url
-
+        img.url AS image_url
       FROM products p
+
       LEFT JOIN stock_balances sb
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
 
@@ -282,29 +270,26 @@ async function listProductsForPos(req, res) {
       LEFT JOIN categories pc
         ON pc.id = c.parent_id
 
-      LEFT JOIN subcategories sc
-        ON sc.id = p.subcategory_id
+      LEFT JOIN (
+        SELECT pi1.product_id, pi1.url
+        FROM product_images pi1
+        INNER JOIN (
+          SELECT product_id, MIN(sort_order) AS min_sort
+          FROM product_images
+          GROUP BY product_id
+        ) pi2
+          ON pi2.product_id = pi1.product_id AND pi2.min_sort = pi1.sort_order
+      ) img
+        ON img.product_id = p.id
 
       WHERE p.is_active = 1
       ${whereQ}
-      ${whereCat}
-      ${whereSub}
       ${whereStock}
       ${whereSellable}
-
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
-      {
-        replacements: {
-          warehouseId,
-          like,
-          limit,
-          offset,
-          categoryId: categoryId || null,
-          subcategoryId: subcategoryId || null,
-        },
-      }
+      { replacements: { warehouseId, like, limit, offset } }
     );
 
     const [[countRow]] = await sequelize.query(
@@ -317,23 +302,12 @@ async function listProductsForPos(req, res) {
         ON c.id = p.category_id
       LEFT JOIN categories pc
         ON pc.id = c.parent_id
-      LEFT JOIN subcategories sc
-        ON sc.id = p.subcategory_id
       WHERE p.is_active = 1
       ${whereQ}
-      ${whereCat}
-      ${whereSub}
       ${whereStock}
       ${whereSellable}
       `,
-      {
-        replacements: {
-          warehouseId,
-          like,
-          categoryId: categoryId || null,
-          subcategoryId: subcategoryId || null,
-        },
-      }
+      { replacements: { warehouseId, like } }
     );
 
     return res.json({
