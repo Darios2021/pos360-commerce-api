@@ -153,103 +153,87 @@ async function getContext(req, res) {
 }
 
 /**
- * ✅ POS PRODUCTS (sellables)
- * - SIEMPRE: solo activos, con stock (>0) y con algún precio (>0)
- * - Soporta filtros:
- *   q: nombre/sku/barcode/code/marca/modelo + rubro/subrubro (por nombre)
- *   rubro_id: id del padre (Category.parent)
- *   subrubro_id: id de la category (Product.category_id)
- *
+ * ✅ POS PRODUCTS
  * Query params:
- * - branch_id? (admin)  -> si no viene, usa branch del user
- * - warehouse_id?       -> si no viene, se resuelve por branch (primer depósito)
+ * - warehouse_id (required)
  * - q, page, limit
- * - rubro_id, subrubro_id
+ * - in_stock=1|0   (default 1)
+ * - sellable=1|0   (default 1)
+ * - category_id (rubro) optional
+ * - subcategory_id optional
+ *
+ * Devuelve:
+ * - category/subcategory nombres
+ * - image_url (primer imagen)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
 
   try {
-    const admin = isAdminReq(req);
+    const { warehouseId } = resolvePosContext(req);
 
-    // --- resolver branch/warehouse como getContext ---
-    const userBranchId = toInt(req?.user?.branch_id, 0);
-    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
-
-    const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
-
-    if (!resolvedBranchId) {
-      logPos(req, "warn", "listProductsForPos blocked: missing branch", { admin, userBranchId, ctxBranchId });
-      return res.status(400).json({
-        ok: false,
-        code: "BRANCH_REQUIRED",
-        message: "Falta branch_id (sucursal). El usuario no tiene sucursal asignada.",
-      });
-    }
-
-    let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
-    if (!resolvedWarehouseId) {
-      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
-    }
-
-    if (!resolvedWarehouseId) {
-      logPos(req, "warn", "listProductsForPos blocked: missing warehouse", {
-        resolvedBranchId,
-        ctxWarehouseId,
-      });
+    if (!warehouseId) {
+      logPos(req, "warn", "listProductsForPos blocked: warehouse missing");
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
-        message:
-          "Falta warehouse_id (depósito). Enviá warehouse_id o asegurate de tener al menos 1 depósito creado para la sucursal.",
+        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá el depósito en el POS.",
       });
     }
 
-    // --- params ---
     const q = String(req.query.q || "").trim();
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "24", 10), 1), 200);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "24", 10), 1), 5000);
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const offset = (page - 1) * limit;
 
-    const rubroId = toInt(req.query.rubro_id, 0);
-    const subrubroId = toInt(req.query.subrubro_id, 0);
+    const inStock = String(req.query.in_stock ?? "1") === "1";
+    const sellable = String(req.query.sellable ?? "1") === "1";
+
+    const categoryId = toInt(req.query.category_id || req.query.rubro_id, 0) || 0;
+    const subcategoryId = toInt(req.query.subcategory_id || req.query.subrubro_id, 0) || 0;
 
     const like = `%${q}%`;
 
-    // ✅ regla "sin precio": 0 es sin precio
-    const hasAnyPriceExpr = `
-      (
-        COALESCE(p.price_list,0) > 0
-        OR COALESCE(p.price_discount,0) > 0
-        OR COALESCE(p.price_reseller,0) > 0
-        OR COALESCE(p.price,0) > 0
+    // búsqueda
+    const whereQ = q
+      ? `AND (
+          p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
+          OR p.brand LIKE :like OR p.model LIKE :like
+          OR c.name LIKE :like OR sc.name LIKE :like OR pc.name LIKE :like
+        )`
+      : "";
+
+    // filtro stock
+    const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
+
+    // ✅ precio: vendible = que exista ALGUNO > 0
+    // Regla: 0 = sin precio.
+    const priceExpr = `
+      GREATEST(
+        COALESCE(p.price,0),
+        COALESCE(p.price_list,0),
+        COALESCE(p.price_discount,0),
+        COALESCE(p.price_reseller,0)
       )
     `;
 
-    const whereQ = q
-      ? `
-        AND (
-          p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
-          OR p.brand LIKE :like OR p.model LIKE :like
-          OR c.name LIKE :like OR pc.name LIKE :like
-        )
-      `
-      : "";
+    const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
-    const whereRubro = rubroId ? `AND pc.id = :rubroId` : "";
-    const whereSubrubro = subrubroId ? `AND c.id = :subrubroId` : "";
+    // rubro/subrubro
+    const whereCat = categoryId ? `AND (p.category_id = :categoryId OR pc.id = :categoryId OR c.id = :categoryId)` : "";
+    const whereSub = subcategoryId ? `AND (p.subcategory_id = :subcategoryId OR sc.id = :subcategoryId)` : "";
 
     logPos(req, "info", "listProductsForPos query", {
-      resolvedBranchId,
-      resolvedWarehouseId,
+      warehouseId,
       q,
-      rubroId,
-      subrubroId,
       page,
       limit,
+      inStock,
+      sellable,
+      categoryId,
+      subcategoryId,
     });
 
-    // ✅ listado: SOLO stock del depósito activo + vendibles
     const [rows] = await sequelize.query(
       `
       SELECT
@@ -263,84 +247,91 @@ async function listProductsForPos(req, res) {
         p.model,
         p.is_active,
 
-        -- precios (para elegir en checkout)
-        COALESCE(p.price, 0) AS price_base,
-        COALESCE(p.price_list, 0) AS price_list,
-        COALESCE(p.price_discount, 0) AS price_discount,
-        COALESCE(p.price_reseller, 0) AS price_reseller,
+        p.category_id,
+        p.subcategory_id,
 
-        -- stock real por depósito
+        c.name AS category_name,
+        pc.id AS parent_category_id,
+        pc.name AS parent_category_name,
+        sc.name AS subcategory_name,
+
+        p.price,
+        p.price_list,
+        p.price_discount,
+        p.price_reseller,
+
+        (${priceExpr}) AS any_price,
+
         COALESCE(sb.qty, 0) AS qty,
 
-        -- rubro/subrubro
-        pc.id AS rubro_id,
-        pc.name AS rubro_name,
-        c.id AS subrubro_id,
-        c.name AS subrubro_name,
-
-        -- preview imagen (primera)
         (
           SELECT pi.url
           FROM product_images pi
           WHERE pi.product_id = p.id
-          ORDER BY pi.sort_order ASC, pi.id ASC
+          ORDER BY COALESCE(pi.sort_order,0) ASC, pi.id ASC
           LIMIT 1
         ) AS image_url
 
       FROM products p
-      INNER JOIN stock_balances sb
+      LEFT JOIN stock_balances sb
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
 
-      LEFT JOIN categories c ON c.id = p.category_id
-      LEFT JOIN categories pc ON pc.id = c.parent_id
+      LEFT JOIN categories c
+        ON c.id = p.category_id
 
-      WHERE
-        p.is_active = 1
-        AND COALESCE(sb.qty, 0) > 0
-        AND ${hasAnyPriceExpr}
+      LEFT JOIN categories pc
+        ON pc.id = c.parent_id
 
-        ${whereQ}
-        ${whereRubro}
-        ${whereSubrubro}
+      LEFT JOIN subcategories sc
+        ON sc.id = p.subcategory_id
+
+      WHERE p.is_active = 1
+      ${whereQ}
+      ${whereCat}
+      ${whereSub}
+      ${whereStock}
+      ${whereSellable}
 
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
       {
         replacements: {
-          warehouseId: resolvedWarehouseId,
+          warehouseId,
           like,
-          rubroId: rubroId || undefined,
-          subrubroId: subrubroId || undefined,
           limit,
           offset,
+          categoryId: categoryId || null,
+          subcategoryId: subcategoryId || null,
         },
       }
     );
 
-    // ✅ count con mismos filtros
     const [[countRow]] = await sequelize.query(
       `
       SELECT COUNT(*) AS total
       FROM products p
-      INNER JOIN stock_balances sb
+      LEFT JOIN stock_balances sb
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
-      LEFT JOIN categories c ON c.id = p.category_id
-      LEFT JOIN categories pc ON pc.id = c.parent_id
-      WHERE
-        p.is_active = 1
-        AND COALESCE(sb.qty, 0) > 0
-        AND ${hasAnyPriceExpr}
-        ${whereQ}
-        ${whereRubro}
-        ${whereSubrubro}
+      LEFT JOIN categories c
+        ON c.id = p.category_id
+      LEFT JOIN categories pc
+        ON pc.id = c.parent_id
+      LEFT JOIN subcategories sc
+        ON sc.id = p.subcategory_id
+      WHERE p.is_active = 1
+      ${whereQ}
+      ${whereCat}
+      ${whereSub}
+      ${whereStock}
+      ${whereSellable}
       `,
       {
         replacements: {
-          warehouseId: resolvedWarehouseId,
+          warehouseId,
           like,
-          rubroId: rubroId || undefined,
-          subrubroId: subrubroId || undefined,
+          categoryId: categoryId || null,
+          subcategoryId: subcategoryId || null,
         },
       }
     );
@@ -348,13 +339,7 @@ async function listProductsForPos(req, res) {
     return res.json({
       ok: true,
       data: rows,
-      meta: {
-        page,
-        limit,
-        total: Number(countRow?.total || 0),
-        branch_id: resolvedBranchId,
-        warehouse_id: resolvedWarehouseId,
-      },
+      meta: { page, limit, total: Number(countRow?.total || 0) },
     });
   } catch (e) {
     logPos(req, "error", "listProductsForPos error", { err: e.message });
