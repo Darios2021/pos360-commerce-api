@@ -10,6 +10,8 @@ const {
   StockMovement,
   StockMovementItem,
   Warehouse,
+  ProductImage,
+  Category,
 } = require("../models");
 
 function toNum(v, def = 0) {
@@ -66,11 +68,13 @@ function resolvePosContext(req) {
   const branchId =
     toInt(req?.body?.branch_id, 0) ||
     toInt(req?.query?.branch_id, 0) ||
+    toInt(req?.query?.branchId, 0) ||
     toInt(req?.ctx?.branchId, 0);
 
   const warehouseId =
     toInt(req?.body?.warehouse_id, 0) ||
     toInt(req?.query?.warehouse_id, 0) ||
+    toInt(req?.query?.warehouseId, 0) ||
     toInt(req?.ctx?.warehouseId, 0);
 
   return { branchId, warehouseId };
@@ -91,6 +95,19 @@ async function resolveWarehouseForBranch(branchId) {
   });
 
   return toInt(w?.id, 0);
+}
+
+/**
+ * ✅ valida que un warehouse pertenezca al branch
+ */
+async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
+  const wid = toInt(warehouseId, 0);
+  const bid = toInt(branchId, 0);
+  if (!wid || !bid) return true;
+
+  const w = await Warehouse.findByPk(wid, { attributes: ["id", "branch_id"] });
+  if (!w) return false;
+  return toInt(w.branch_id, 0) === bid;
 }
 
 /**
@@ -155,25 +172,48 @@ async function getContext(req, res) {
 /**
  * ✅ POS PRODUCTS
  * Query params:
- * - warehouse_id (required)
+ * - branch_id (optional but helps admin)
+ * - warehouse_id (optional; if missing and branch_id exists => resolve)
  * - q, page, limit
  * - in_stock=1|0   (default 1)
- * - sellable=1|0   (default 1)   ✅ AHORA: "cualquier precio > 0"
- * - price_mode=LIST|BASE|DISCOUNT|RESELLER (solo para devolver effective_price, NO para filtrar sellable)
+ * - sellable=1|0   (default 1)
+ * - price_mode=LIST|BASE|DISCOUNT|RESELLER (default LIST)
+ * - include_images=1 (optional)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
 
   try {
-    const { warehouseId } = resolvePosContext(req);
+    const { branchId, warehouseId } = resolvePosContext(req);
 
-    if (!warehouseId) {
-      logPos(req, "warn", "listProductsForPos blocked: warehouse missing");
+    let resolvedWarehouseId = toInt(warehouseId, 0);
+    const resolvedBranchId = toInt(branchId, 0);
+
+    // ✅ si falta warehouse pero viene branch => resolver depósito
+    if (!resolvedWarehouseId && resolvedBranchId) {
+      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+    }
+
+    if (!resolvedWarehouseId) {
+      logPos(req, "warn", "listProductsForPos blocked: warehouse missing", { branchId, warehouseId });
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
-        message: "Falta warehouse_id (depósito). Enviá warehouse_id o configurá el depósito en el POS.",
+        message:
+          "Falta warehouse_id (depósito). Enviá warehouse_id o branch_id para resolver el depósito automáticamente.",
       });
+    }
+
+    // ✅ si mandaron ambos, validar coherencia
+    if (resolvedBranchId) {
+      const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
+      if (!ok) {
+        return res.status(400).json({
+          ok: false,
+          code: "WAREHOUSE_BRANCH_MISMATCH",
+          message: `El depósito ${resolvedWarehouseId} no pertenece a la sucursal ${resolvedBranchId}.`,
+        });
+      }
     }
 
     const q = String(req.query.q || "").trim();
@@ -183,24 +223,20 @@ async function listProductsForPos(req, res) {
 
     const inStock = String(req.query.in_stock ?? "1") === "1";
     const sellable = String(req.query.sellable ?? "1") === "1";
-
-    // price_mode queda para "effective_price" (preview), pero SELLABLE ya no depende de esto
     const priceMode = String(req.query.price_mode || "LIST").trim().toUpperCase();
+    const includeImages = String(req.query.include_images ?? "0") === "1";
 
     const like = `%${q}%`;
 
-    // búsqueda por producto + rubro/subrubro
     const whereQ = q
       ? `AND (
           p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
           OR p.brand LIKE :like OR p.model LIKE :like
-          OR c.name LIKE :like OR pc.name LIKE :like
         )`
       : "";
 
     const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
-    // ✅ effective_price para el preview (no para el filtro sellable)
     const priceExpr =
       priceMode === "BASE"
         ? `COALESCE(p.price, 0)`
@@ -210,27 +246,32 @@ async function listProductsForPos(req, res) {
         ? `COALESCE(NULLIF(p.price_reseller,0), NULLIF(p.price_list,0), p.price, 0)`
         : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`; // LIST
 
-    // ✅ SELLABLE REAL: cualquier precio > 0 (0 = sin precio)
-    const anyPriceExpr = `
-      (
-        COALESCE(NULLIF(p.price_list,0), 0) > 0
-        OR COALESCE(NULLIF(p.price_discount,0), 0) > 0
-        OR COALESCE(NULLIF(p.price_reseller,0), 0) > 0
-        OR COALESCE(NULLIF(p.price,0), 0) > 0
-      )
-    `;
-
-    const whereSellable = sellable ? `AND ${anyPriceExpr}` : "";
+    const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
     logPos(req, "info", "listProductsForPos query", {
-      warehouseId,
+      resolvedWarehouseId,
+      resolvedBranchId,
       q,
       page,
       limit,
       inStock,
       sellable,
       priceMode,
+      includeImages,
     });
+
+    // ✅ imagen principal (si pedís include_images=1)
+    const imgSelect = includeImages
+      ? `,
+        (
+          SELECT pi.url
+          FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY pi.sort_order ASC, pi.id ASC
+          LIMIT 1
+        ) AS main_image_url
+      `
+      : "";
 
     const [rows] = await sequelize.query(
       `
@@ -243,45 +284,21 @@ async function listProductsForPos(req, res) {
         p.name,
         p.brand,
         p.model,
-        p.is_active,
-
         p.category_id,
-        c.name AS category_name,
-        c.parent_id AS parent_category_id,
-        pc.name AS parent_category_name,
-
+        p.subcategory_id,
+        p.is_new,
+        p.is_promo,
+        p.is_active,
         p.price,
         p.price_list,
         p.price_discount,
         p.price_reseller,
         (${priceExpr}) AS effective_price,
-
-        COALESCE(sb.qty, 0) AS qty,
-
-        img.url AS image_url
+        COALESCE(sb.qty, 0) AS qty
+        ${imgSelect}
       FROM products p
-
       LEFT JOIN stock_balances sb
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
-
-      LEFT JOIN categories c
-        ON c.id = p.category_id
-
-      LEFT JOIN categories pc
-        ON pc.id = c.parent_id
-
-      LEFT JOIN (
-        SELECT pi1.product_id, pi1.url
-        FROM product_images pi1
-        INNER JOIN (
-          SELECT product_id, MIN(sort_order) AS min_sort
-          FROM product_images
-          GROUP BY product_id
-        ) pi2
-          ON pi2.product_id = pi1.product_id AND pi2.min_sort = pi1.sort_order
-      ) img
-        ON img.product_id = p.id
-
       WHERE p.is_active = 1
       ${whereQ}
       ${whereStock}
@@ -289,7 +306,7 @@ async function listProductsForPos(req, res) {
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
-      { replacements: { warehouseId, like, limit, offset } }
+      { replacements: { warehouseId: resolvedWarehouseId, like, limit, offset } }
     );
 
     const [[countRow]] = await sequelize.query(
@@ -298,22 +315,18 @@ async function listProductsForPos(req, res) {
       FROM products p
       LEFT JOIN stock_balances sb
         ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
-      LEFT JOIN categories c
-        ON c.id = p.category_id
-      LEFT JOIN categories pc
-        ON pc.id = c.parent_id
       WHERE p.is_active = 1
       ${whereQ}
       ${whereStock}
       ${whereSellable}
       `,
-      { replacements: { warehouseId, like } }
+      { replacements: { warehouseId: resolvedWarehouseId, like } }
     );
 
     return res.json({
       ok: true,
       data: rows,
-      meta: { page, limit, total: Number(countRow?.total || 0) },
+      meta: { page, limit, total: Number(countRow?.total || 0), warehouse_id: resolvedWarehouseId },
     });
   } catch (e) {
     logPos(req, "error", "listProductsForPos error", { err: e.message });
@@ -464,7 +477,9 @@ async function createSale(req, res) {
 
       if (!sb) {
         throw Object.assign(
-          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`),
+          new Error(
+            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
+          ),
           { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
         );
       }
