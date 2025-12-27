@@ -10,8 +10,6 @@ const {
   StockMovement,
   StockMovementItem,
   Warehouse,
-  ProductImage,
-  Category,
 } = require("../models");
 
 function toNum(v, def = 0) {
@@ -70,13 +68,33 @@ function logPos(req, level, msg, extra = {}) {
     user_branch_id: req?.user?.branch_id ?? null,
     ctx_branchId: req?.ctx?.branchId ?? null,
     ctx_warehouseId: req?.ctx?.warehouseId ?? null,
+    q_branch_id: req?.query?.branch_id ?? req?.query?.branchId ?? null,
+    q_warehouse_id: req?.query?.warehouse_id ?? req?.query?.warehouseId ?? null,
   };
   // eslint-disable-next-line no-console
   console[level](`[POS] ${msg}`, { ...base, ...extra });
 }
 
 /**
- * ✅ Resuelve branchId/warehouseId de forma robusta:
+ * ✅ SOLO valores EXPLÍCITOS (query/body).
+ * (para evitar que admin quede clavado en req.ctx)
+ */
+function resolveExplicitPosContext(req) {
+  const branchId =
+    toInt(req?.body?.branch_id, 0) ||
+    toInt(req?.query?.branch_id, 0) ||
+    toInt(req?.query?.branchId, 0);
+
+  const warehouseId =
+    toInt(req?.body?.warehouse_id, 0) ||
+    toInt(req?.query?.warehouse_id, 0) ||
+    toInt(req?.query?.warehouseId, 0);
+
+  return { branchId, warehouseId };
+}
+
+/**
+ * ✅ Resuelve branchId/warehouseId de forma robusta (incluye ctx)
  * PRIORIDAD:
  * 1) req.body
  * 2) req.query
@@ -131,8 +149,7 @@ async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
 /**
  * ✅ Devuelve contexto POS RESUELTO:
  * - user normal: branch = su branch_id
- * - admin: puede mandar branch_id (si no, usa el suyo)
- * - warehouse: si no viene, intenta resolver por sucursal (primer depósito)
+ * - admin: si manda branch_id/warehouse_id explícito, se usa; si no, no se fuerza warehouse
  */
 async function getContext(req, res) {
   req._rid = req._rid || rid(req);
@@ -140,12 +157,19 @@ async function getContext(req, res) {
   try {
     const admin = isAdminReq(req);
     const userBranchId = toInt(req?.user?.branch_id, 0);
-    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
 
-    const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
+    const explicit = resolveExplicitPosContext(req);
+    const fallback = resolvePosContext(req);
 
-    let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
-    if (!resolvedWarehouseId && resolvedBranchId) {
+    const resolvedBranchId = admin
+      ? (toInt(explicit.branchId, 0) || userBranchId || toInt(fallback.branchId, 0) || 0)
+      : userBranchId;
+
+    // ✅ Admin: NO autoseleccionar depósito si no lo pide explícitamente
+    let resolvedWarehouseId = admin ? toInt(explicit.warehouseId, 0) : toInt(fallback.warehouseId, 0);
+
+    // ✅ No-admin: si falta warehouse, resolver por sucursal
+    if (!admin && !resolvedWarehouseId && resolvedBranchId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
 
@@ -153,6 +177,8 @@ async function getContext(req, res) {
       admin,
       resolvedBranchId,
       resolvedWarehouseId,
+      explicit,
+      fallback,
     });
 
     let warehouseObj = null;
@@ -191,9 +217,10 @@ async function getContext(req, res) {
 
 /**
  * ✅ POS PRODUCTS
- * FIX CLAVE:
- * - Admin: SOLO usa warehouse si vino EXPLÍCITO.
- *   Si NO vino warehouse_id explícito => ADMIN_ALL (SUM stock).
+ *
+ * ✅ FIX CLAVE:
+ * - Admin: usar SOLO contextos explícitos (query/body) y NO el ctx.
+ * - Admin sin warehouse => ADMIN_ALL real (sum stock).
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
@@ -201,29 +228,17 @@ async function listProductsForPos(req, res) {
   try {
     const admin = isAdminReq(req);
 
-    // 🔥 Detectar explícitos (NO usar ctx para decidir esto)
-    const explicitWarehouseId =
-      toInt(req?.body?.warehouse_id, 0) ||
-      toInt(req?.query?.warehouse_id, 0) ||
-      toInt(req?.query?.warehouseId, 0);
+    // ✅ Admin: SOLO explícito (evita quedar clavado a ctx.warehouseId)
+    // ✅ No-admin: puede usar ctx (como venías)
+    const { branchId, warehouseId } = admin ? resolveExplicitPosContext(req) : resolvePosContext(req);
 
-    const explicitBranchId =
-      toInt(req?.body?.branch_id, 0) ||
-      toInt(req?.query?.branch_id, 0) ||
-      toInt(req?.query?.branchId, 0);
+    let resolvedWarehouseId = toInt(warehouseId, 0);
+    const resolvedBranchId = toInt(branchId, 0);
 
-    // Contexto general (incluye ctx)
-    const { branchId, warehouseId } = resolvePosContext(req);
-
-    const resolvedBranchId = toInt(explicitBranchId, 0) || toInt(branchId, 0);
-
-    // Warehouse:
-    // - si vino explícito => usarlo
-    // - si NO vino explícito:
-    //   - NO admin => resolver por branch
-    //   - admin => NO resolver (para permitir ADMIN_ALL)
-    let resolvedWarehouseId =
-      toInt(explicitWarehouseId, 0) || (admin ? 0 : toInt(warehouseId, 0));
+    // ✅ NO-ADMIN: si falta warehouse pero hay branch => resolver depósito
+    if (!admin && !resolvedWarehouseId && resolvedBranchId) {
+      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+    }
 
     const q = String(req.query.q || "").trim();
     const limit = Math.min(Math.max(parseInt(req.query.limit || "24", 10), 1), 5000);
@@ -267,15 +282,11 @@ async function listProductsForPos(req, res) {
       `
       : "";
 
-    // ✅ No-admin: si falta warehouse pero hay branch => resolver depósito
-    if (!resolvedWarehouseId && !admin && resolvedBranchId) {
-      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
-    }
-
     // =========================================================
     // ✅ CASO A: CON warehouse_id => por depósito
     // =========================================================
     if (resolvedWarehouseId) {
+      // ✅ si mandaron ambos, validar coherencia (solo si branch viene explícito)
       if (resolvedBranchId) {
         const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
         if (!ok) {
@@ -287,12 +298,12 @@ async function listProductsForPos(req, res) {
         }
       }
 
+      const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
+
       logPos(req, "info", "listProductsForPos (warehouse) query", {
         admin,
         resolvedWarehouseId,
         resolvedBranchId,
-        explicitWarehouseId,
-        explicitBranchId,
         q,
         page,
         limit,
@@ -330,7 +341,7 @@ async function listProductsForPos(req, res) {
           ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
         WHERE p.is_active = 1
         ${whereQ}
-        ${inStock ? "AND COALESCE(sb.qty, 0) > 0" : ""}
+        ${whereStock}
         ${whereSellable}
         ORDER BY p.name ASC
         LIMIT :limit OFFSET :offset
@@ -346,7 +357,7 @@ async function listProductsForPos(req, res) {
           ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
         WHERE p.is_active = 1
         ${whereQ}
-        ${inStock ? "AND COALESCE(sb.qty, 0) > 0" : ""}
+        ${whereStock}
         ${whereSellable}
         `,
         { replacements: { warehouseId: resolvedWarehouseId, like } }
@@ -355,23 +366,17 @@ async function listProductsForPos(req, res) {
       return res.json({
         ok: true,
         data: rows,
-        meta: {
-          page,
-          limit,
-          total: Number(countRow?.total || 0),
-          warehouse_id: resolvedWarehouseId,
-          scope: "WAREHOUSE",
-        },
+        meta: { page, limit, total: Number(countRow?.total || 0), warehouse_id: resolvedWarehouseId },
       });
     }
 
     // =========================================================
     // ✅ CASO B: ADMIN SIN warehouse => VISTA TOTAL (SUM stock)
-    // - si branch_id explícito: limita depósitos a esa sucursal
-    // - si NO: todos los depósitos
+    // - si viene branch_id: suma depósitos de esa sucursal
+    // - si NO viene branch_id: suma TODOS los depósitos
     // =========================================================
     if (admin) {
-      const joinWarehouses = explicitBranchId
+      const joinWarehouses = resolvedBranchId
         ? `INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id = :branchId`
         : `INNER JOIN warehouses w ON w.id = sb.warehouse_id`;
 
@@ -380,7 +385,6 @@ async function listProductsForPos(req, res) {
       logPos(req, "info", "listProductsForPos (admin-all) query", {
         admin,
         resolvedBranchId,
-        explicitBranchId,
         q,
         page,
         limit,
@@ -424,7 +428,7 @@ async function listProductsForPos(req, res) {
         ORDER BY p.name ASC
         LIMIT :limit OFFSET :offset
         `,
-        { replacements: { like, limit, offset, branchId: toInt(explicitBranchId, 0) || undefined } }
+        { replacements: { like, limit, offset, branchId: resolvedBranchId || undefined } }
       );
 
       const [[countRow]] = await sequelize.query(
@@ -437,7 +441,7 @@ async function listProductsForPos(req, res) {
         ${whereQ}
         ${whereSellable}
         `,
-        { replacements: { like, branchId: toInt(explicitBranchId, 0) || undefined } }
+        { replacements: { like, branchId: resolvedBranchId || undefined } }
       );
 
       return res.json({
@@ -448,7 +452,7 @@ async function listProductsForPos(req, res) {
           limit,
           total: Number(countRow?.total || 0),
           scope: "ADMIN_ALL",
-          branch_id: toInt(explicitBranchId, 0) || null,
+          branch_id: resolvedBranchId || null,
         },
       });
     }
@@ -470,6 +474,9 @@ async function listProductsForPos(req, res) {
   }
 }
 
+/**
+ * ✅ POS CREATE SALE (admin no vende)
+ */
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -500,12 +507,12 @@ async function createSale(req, res) {
     const userId = toInt(req.user.id, 0);
 
     const userBranchId = toInt(req.user.branch_id, 0);
-    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
+    const { warehouseId: ctxWarehouseId } = resolvePosContext(req);
 
     const resolvedBranchId = userBranchId;
 
     if (!resolvedBranchId) {
-      logPos(req, "warn", "createSale blocked: missing branch", { userBranchId, ctxBranchId });
+      logPos(req, "warn", "createSale blocked: missing branch", { userBranchId });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -630,9 +637,7 @@ async function createSale(req, res) {
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(
-            `Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`
-          ),
+          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
           { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
         );
       }
