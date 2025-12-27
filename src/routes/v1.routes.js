@@ -1,6 +1,5 @@
 // src/routes/v1.routes.js
 const router = require("express").Router();
-
 const { requireAuth } = require("../middlewares/auth");
 
 // Public
@@ -29,7 +28,7 @@ router.use("/categories", requireAuth, categoriesRoutes);
 router.use("/subcategories", requireAuth, subcategoriesRoutes);
 router.use("/branches", requireAuth, branchesRoutes);
 router.use("/warehouses", requireAuth, warehousesRoutes);
-router.use("/stock", requireAuth, stockRoutes);      // ✅ OK
+router.use("/stock", requireAuth, stockRoutes);
 router.use("/dashboard", requireAuth, dashboardRoutes);
 router.use("/pos", requireAuth, posRoutes);
 
