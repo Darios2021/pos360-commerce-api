@@ -1,4 +1,6 @@
 // src/controllers/products.controller.js
+// ✅ COPY-PASTE FINAL (con: admin detection robusto + validación de campos con mensajes claros)
+
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, ProductImage, sequelize } = require("../models");
 
@@ -10,6 +12,30 @@ function toInt(v, d = 0) {
 function toFloat(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
+}
+
+function isNonEmptyStr(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function isBoolLike(v) {
+  return (
+    typeof v === "boolean" ||
+    v === 0 ||
+    v === 1 ||
+    v === "0" ||
+    v === "1" ||
+    String(v).toLowerCase() === "true" ||
+    String(v).toLowerCase() === "false"
+  );
+}
+
+function toBool(v, d = false) {
+  if (typeof v === "boolean") return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "true" || s === "1") return true;
+  if (s === "false" || s === "0") return false;
+  return d;
 }
 
 function getBranchId(req) {
@@ -24,11 +50,32 @@ function getBranchId(req) {
   );
 }
 
-// ✅ robusto: roles como strings u objetos {name:"admin"} / {role:"admin"} / {role:{name:"admin"}}
+// ✅ ULTRA ROBUSTO: roles string/array/obj + role directo
 function isAdminReq(req) {
   const u = req?.user || {};
+
+  // flags directos
   if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
 
+  // role directo tipo "admin"
+  if (typeof u?.role === "string") {
+    const r = u.role.trim().toLowerCase();
+    if (["admin", "super_admin", "superadmin", "root", "owner"].includes(r)) return true;
+  }
+
+  // roles string: "admin, cashier" / "ADMIN"
+  if (typeof u?.roles === "string") {
+    const parts = u.roles
+      .split(/[,\s|]+/g)
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (parts.some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x))) {
+      return true;
+    }
+  }
+
+  // roles array (strings u objetos)
   const rolesRaw = Array.isArray(u.roles) ? u.roles : [];
   const roleNames = [];
 
@@ -41,9 +88,7 @@ function isAdminReq(req) {
   }
 
   const norm = (s) => String(s || "").trim().toLowerCase();
-  return roleNames.map(norm).some((x) =>
-    ["admin", "super_admin", "superadmin", "root", "owner"].includes(x)
-  );
+  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
 }
 
 function requireAdmin(req, res) {
@@ -101,12 +146,7 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   }
 
   // Images
-  const imgAs =
-    A.images ? "images" :
-    A.productImages ? "productImages" :
-    A.ProductImages ? "ProductImages" :
-    null;
-
+  const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
 
   // Branch (solo admin)
@@ -122,6 +162,92 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   }
 
   return inc;
+}
+
+// ---------------------------
+// ✅ VALIDACIÓN DE CAMPOS
+// ---------------------------
+function validateProductPayload(payload, { isPatch = false } = {}) {
+  const errors = [];
+  const add = (field, message) => errors.push({ field, message });
+
+  // helpers
+  const checkPositiveInt = (field, v, { allowNull = true } = {}) => {
+    if (v === undefined) return; // no enviado
+    if (v === null) {
+      if (!allowNull) add(field, "No puede ser null.");
+      return;
+    }
+    const n = toInt(v, NaN);
+    if (!Number.isFinite(n) || n <= 0) add(field, "Debe ser un entero mayor a 0.");
+  };
+
+  const checkNumber = (field, v, { min = 0, allowNull = true } = {}) => {
+    if (v === undefined) return;
+    if (v === null) {
+      if (!allowNull) add(field, "No puede ser null.");
+      return;
+    }
+    const n = toFloat(v, NaN);
+    if (!Number.isFinite(n)) add(field, "Debe ser un número válido.");
+    else if (n < min) add(field, `Debe ser mayor o igual a ${min}.`);
+  };
+
+  const checkString = (field, v, { required = false, max = null } = {}) => {
+    if (v === undefined) {
+      if (required && !isPatch) add(field, "Es requerido.");
+      return;
+    }
+    if (v === null) {
+      if (required) add(field, "No puede ser null.");
+      return;
+    }
+    if (!isNonEmptyStr(v)) {
+      if (required) add(field, "Es requerido.");
+      return;
+    }
+    if (max && String(v).trim().length > max) add(field, `Máximo ${max} caracteres.`);
+  };
+
+  const checkBool = (field, v) => {
+    if (v === undefined) return;
+    if (!isBoolLike(v)) add(field, "Debe ser boolean (true/false).");
+  };
+
+  // requeridos create
+  checkString("sku", payload.sku, { required: true, max: 64 });
+  checkString("name", payload.name, { required: true, max: 200 });
+
+  // opcionales
+  checkString("code", payload.code, { required: false, max: 64 });
+  checkString("barcode", payload.barcode, { required: false, max: 64 });
+  checkString("description", payload.description, { required: false });
+
+  checkPositiveInt("category_id", payload.category_id, { allowNull: true });
+  checkPositiveInt("subcategory_id", payload.subcategory_id, { allowNull: true });
+  checkPositiveInt("branch_id", payload.branch_id, { allowNull: false }); // si viene, debe ser válida
+
+  checkString("brand", payload.brand, { required: false, max: 120 });
+  checkString("model", payload.model, { required: false, max: 120 });
+
+  checkBool("is_new", payload.is_new);
+  checkBool("is_promo", payload.is_promo);
+  checkBool("is_active", payload.is_active);
+
+  checkNumber("price_list", payload.price_list, { min: 0, allowNull: true });
+  checkNumber("price_discount", payload.price_discount, { min: 0, allowNull: true });
+  checkNumber("price_reseller", payload.price_reseller, { min: 0, allowNull: true });
+
+  // si discount > list => error lógico
+  if (payload.price_list !== undefined && payload.price_discount !== undefined) {
+    const pl = payload.price_list === null ? null : toFloat(payload.price_list, NaN);
+    const pd = payload.price_discount === null ? null : toFloat(payload.price_discount, NaN);
+    if (Number.isFinite(pl) && Number.isFinite(pd) && pd > pl) {
+      add("price_discount", "No puede ser mayor que price_list.");
+    }
+  }
+
+  return errors;
 }
 
 function pickBody(body = {}) {
@@ -166,7 +292,7 @@ function pickBody(body = {}) {
   if (out.branch_id != null) out.branch_id = toInt(out.branch_id, null);
 
   const bools = ["is_new", "is_promo", "track_stock", "sheet_has_stock", "is_active"];
-  for (const b of bools) if (out[b] != null) out[b] = !!out[b];
+  for (const b of bools) if (out[b] != null) out[b] = toBool(out[b], false);
 
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
@@ -247,9 +373,15 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
+    // ✅ Usuario NO admin: solo productos que tengan stock en SU sucursal
     if (!admin) {
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push(existsStockInBranch(ctxBranchId));
+    }
+
+    // ✅ Admin: opcional filtrar por branch_id si viene
+    if (admin && stockBranchId) {
+      where.branch_id = stockBranchId;
     }
 
     const include = buildProductIncludes({ includeBranch: admin });
@@ -280,12 +412,11 @@ async function list(req, res, next) {
 
 // =====================================
 // GET /api/v1/products/:id
-// ✅ ahora incluye stock_qty según sucursal efectiva
 // =====================================
 async function getOne(req, res, next) {
   try {
     const id = toInt(req.params.id, 0);
-    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
+    if (!id) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const admin = isAdminReq(req);
     const ctxBranchId = getBranchId(req);
@@ -298,14 +429,12 @@ async function getOne(req, res, next) {
       });
     }
 
-    // ✅ branch para calcular stock_qty en detalle
     const stockBranchId = admin
       ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
       : ctxBranchId;
 
     const include = buildProductIncludes({ includeBranch: admin });
 
-    // ✅ en vez de findByPk simple, metemos attributes include con el literal
     const p = await Product.findOne({
       where: { id },
       include,
@@ -314,14 +443,11 @@ async function getOne(req, res, next) {
       },
     });
 
-    if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
+    if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
     if (!admin) {
       const ok = await Product.findOne({
-        where: {
-          id,
-          [Op.and]: [existsStockInBranch(ctxBranchId)],
-        },
+        where: { id, [Op.and]: [existsStockInBranch(ctxBranchId)] },
         attributes: ["id"],
       });
 
@@ -342,12 +468,11 @@ async function getOne(req, res, next) {
 
 // =====================================
 // GET /api/v1/products/:id/stock?branch_id=
-// ✅ endpoint rápido para refrescar stock del form al cambiar sucursal
 // =====================================
 async function getStock(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
-    if (!productId) return res.status(400).json({ ok: false, message: "ID inválido" });
+    if (!productId) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const admin = isAdminReq(req);
     const ctxBranchId = getBranchId(req);
@@ -391,34 +516,48 @@ async function getStock(req, res, next) {
 // =====================================
 async function create(req, res, next) {
   try {
-    const payload = pickBody(req.body || {});
-    if (!payload.sku || !payload.name) {
-      return res.status(400).json({
-        ok: false,
-        code: "VALIDATION",
-        message: "sku y name son requeridos",
-      });
-    }
-
     const admin = isAdminReq(req);
-    const branch_id = getBranchId(req);
+    const ctxBranchId = getBranchId(req);
 
+    const payload = pickBody(req.body || {});
+
+    // ✅ set branch_id según rol
     if (!admin) {
-      if (!branch_id) {
+      if (!ctxBranchId) {
         return res.status(400).json({
           ok: false,
           code: "BRANCH_REQUIRED",
           message: "No se pudo determinar la sucursal del usuario (branch_id).",
         });
       }
-      payload.branch_id = branch_id;
+      payload.branch_id = ctxBranchId;
     } else {
-      if (!payload.branch_id) payload.branch_id = branch_id || 1;
+      if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
+    }
+
+    // ✅ VALIDACIÓN (create)
+    const errors = validateProductPayload(payload, { isPatch: false });
+    if (errors.length) {
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "Hay errores de validación en el producto.",
+        errors,
+      });
     }
 
     const created = await Product.create(payload);
     return res.status(201).json({ ok: true, message: "Producto creado", data: created });
   } catch (e) {
+    // SKU unique, etc.
+    const msg = String(e?.message || "");
+    if (msg.toLowerCase().includes("unique") || msg.toLowerCase().includes("duplicate")) {
+      return res.status(400).json({
+        ok: false,
+        code: "DUPLICATE",
+        message: "Ya existe un producto con ese SKU o Barcode.",
+      });
+    }
     next(e);
   }
 }
@@ -429,21 +568,31 @@ async function create(req, res, next) {
 async function update(req, res, next) {
   try {
     const id = toInt(req.params.id, 0);
-    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
+    if (!id) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const admin = isAdminReq(req);
 
     const p = await Product.findByPk(id);
-    if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
+    if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
     const patch = pickBody(req.body || {});
     if (!admin) delete patch.branch_id;
+
+    // ✅ VALIDACIÓN (patch): solo valida lo que viene
+    const errors = validateProductPayload(patch, { isPatch: true });
+    if (errors.length) {
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "Hay errores de validación en el producto.",
+        errors,
+      });
+    }
 
     await p.update(patch);
 
     const include = buildProductIncludes({ includeBranch: admin });
 
-    // ✅ devolvemos con stock_qty también, usando branch efectiva del request
     const ctxBranchId = getBranchId(req);
     const stockBranchId = admin
       ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
@@ -457,23 +606,30 @@ async function update(req, res, next) {
 
     return res.json({ ok: true, message: "Producto actualizado", data: updated });
   } catch (e) {
+    const msg = String(e?.message || "");
+    if (msg.toLowerCase().includes("unique") || msg.toLowerCase().includes("duplicate")) {
+      return res.status(400).json({
+        ok: false,
+        code: "DUPLICATE",
+        message: "Ya existe un producto con ese SKU o Barcode.",
+      });
+    }
     next(e);
   }
 }
 
 // =====================================
 // DELETE /api/v1/products/:id (solo admin)
-// - FK => 200 ok:false (para NO mostrar error rojo en consola)
 // =====================================
 async function remove(req, res, next) {
   try {
     if (!requireAdmin(req, res)) return;
 
     const id = toInt(req.params.id, 0);
-    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
+    if (!id) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const p = await Product.findByPk(id);
-    if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
+    if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
     try {
       if (sequelize && typeof sequelize.transaction === "function") {
