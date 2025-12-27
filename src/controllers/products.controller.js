@@ -46,13 +46,9 @@ function isFkConstraintError(err) {
   const code = err?.original?.code || err?.parent?.code || err?.code;
   const errno = err?.original?.errno || err?.parent?.errno || err?.errno;
 
-  // MySQL: ER_ROW_IS_REFERENCED_2 (1451) => no se puede borrar por referencias
   if (code === "ER_ROW_IS_REFERENCED_2" || errno === 1451) return true;
-
-  // Sequelize name
   if (err?.name === "SequelizeForeignKeyConstraintError") return true;
 
-  // Fallback texto
   const msg = String(err?.message || "").toLowerCase();
   if (
     msg.includes("foreign key constraint") ||
@@ -136,7 +132,7 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "tax_rate",
-    "branch_id", // admin puede; no-admin se bloquea abajo
+    "branch_id",
   ];
 
   for (const k of fields) {
@@ -195,8 +191,6 @@ function existsStockInBranch(branchId) {
 
 // =====================================
 // GET /api/v1/products
-// - admin: todos + branch + stock_qty (total o por branch si manda ?branch_id=)
-// - user: solo productos con stock en su branch (warehouses.branch_id)
 // =====================================
 async function list(req, res, next) {
   try {
@@ -217,9 +211,8 @@ async function list(req, res, next) {
       });
     }
 
-    // admin puede pedir branch para calcular stock (opcional)
     const stockBranchId = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) // 0 = total
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0)
       : ctxBranchId;
 
     const where = {};
@@ -237,7 +230,6 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // ✅ user: solo productos con stock en su branch (NO products.branch_id)
     if (!admin) {
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push(existsStockInBranch(ctxBranchId));
@@ -271,8 +263,6 @@ async function list(req, res, next) {
 
 // =====================================
 // GET /api/v1/products/:id
-// admin: cualquiera
-// user: solo si el producto tiene stock en su branch
 // =====================================
 async function getOne(req, res, next) {
   try {
@@ -320,8 +310,6 @@ async function getOne(req, res, next) {
 
 // =====================================
 // POST /api/v1/products
-// admin puede elegir branch_id
-// user: branch_id = su branch
 // =====================================
 async function create(req, res, next) {
   try {
@@ -359,8 +347,6 @@ async function create(req, res, next) {
 
 // =====================================
 // PATCH /api/v1/products/:id
-// admin: edita todo (incl branch_id)
-// user: no cambia branch_id
 // =====================================
 async function update(req, res, next) {
   try {
@@ -388,7 +374,7 @@ async function update(req, res, next) {
 
 // =====================================
 // DELETE /api/v1/products/:id (solo admin)
-// - Si falla por FK -> 409 (NO 500)
+// - FK => 200 ok:false (para NO mostrar error rojo en consola)
 // =====================================
 async function remove(req, res, next) {
   try {
@@ -400,8 +386,6 @@ async function remove(req, res, next) {
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    // ✅ si tenés sequelize + ProductImage, borramos imágenes antes
-    // (y si no existen en tu proyecto, no rompe)
     try {
       if (sequelize && typeof sequelize.transaction === "function") {
         await sequelize.transaction(async (t) => {
@@ -411,13 +395,13 @@ async function remove(req, res, next) {
           await p.destroy({ transaction: t });
         });
       } else {
-        // fallback sin transacción
         if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id } });
         await p.destroy();
       }
     } catch (err) {
       if (isFkConstraintError(err)) {
-        return res.status(409).json({
+        // ✅ 200 (NO 409) para evitar "Failed to load resource" rojo en consola
+        return res.status(200).json({
           ok: false,
           code: "FK_CONSTRAINT",
           message: "No se puede eliminar: el producto tiene referencias (ventas/stock/movimientos).",
