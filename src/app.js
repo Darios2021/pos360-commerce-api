@@ -4,9 +4,9 @@ const cors = require("cors");
 
 const v1Routes = require("./routes/v1.routes");
 
-const authMiddleware = require("./middlewares/auth.middleware");
-const branchContextMiddleware = require("./middlewares/branchContext.middleware");
-const errorMiddleware = require("./middlewares/error.middleware");
+function isMiddleware(fn) {
+  return typeof fn === "function";
+}
 
 function createApp() {
   const app = express();
@@ -43,7 +43,7 @@ function createApp() {
   app.options("*", cors(corsOptions));
 
   // =====================
-  // Request logger (DEBUG)
+  // ✅ Request logger (DEBUG)
   // =====================
   app.use((req, res, next) => {
     const started = Date.now();
@@ -70,12 +70,6 @@ function createApp() {
   app.use(express.urlencoded({ extended: true }));
 
   // =====================
-  // Auth + Context
-  // =====================
-  app.use(authMiddleware);
-  app.use(branchContextMiddleware);
-
-  // =====================
   // Root
   // =====================
   app.get("/", (req, res) => {
@@ -88,8 +82,15 @@ function createApp() {
   });
 
   // =====================
-  // API v1
+  // API v1 (validación)
   // =====================
+  if (!isMiddleware(v1Routes)) {
+    console.error("❌ v1Routes inválido. Debe exportar un router middleware.");
+    console.error("   typeof:", typeof v1Routes);
+    console.error("   keys:", v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null);
+    throw new Error("INVALID_V1_ROUTES_EXPORT");
+  }
+
   app.use("/api/v1", v1Routes);
 
   // =====================
@@ -104,9 +105,27 @@ function createApp() {
   });
 
   // =====================
-  // ✅ ERROR HANDLER ÚNICO (FINAL)
+  // ✅ Error handler FINAL (con stack en dev)
   // =====================
-  app.use(errorMiddleware);
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, next) => {
+    console.error("❌ [API ERROR]", {
+      method: req.method,
+      url: req.originalUrl,
+      message: err?.message,
+      code: err?.code,
+      stack: process.env.NODE_ENV === "production" ? undefined : err?.stack,
+    });
+
+    const status = err?.httpStatus || err?.statusCode || 500;
+
+    return res.status(status).json({
+      ok: false,
+      code: err?.code || "INTERNAL_ERROR",
+      message: err?.message || "Internal Server Error",
+      stack: process.env.NODE_ENV === "production" ? undefined : err?.stack,
+    });
+  });
 
   return app;
 }

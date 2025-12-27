@@ -21,21 +21,35 @@ const posRoutes = require("./pos.routes");
 // ✅ ME (perfil)
 const meRoutes = require("./me.routes");
 
+function safeUse(path, ...mws) {
+  for (const mw of mws) {
+    if (typeof mw !== "function") {
+      const keys = mw && typeof mw === "object" ? Object.keys(mw) : null;
+      console.error("❌ [v1.routes] Middleware inválido en router.use()");
+      console.error("   path:", path);
+      console.error("   typeof:", typeof mw);
+      console.error("   keys:", keys);
+      throw new Error(`INVALID_MIDDLEWARE_FOR_${path}`);
+    }
+  }
+  router.use(path, ...mws);
+}
+
 // Public primero
-router.use("/health", healthRoutes);
-router.use("/auth", authRoutes);
+safeUse("/health", healthRoutes);
+safeUse("/auth", authRoutes);
 
 // Protected
-router.use("/products", requireAuth, productsRoutes);
-router.use("/categories", requireAuth, categoriesRoutes);
-router.use("/subcategories", requireAuth, subcategoriesRoutes);
-router.use("/branches", requireAuth, branchesRoutes);
-router.use("/warehouses", requireAuth, warehousesRoutes);
-router.use("/stock", requireAuth, stockRoutes);
-router.use("/dashboard", requireAuth, dashboardRoutes);
-router.use("/pos", requireAuth, posRoutes);
+safeUse("/products", requireAuth, productsRoutes);
+safeUse("/categories", requireAuth, categoriesRoutes);
+safeUse("/subcategories", requireAuth, subcategoriesRoutes);
+safeUse("/branches", requireAuth, branchesRoutes);
+safeUse("/warehouses", requireAuth, warehousesRoutes);
+safeUse("/stock", requireAuth, stockRoutes);
+safeUse("/dashboard", requireAuth, dashboardRoutes);
+safeUse("/pos", requireAuth, posRoutes);
 
 // ✅ Perfil
-router.use("/me", requireAuth, meRoutes);
+safeUse("/me", requireAuth, meRoutes);
 
 module.exports = router;
