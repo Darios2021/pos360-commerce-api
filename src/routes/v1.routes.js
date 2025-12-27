@@ -18,6 +18,9 @@ const dashboardRoutes = require("./dashboard.routes");
 // POS
 const posRoutes = require("./pos.routes");
 
+// ✅ ME (perfil)
+const meRoutes = require("./me.routes");
+
 // Public primero
 router.use("/health", healthRoutes);
 router.use("/auth", authRoutes);
@@ -31,5 +34,8 @@ router.use("/warehouses", requireAuth, warehousesRoutes);
 router.use("/stock", requireAuth, stockRoutes);
 router.use("/dashboard", requireAuth, dashboardRoutes);
 router.use("/pos", requireAuth, posRoutes);
+
+// ✅ Perfil
+router.use("/me", requireAuth, meRoutes);
 
 module.exports = router;
