@@ -13,6 +13,11 @@ const upload = multer({
 // --- PRODUCTOS ---
 router.get("/", productsCtrl.list);
 router.post("/", productsCtrl.create);
+
+// ✅ STOCK REAL por sucursal (evita 404 del form)
+// GET /api/v1/products/:id/stock?branch_id=3
+router.get("/:id/stock", productsCtrl.getStock);
+
 router.get("/:id", productsCtrl.getOne);
 router.patch("/:id", productsCtrl.update);
 
