@@ -1,8 +1,9 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL (con: admin detection robusto + validación de campos con mensajes claros)
+// ✅ COPY-PASTE FINAL
+// (admin detection robusto + validación de campos + FIX FK subcategory_id (tabla vacía) + errores claros)
 
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, ProductImage, sequelize } = require("../models");
+const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -109,12 +110,14 @@ function isFkConstraintError(err) {
   const errno = err?.original?.errno || err?.parent?.errno || err?.errno;
 
   if (code === "ER_ROW_IS_REFERENCED_2" || errno === 1451) return true;
+  if (code === "ER_NO_REFERENCED_ROW_2" || errno === 1452) return true;
   if (err?.name === "SequelizeForeignKeyConstraintError") return true;
 
   const msg = String(err?.message || "").toLowerCase();
   if (
     msg.includes("foreign key constraint") ||
     msg.includes("a foreign key constraint fails") ||
+    msg.includes("cannot add or update a child row") ||
     msg.includes("cannot delete") ||
     msg.includes("is still referenced")
   ) {
@@ -145,6 +148,10 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     inc.push(catInclude);
   }
 
+  // Subcategory (si existe asociación)
+  const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
+  if (subAs) inc.push({ association: subAs, required: false });
+
   // Images
   const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
@@ -171,7 +178,6 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   const errors = [];
   const add = (field, message) => errors.push({ field, message });
 
-  // helpers
   const checkPositiveInt = (field, v, { allowNull = true } = {}) => {
     if (v === undefined) return; // no enviado
     if (v === null) {
@@ -225,7 +231,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
 
   checkPositiveInt("category_id", payload.category_id, { allowNull: true });
   checkPositiveInt("subcategory_id", payload.subcategory_id, { allowNull: true });
-  checkPositiveInt("branch_id", payload.branch_id, { allowNull: false }); // si viene, debe ser válida
+  checkPositiveInt("branch_id", payload.branch_id, { allowNull: false });
 
   checkString("brand", payload.brand, { required: false, max: 120 });
   checkString("model", payload.model, { required: false, max: 120 });
@@ -238,7 +244,6 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkNumber("price_discount", payload.price_discount, { min: 0, allowNull: true });
   checkNumber("price_reseller", payload.price_reseller, { min: 0, allowNull: true });
 
-  // si discount > list => error lógico
   if (payload.price_list !== undefined && payload.price_discount !== undefined) {
     const pl = payload.price_list === null ? null : toFloat(payload.price_list, NaN);
     const pd = payload.price_discount === null ? null : toFloat(payload.price_discount, NaN);
@@ -298,6 +303,30 @@ function pickBody(body = {}) {
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
 
   return out;
+}
+
+// ✅ FIX FK subcategory_id: si no existe en subcategories (tabla vacía), lo dejamos NULL
+async function sanitizeSubcategoryId(payload) {
+  if (!payload) return;
+
+  // si no vino, no tocamos
+  if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return;
+
+  // vacío => null
+  if (payload.subcategory_id === "" || payload.subcategory_id === undefined) return;
+  if (payload.subcategory_id === null) return;
+
+  const sid = toInt(payload.subcategory_id, 0);
+  if (!sid) {
+    payload.subcategory_id = null;
+    return;
+  }
+
+  // si no existe el modelo/tabla, no forzamos (pero esto te protege en tu caso sí)
+  if (!Subcategory || typeof Subcategory.findByPk !== "function") return;
+
+  const sub = await Subcategory.findByPk(sid, { attributes: ["id"] });
+  if (!sub) payload.subcategory_id = null;
 }
 
 function stockQtyLiteralByBranch(branchId = 0) {
@@ -535,6 +564,9 @@ async function create(req, res, next) {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
+    // ✅ FIX FK subcategory_id (si no existe => null)
+    await sanitizeSubcategoryId(payload);
+
     // ✅ VALIDACIÓN (create)
     const errors = validateProductPayload(payload, { isPatch: false });
     if (errors.length) {
@@ -549,15 +581,26 @@ async function create(req, res, next) {
     const created = await Product.create(payload);
     return res.status(201).json({ ok: true, message: "Producto creado", data: created });
   } catch (e) {
-    // SKU unique, etc.
-    const msg = String(e?.message || "");
-    if (msg.toLowerCase().includes("unique") || msg.toLowerCase().includes("duplicate")) {
-      return res.status(400).json({
+    // ✅ Duplicados (Sequelize)
+    if (e?.name === "SequelizeUniqueConstraintError") {
+      return res.status(409).json({
         ok: false,
         code: "DUPLICATE",
-        message: "Ya existe un producto con ese SKU o Barcode.",
+        message: "Ya existe un producto con ese SKU / Barcode / Code.",
+        errors: (e.errors || []).map((x) => ({ field: x.path, message: x.message, value: x.value })),
       });
     }
+
+    // ✅ FK
+    if (isFkConstraintError(e)) {
+      return res.status(400).json({
+        ok: false,
+        code: "FK_CONSTRAINT",
+        message: "Error de FK: category_id o subcategory_id inválido (no existe).",
+        db: e?.parent?.sqlMessage || e?.original?.sqlMessage || e?.message,
+      });
+    }
+
     next(e);
   }
 }
@@ -577,6 +620,9 @@ async function update(req, res, next) {
 
     const patch = pickBody(req.body || {});
     if (!admin) delete patch.branch_id;
+
+    // ✅ FIX FK subcategory_id (si no existe => null)
+    await sanitizeSubcategoryId(patch);
 
     // ✅ VALIDACIÓN (patch): solo valida lo que viene
     const errors = validateProductPayload(patch, { isPatch: true });
@@ -606,14 +652,24 @@ async function update(req, res, next) {
 
     return res.json({ ok: true, message: "Producto actualizado", data: updated });
   } catch (e) {
-    const msg = String(e?.message || "");
-    if (msg.toLowerCase().includes("unique") || msg.toLowerCase().includes("duplicate")) {
-      return res.status(400).json({
+    if (e?.name === "SequelizeUniqueConstraintError") {
+      return res.status(409).json({
         ok: false,
         code: "DUPLICATE",
-        message: "Ya existe un producto con ese SKU o Barcode.",
+        message: "Ya existe un producto con ese SKU / Barcode / Code.",
+        errors: (e.errors || []).map((x) => ({ field: x.path, message: x.message, value: x.value })),
       });
     }
+
+    if (isFkConstraintError(e)) {
+      return res.status(400).json({
+        ok: false,
+        code: "FK_CONSTRAINT",
+        message: "Error de FK: category_id o subcategory_id inválido (no existe).",
+        db: e?.parent?.sqlMessage || e?.original?.sqlMessage || e?.message,
+      });
+    }
+
     next(e);
   }
 }
