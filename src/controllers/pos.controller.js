@@ -191,30 +191,34 @@ async function getContext(req, res) {
 
 /**
  * ✅ POS PRODUCTS
- * Query params:
- * - branch_id (optional but helps admin)
- * - warehouse_id (optional; if missing and branch_id exists => resolve)
- * - q, page, limit
- * - in_stock=1|0   (default 1)
- * - sellable=1|0   (default 1)
- * - price_mode=LIST|BASE|DISCOUNT|RESELLER (default LIST)
- * - include_images=1 (optional)
  *
- * ✅ FIX CLAVE:
- * - Si admin y NO hay warehouse => VISTA TOTAL (SUM stock de todos los depósitos
- *   o solo de la sucursal si envían branch_id)
+ * ✅ FIX CLAVE (tu bug):
+ * - NO-ADMIN: branch = req.user.branch_id SIEMPRE (aunque no venga en query)
+ *            warehouse = query o ctx o resolveWarehouseForBranch(branch)
+ * - ADMIN: puede usar branch_id query; si no hay branch_id -> ALL (o su branch si la tiene)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
 
   try {
     const admin = isAdminReq(req);
-    const { branchId, warehouseId } = resolvePosContext(req);
 
-    let resolvedWarehouseId = toInt(warehouseId, 0);
-    const resolvedBranchId = toInt(branchId, 0);
+    // 🔥 FIX: tomar branch del usuario como fallback real
+    const userBranchId = toInt(req?.user?.branch_id, 0);
 
-    // ✅ si falta warehouse pero viene branch => resolver depósito
+    const { branchId: rawBranchId, warehouseId: rawWarehouseId } = resolvePosContext(req);
+
+    // ✅ resolvedBranchId:
+    // - no admin: SIEMPRE la del usuario
+    // - admin: la que pidan, o su branch si tiene, o null (ALL)
+    const resolvedBranchId = admin
+      ? (toInt(rawBranchId, 0) || userBranchId || 0)
+      : userBranchId;
+
+    // ✅ resolvedWarehouseId:
+    // - si viene => ok
+    // - si no viene y hay branch => resolver primer depósito
+    let resolvedWarehouseId = toInt(rawWarehouseId, 0);
     if (!resolvedWarehouseId && resolvedBranchId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
@@ -249,7 +253,6 @@ async function listProductsForPos(req, res) {
 
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
-    // ✅ imagen principal (si pedís include_images=1)
     const imgSelect = includeImages
       ? `,
         (
@@ -262,11 +265,26 @@ async function listProductsForPos(req, res) {
       `
       : "";
 
+    logPos(req, "info", "listProductsForPos resolved context", {
+      admin,
+      rawBranchId,
+      rawWarehouseId,
+      userBranchId,
+      resolvedBranchId,
+      resolvedWarehouseId,
+      q,
+      page,
+      limit,
+      inStock,
+      sellable,
+      priceMode,
+      includeImages,
+    });
+
     // =========================================================
-    // ✅ CASO A: CON warehouse_id => por depósito (como venías)
+    // ✅ CASO A: CON warehouse_id => por depósito
     // =========================================================
     if (resolvedWarehouseId) {
-      // ✅ si mandaron ambos, validar coherencia
       if (resolvedBranchId) {
         const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
         if (!ok) {
@@ -279,19 +297,6 @@ async function listProductsForPos(req, res) {
       }
 
       const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
-
-      logPos(req, "info", "listProductsForPos (warehouse) query", {
-        admin,
-        resolvedWarehouseId,
-        resolvedBranchId,
-        q,
-        page,
-        limit,
-        inStock,
-        sellable,
-        priceMode,
-        includeImages,
-      });
 
       const [rows] = await sequelize.query(
         `
@@ -346,14 +351,21 @@ async function listProductsForPos(req, res) {
       return res.json({
         ok: true,
         data: rows,
-        meta: { page, limit, total: Number(countRow?.total || 0), warehouse_id: resolvedWarehouseId },
+        meta: {
+          page,
+          limit,
+          total: Number(countRow?.total || 0),
+          warehouse_id: resolvedWarehouseId,
+          branch_id: resolvedBranchId || null,
+          scope: "WAREHOUSE",
+        },
       });
     }
 
     // =========================================================
     // ✅ CASO B: ADMIN SIN warehouse => VISTA TOTAL (SUM stock)
-    // - si viene branch_id: suma depósitos de esa sucursal
-    // - si NO viene branch_id: suma TODOS los depósitos
+    // - si viene branch_id (o admin tiene branch): suma depósitos de esa sucursal
+    // - si NO hay branch: suma TODOS los depósitos
     // =========================================================
     if (admin) {
       const joinWarehouses = resolvedBranchId
@@ -361,18 +373,6 @@ async function listProductsForPos(req, res) {
         : `INNER JOIN warehouses w ON w.id = sb.warehouse_id`;
 
       const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
-
-      logPos(req, "info", "listProductsForPos (admin-all) query", {
-        admin,
-        resolvedBranchId,
-        q,
-        page,
-        limit,
-        inStock,
-        sellable,
-        priceMode,
-        includeImages,
-      });
 
       const [rows] = await sequelize.query(
         `
@@ -438,9 +438,13 @@ async function listProductsForPos(req, res) {
     }
 
     // =========================================================
-    // ❌ NO ADMIN y sin warehouse => error (como antes)
+    // ❌ NO ADMIN y sin warehouse => error
     // =========================================================
-    logPos(req, "warn", "listProductsForPos blocked: warehouse missing", { branchId, warehouseId });
+    logPos(req, "warn", "listProductsForPos blocked: warehouse missing", {
+      admin,
+      userBranchId,
+      resolvedBranchId,
+    });
 
     return res.status(400).json({
       ok: false,
@@ -484,12 +488,12 @@ async function createSale(req, res) {
     const userId = toInt(req.user.id, 0);
 
     const userBranchId = toInt(req.user.branch_id, 0);
-    const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
+    const { warehouseId: ctxWarehouseId } = resolvePosContext(req);
 
     const resolvedBranchId = userBranchId;
 
     if (!resolvedBranchId) {
-      logPos(req, "warn", "createSale blocked: missing branch", { userBranchId, ctxBranchId });
+      logPos(req, "warn", "createSale blocked: missing branch", { userBranchId });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -503,10 +507,7 @@ async function createSale(req, res) {
     }
 
     if (!resolvedWarehouseId) {
-      logPos(req, "warn", "createSale blocked: missing warehouse", {
-        resolvedBranchId,
-        ctxWarehouseId,
-      });
+      logPos(req, "warn", "createSale blocked: missing warehouse", { resolvedBranchId, ctxWarehouseId });
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
