@@ -25,13 +25,31 @@ function toInt(v, def = 0) {
 }
 
 function normalizeRoles(raw) {
-  if (!raw || !Array.isArray(raw)) return [];
-  return raw.map((r) => String(r || "").toLowerCase()).filter(Boolean);
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map((r) => String(r || "").toLowerCase()).filter(Boolean);
+  return String(raw || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 }
 
+/**
+ * ✅ Admin robusto:
+ * - roles: ["admin"] o "admin"
+ * - role/user_role: "admin"
+ * - is_admin: true
+ */
 function isAdminReq(req) {
-  const roles = normalizeRoles(req?.user?.roles);
-  return roles.includes("admin");
+  const u = req?.user || {};
+  const roles = normalizeRoles(u.roles);
+  if (roles.includes("admin") || roles.includes("superadmin")) return true;
+
+  const role = String(u.role || u.user_role || "").toLowerCase();
+  if (role === "admin" || role === "superadmin") return true;
+
+  if (u.is_admin === true) return true;
+
+  return false;
 }
 
 function rid(req) {
@@ -155,6 +173,8 @@ async function getContext(req, res) {
               username: req.user.username,
               branch_id: req.user.branch_id,
               roles: req.user.roles,
+              role: req.user.role || req.user.user_role || null,
+              is_admin: req.user.is_admin || false,
             }
           : null,
         branch: resolvedBranchId ? { id: resolvedBranchId } : null,
@@ -179,11 +199,16 @@ async function getContext(req, res) {
  * - sellable=1|0   (default 1)
  * - price_mode=LIST|BASE|DISCOUNT|RESELLER (default LIST)
  * - include_images=1 (optional)
+ *
+ * ✅ FIX CLAVE:
+ * - Si admin y NO hay warehouse => VISTA TOTAL (SUM stock de todos los depósitos
+ *   o solo de la sucursal si envían branch_id)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
 
   try {
+    const admin = isAdminReq(req);
     const { branchId, warehouseId } = resolvePosContext(req);
 
     let resolvedWarehouseId = toInt(warehouseId, 0);
@@ -192,28 +217,6 @@ async function listProductsForPos(req, res) {
     // ✅ si falta warehouse pero viene branch => resolver depósito
     if (!resolvedWarehouseId && resolvedBranchId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
-    }
-
-    if (!resolvedWarehouseId) {
-      logPos(req, "warn", "listProductsForPos blocked: warehouse missing", { branchId, warehouseId });
-      return res.status(400).json({
-        ok: false,
-        code: "WAREHOUSE_REQUIRED",
-        message:
-          "Falta warehouse_id (depósito). Enviá warehouse_id o branch_id para resolver el depósito automáticamente.",
-      });
-    }
-
-    // ✅ si mandaron ambos, validar coherencia
-    if (resolvedBranchId) {
-      const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
-      if (!ok) {
-        return res.status(400).json({
-          ok: false,
-          code: "WAREHOUSE_BRANCH_MISMATCH",
-          message: `El depósito ${resolvedWarehouseId} no pertenece a la sucursal ${resolvedBranchId}.`,
-        });
-      }
     }
 
     const q = String(req.query.q || "").trim();
@@ -235,8 +238,6 @@ async function listProductsForPos(req, res) {
         )`
       : "";
 
-    const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
-
     const priceExpr =
       priceMode === "BASE"
         ? `COALESCE(p.price, 0)`
@@ -247,18 +248,6 @@ async function listProductsForPos(req, res) {
         : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`; // LIST
 
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
-
-    logPos(req, "info", "listProductsForPos query", {
-      resolvedWarehouseId,
-      resolvedBranchId,
-      q,
-      page,
-      limit,
-      inStock,
-      sellable,
-      priceMode,
-      includeImages,
-    });
 
     // ✅ imagen principal (si pedís include_images=1)
     const imgSelect = includeImages
@@ -273,60 +262,191 @@ async function listProductsForPos(req, res) {
       `
       : "";
 
-    const [rows] = await sequelize.query(
-      `
-      SELECT
-        p.id,
-        p.branch_id,
-        p.code,
-        p.sku,
-        p.barcode,
-        p.name,
-        p.brand,
-        p.model,
-        p.category_id,
-        p.subcategory_id,
-        p.is_new,
-        p.is_promo,
-        p.is_active,
-        p.price,
-        p.price_list,
-        p.price_discount,
-        p.price_reseller,
-        (${priceExpr}) AS effective_price,
-        COALESCE(sb.qty, 0) AS qty
-        ${imgSelect}
-      FROM products p
-      LEFT JOIN stock_balances sb
-        ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
-      WHERE p.is_active = 1
-      ${whereQ}
-      ${whereStock}
-      ${whereSellable}
-      ORDER BY p.name ASC
-      LIMIT :limit OFFSET :offset
-      `,
-      { replacements: { warehouseId: resolvedWarehouseId, like, limit, offset } }
-    );
+    // =========================================================
+    // ✅ CASO A: CON warehouse_id => por depósito (como venías)
+    // =========================================================
+    if (resolvedWarehouseId) {
+      // ✅ si mandaron ambos, validar coherencia
+      if (resolvedBranchId) {
+        const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
+        if (!ok) {
+          return res.status(400).json({
+            ok: false,
+            code: "WAREHOUSE_BRANCH_MISMATCH",
+            message: `El depósito ${resolvedWarehouseId} no pertenece a la sucursal ${resolvedBranchId}.`,
+          });
+        }
+      }
 
-    const [[countRow]] = await sequelize.query(
-      `
-      SELECT COUNT(*) AS total
-      FROM products p
-      LEFT JOIN stock_balances sb
-        ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
-      WHERE p.is_active = 1
-      ${whereQ}
-      ${whereStock}
-      ${whereSellable}
-      `,
-      { replacements: { warehouseId: resolvedWarehouseId, like } }
-    );
+      const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
-    return res.json({
-      ok: true,
-      data: rows,
-      meta: { page, limit, total: Number(countRow?.total || 0), warehouse_id: resolvedWarehouseId },
+      logPos(req, "info", "listProductsForPos (warehouse) query", {
+        admin,
+        resolvedWarehouseId,
+        resolvedBranchId,
+        q,
+        page,
+        limit,
+        inStock,
+        sellable,
+        priceMode,
+        includeImages,
+      });
+
+      const [rows] = await sequelize.query(
+        `
+        SELECT
+          p.id,
+          p.branch_id,
+          p.code,
+          p.sku,
+          p.barcode,
+          p.name,
+          p.brand,
+          p.model,
+          p.category_id,
+          p.subcategory_id,
+          p.is_new,
+          p.is_promo,
+          p.is_active,
+          p.price,
+          p.price_list,
+          p.price_discount,
+          p.price_reseller,
+          (${priceExpr}) AS effective_price,
+          COALESCE(sb.qty, 0) AS qty
+          ${imgSelect}
+        FROM products p
+        LEFT JOIN stock_balances sb
+          ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereStock}
+        ${whereSellable}
+        ORDER BY p.name ASC
+        LIMIT :limit OFFSET :offset
+        `,
+        { replacements: { warehouseId: resolvedWarehouseId, like, limit, offset } }
+      );
+
+      const [[countRow]] = await sequelize.query(
+        `
+        SELECT COUNT(*) AS total
+        FROM products p
+        LEFT JOIN stock_balances sb
+          ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereStock}
+        ${whereSellable}
+        `,
+        { replacements: { warehouseId: resolvedWarehouseId, like } }
+      );
+
+      return res.json({
+        ok: true,
+        data: rows,
+        meta: { page, limit, total: Number(countRow?.total || 0), warehouse_id: resolvedWarehouseId },
+      });
+    }
+
+    // =========================================================
+    // ✅ CASO B: ADMIN SIN warehouse => VISTA TOTAL (SUM stock)
+    // - si viene branch_id: suma depósitos de esa sucursal
+    // - si NO viene branch_id: suma TODOS los depósitos
+    // =========================================================
+    if (admin) {
+      const joinWarehouses = resolvedBranchId
+        ? `INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id = :branchId`
+        : `INNER JOIN warehouses w ON w.id = sb.warehouse_id`;
+
+      const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
+
+      logPos(req, "info", "listProductsForPos (admin-all) query", {
+        admin,
+        resolvedBranchId,
+        q,
+        page,
+        limit,
+        inStock,
+        sellable,
+        priceMode,
+        includeImages,
+      });
+
+      const [rows] = await sequelize.query(
+        `
+        SELECT
+          p.id,
+          p.branch_id,
+          p.code,
+          p.sku,
+          p.barcode,
+          p.name,
+          p.brand,
+          p.model,
+          p.category_id,
+          p.subcategory_id,
+          p.is_new,
+          p.is_promo,
+          p.is_active,
+          p.price,
+          p.price_list,
+          p.price_discount,
+          p.price_reseller,
+          (${priceExpr}) AS effective_price,
+          COALESCE(SUM(sb.qty), 0) AS qty
+          ${imgSelect}
+        FROM products p
+        LEFT JOIN stock_balances sb ON sb.product_id = p.id
+        ${joinWarehouses}
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereSellable}
+        GROUP BY p.id
+        ${whereStockTotal}
+        ORDER BY p.name ASC
+        LIMIT :limit OFFSET :offset
+        `,
+        { replacements: { like, limit, offset, branchId: resolvedBranchId || undefined } }
+      );
+
+      const [[countRow]] = await sequelize.query(
+        `
+        SELECT COUNT(DISTINCT p.id) AS total
+        FROM products p
+        LEFT JOIN stock_balances sb ON sb.product_id = p.id
+        ${joinWarehouses}
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereSellable}
+        `,
+        { replacements: { like, branchId: resolvedBranchId || undefined } }
+      );
+
+      return res.json({
+        ok: true,
+        data: rows,
+        meta: {
+          page,
+          limit,
+          total: Number(countRow?.total || 0),
+          scope: "ADMIN_ALL",
+          branch_id: resolvedBranchId || null,
+        },
+      });
+    }
+
+    // =========================================================
+    // ❌ NO ADMIN y sin warehouse => error (como antes)
+    // =========================================================
+    logPos(req, "warn", "listProductsForPos blocked: warehouse missing", { branchId, warehouseId });
+
+    return res.status(400).json({
+      ok: false,
+      code: "WAREHOUSE_REQUIRED",
+      message:
+        "Falta warehouse_id (depósito). Enviá warehouse_id o branch_id para resolver el depósito automáticamente.",
     });
   } catch (e) {
     logPos(req, "error", "listProductsForPos error", { err: e.message });
@@ -339,6 +459,16 @@ async function createSale(req, res) {
 
   let t;
   try {
+    const admin = isAdminReq(req);
+    if (admin) {
+      logPos(req, "warn", "createSale blocked: admin cannot sell");
+      return res.status(403).json({
+        ok: false,
+        code: "ADMIN_CANNOT_SELL",
+        message: "El usuario admin no puede registrar ventas desde POS (solo vista).",
+      });
+    }
+
     const body = req.body || {};
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
@@ -352,15 +482,14 @@ async function createSale(req, res) {
     }
 
     const userId = toInt(req.user.id, 0);
-    const admin = isAdminReq(req);
 
     const userBranchId = toInt(req.user.branch_id, 0);
     const { branchId: ctxBranchId, warehouseId: ctxWarehouseId } = resolvePosContext(req);
 
-    const resolvedBranchId = admin ? (toInt(ctxBranchId, 0) || userBranchId) : userBranchId;
+    const resolvedBranchId = userBranchId;
 
     if (!resolvedBranchId) {
-      logPos(req, "warn", "createSale blocked: missing branch", { admin, userBranchId, ctxBranchId });
+      logPos(req, "warn", "createSale blocked: missing branch", { userBranchId, ctxBranchId });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -419,7 +548,6 @@ async function createSale(req, res) {
     for (const it of normalizedItems) subtotal += it.quantity * it.unit_price;
 
     logPos(req, "info", "createSale start", {
-      admin,
       resolvedBranchId,
       resolvedWarehouseId,
       items: normalizedItems.length,
