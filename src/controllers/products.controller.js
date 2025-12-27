@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category } = require("../models");
+const { Product, Category, ProductImage, sequelize } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -39,6 +39,31 @@ function requireAdmin(req, res) {
     return false;
   }
   return true;
+}
+
+/** Detecta FK constraint (MySQL/Sequelize) */
+function isFkConstraintError(err) {
+  const code = err?.original?.code || err?.parent?.code || err?.code;
+  const errno = err?.original?.errno || err?.parent?.errno || err?.errno;
+
+  // MySQL: ER_ROW_IS_REFERENCED_2 (1451) => no se puede borrar por referencias
+  if (code === "ER_ROW_IS_REFERENCED_2" || errno === 1451) return true;
+
+  // Sequelize name
+  if (err?.name === "SequelizeForeignKeyConstraintError") return true;
+
+  // Fallback texto
+  const msg = String(err?.message || "").toLowerCase();
+  if (
+    msg.includes("foreign key constraint") ||
+    msg.includes("a foreign key constraint fails") ||
+    msg.includes("cannot delete") ||
+    msg.includes("is still referenced")
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function buildProductIncludes({ includeBranch = false } = {}) {
@@ -363,6 +388,7 @@ async function update(req, res, next) {
 
 // =====================================
 // DELETE /api/v1/products/:id (solo admin)
+// - Si falla por FK -> 409 (NO 500)
 // =====================================
 async function remove(req, res, next) {
   try {
@@ -374,7 +400,32 @@ async function remove(req, res, next) {
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
-    await p.destroy();
+    // ✅ si tenés sequelize + ProductImage, borramos imágenes antes
+    // (y si no existen en tu proyecto, no rompe)
+    try {
+      if (sequelize && typeof sequelize.transaction === "function") {
+        await sequelize.transaction(async (t) => {
+          if (ProductImage?.destroy) {
+            await ProductImage.destroy({ where: { product_id: id }, transaction: t });
+          }
+          await p.destroy({ transaction: t });
+        });
+      } else {
+        // fallback sin transacción
+        if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id } });
+        await p.destroy();
+      }
+    } catch (err) {
+      if (isFkConstraintError(err)) {
+        return res.status(409).json({
+          ok: false,
+          code: "FK_CONSTRAINT",
+          message: "No se puede eliminar: el producto tiene referencias (ventas/stock/movimientos).",
+        });
+      }
+      throw err;
+    }
+
     return res.json({ ok: true, message: "Producto eliminado" });
   } catch (e) {
     next(e);
