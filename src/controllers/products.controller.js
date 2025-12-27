@@ -24,9 +24,26 @@ function getBranchId(req) {
   );
 }
 
+// ✅ robusto: roles como strings u objetos {name:"admin"} / {role:"admin"} / {role:{name:"admin"}}
 function isAdminReq(req) {
-  const roles = Array.isArray(req?.user?.roles) ? req.user.roles : [];
-  return roles.includes("admin") || roles.includes("super_admin");
+  const u = req?.user || {};
+  if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
+
+  const rolesRaw = Array.isArray(u.roles) ? u.roles : [];
+  const roleNames = [];
+
+  for (const r of rolesRaw) {
+    if (!r) continue;
+    if (typeof r === "string") roleNames.push(r);
+    else if (typeof r?.name === "string") roleNames.push(r.name);
+    else if (typeof r?.role === "string") roleNames.push(r.role);
+    else if (typeof r?.role?.name === "string") roleNames.push(r.role.name);
+  }
+
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  return roleNames.map(norm).some((x) =>
+    ["admin", "super_admin", "superadmin", "root", "owner"].includes(x)
+  );
 }
 
 function requireAdmin(req, res) {
@@ -263,6 +280,7 @@ async function list(req, res, next) {
 
 // =====================================
 // GET /api/v1/products/:id
+// ✅ ahora incluye stock_qty según sucursal efectiva
 // =====================================
 async function getOne(req, res, next) {
   try {
@@ -270,25 +288,39 @@ async function getOne(req, res, next) {
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
     const admin = isAdminReq(req);
+    const ctxBranchId = getBranchId(req);
+
+    if (!admin && !ctxBranchId) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
+    // ✅ branch para calcular stock_qty en detalle
+    const stockBranchId = admin
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
+      : ctxBranchId;
+
     const include = buildProductIncludes({ includeBranch: admin });
 
-    const p = await Product.findByPk(id, { include });
+    // ✅ en vez de findByPk simple, metemos attributes include con el literal
+    const p = await Product.findOne({
+      where: { id },
+      include,
+      attributes: {
+        include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]],
+      },
+    });
+
     if (!p) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
 
     if (!admin) {
-      const branch_id = getBranchId(req);
-      if (!branch_id) {
-        return res.status(400).json({
-          ok: false,
-          code: "BRANCH_REQUIRED",
-          message: "No se pudo determinar la sucursal del usuario (branch_id).",
-        });
-      }
-
       const ok = await Product.findOne({
         where: {
           id,
-          [Op.and]: [existsStockInBranch(branch_id)],
+          [Op.and]: [existsStockInBranch(ctxBranchId)],
         },
         attributes: ["id"],
       });
@@ -303,6 +335,52 @@ async function getOne(req, res, next) {
     }
 
     return res.json({ ok: true, data: p });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// =====================================
+// GET /api/v1/products/:id/stock?branch_id=
+// ✅ endpoint rápido para refrescar stock del form al cambiar sucursal
+// =====================================
+async function getStock(req, res, next) {
+  try {
+    const productId = toInt(req.params.id, 0);
+    if (!productId) return res.status(400).json({ ok: false, message: "ID inválido" });
+
+    const admin = isAdminReq(req);
+    const ctxBranchId = getBranchId(req);
+
+    const branchId = admin
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0)
+      : ctxBranchId;
+
+    if (!branchId) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "branch_id requerido para calcular stock.",
+      });
+    }
+
+    const [rows] = await sequelize.query(
+      `
+      SELECT COALESCE(SUM(sb.qty), 0) AS qty
+      FROM stock_balances sb
+      JOIN warehouses w ON w.id = sb.warehouse_id
+      WHERE sb.product_id = :productId
+        AND w.branch_id = :branchId
+      `,
+      { replacements: { productId, branchId } }
+    );
+
+    const qty = Number(rows?.[0]?.qty || 0);
+
+    return res.json({
+      ok: true,
+      data: { product_id: productId, branch_id: branchId, qty },
+    });
   } catch (e) {
     next(e);
   }
@@ -364,7 +442,18 @@ async function update(req, res, next) {
     await p.update(patch);
 
     const include = buildProductIncludes({ includeBranch: admin });
-    const updated = await Product.findByPk(id, { include });
+
+    // ✅ devolvemos con stock_qty también, usando branch efectiva del request
+    const ctxBranchId = getBranchId(req);
+    const stockBranchId = admin
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
+      : ctxBranchId;
+
+    const updated = await Product.findOne({
+      where: { id },
+      include,
+      attributes: { include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]] },
+    });
 
     return res.json({ ok: true, message: "Producto actualizado", data: updated });
   } catch (e) {
@@ -400,7 +489,6 @@ async function remove(req, res, next) {
       }
     } catch (err) {
       if (isFkConstraintError(err)) {
-        // ✅ 200 (NO 409) para evitar "Failed to load resource" rojo en consola
         return res.status(200).json({
           ok: false,
           code: "FK_CONSTRAINT",
@@ -416,4 +504,4 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { list, create, getOne, update, remove };
+module.exports = { list, create, getOne, getStock, update, remove };
