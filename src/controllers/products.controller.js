@@ -1,6 +1,6 @@
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL
-// (admin detection robusto + validación de campos + FIX FK subcategory_id (tabla vacía) + errores claros)
+// (admin detection robusto + validación de campos + FIX FK category/subcategory + errores claros)
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
@@ -55,28 +55,22 @@ function getBranchId(req) {
 function isAdminReq(req) {
   const u = req?.user || {};
 
-  // flags directos
   if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
 
-  // role directo tipo "admin"
   if (typeof u?.role === "string") {
     const r = u.role.trim().toLowerCase();
     if (["admin", "super_admin", "superadmin", "root", "owner"].includes(r)) return true;
   }
 
-  // roles string: "admin, cashier" / "ADMIN"
   if (typeof u?.roles === "string") {
     const parts = u.roles
       .split(/[,\s|]+/g)
       .map((x) => x.trim().toLowerCase())
       .filter(Boolean);
 
-    if (parts.some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x))) {
-      return true;
-    }
+    if (parts.some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x))) return true;
   }
 
-  // roles array (strings u objetos)
   const rolesRaw = Array.isArray(u.roles) ? u.roles : [];
   const roleNames = [];
 
@@ -114,17 +108,13 @@ function isFkConstraintError(err) {
   if (err?.name === "SequelizeForeignKeyConstraintError") return true;
 
   const msg = String(err?.message || "").toLowerCase();
-  if (
+  return (
     msg.includes("foreign key constraint") ||
     msg.includes("a foreign key constraint fails") ||
     msg.includes("cannot add or update a child row") ||
     msg.includes("cannot delete") ||
     msg.includes("is still referenced")
-  ) {
-    return true;
-  }
-
-  return false;
+  );
 }
 
 function buildProductIncludes({ includeBranch = false } = {}) {
@@ -171,6 +161,46 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   return inc;
 }
 
+// ✅ Sanitiza FKs: si no existe category/subcategory -> NULL
+async function sanitizeCategoryFKs(payload) {
+  if (!payload) return payload;
+
+  // category_id -> categories.id
+  if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
+    if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
+
+    if (payload.category_id != null) {
+      const id = toInt(payload.category_id, 0);
+      if (!id) payload.category_id = null;
+      else {
+        const ok = await Category.findByPk(id, { attributes: ["id"] });
+        if (!ok) payload.category_id = null;
+      }
+    }
+  }
+
+  // subcategory_id -> subcategories.id
+  // IMPORTANTE: si tu tabla subcategories está vacía, esto evita FK: lo deja NULL.
+  if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
+    if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
+
+    if (payload.subcategory_id != null) {
+      const id = toInt(payload.subcategory_id, 0);
+      if (!id) payload.subcategory_id = null;
+      else {
+        if (!Subcategory || typeof Subcategory.findByPk !== "function") {
+          payload.subcategory_id = null;
+        } else {
+          const ok = await Subcategory.findByPk(id, { attributes: ["id"] });
+          if (!ok) payload.subcategory_id = null;
+        }
+      }
+    }
+  }
+
+  return payload;
+}
+
 // ---------------------------
 // ✅ VALIDACIÓN DE CAMPOS
 // ---------------------------
@@ -179,7 +209,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   const add = (field, message) => errors.push({ field, message });
 
   const checkPositiveInt = (field, v, { allowNull = true } = {}) => {
-    if (v === undefined) return; // no enviado
+    if (v === undefined) return;
     if (v === null) {
       if (!allowNull) add(field, "No puede ser null.");
       return;
@@ -247,9 +277,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   if (payload.price_list !== undefined && payload.price_discount !== undefined) {
     const pl = payload.price_list === null ? null : toFloat(payload.price_list, NaN);
     const pd = payload.price_discount === null ? null : toFloat(payload.price_discount, NaN);
-    if (Number.isFinite(pl) && Number.isFinite(pd) && pd > pl) {
-      add("price_discount", "No puede ser mayor que price_list.");
-    }
+    if (Number.isFinite(pl) && Number.isFinite(pd) && pd > pl) add("price_discount", "No puede ser mayor que price_list.");
   }
 
   return errors;
@@ -283,9 +311,7 @@ function pickBody(body = {}) {
     "branch_id",
   ];
 
-  for (const k of fields) {
-    if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
-  }
+  for (const k of fields) if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
 
   if (out.sku != null) out.sku = String(out.sku).trim();
   if (out.barcode != null) out.barcode = String(out.barcode).trim() || null;
@@ -303,30 +329,6 @@ function pickBody(body = {}) {
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
 
   return out;
-}
-
-// ✅ FIX FK subcategory_id: si no existe en subcategories (tabla vacía), lo dejamos NULL
-async function sanitizeSubcategoryId(payload) {
-  if (!payload) return;
-
-  // si no vino, no tocamos
-  if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return;
-
-  // vacío => null
-  if (payload.subcategory_id === "" || payload.subcategory_id === undefined) return;
-  if (payload.subcategory_id === null) return;
-
-  const sid = toInt(payload.subcategory_id, 0);
-  if (!sid) {
-    payload.subcategory_id = null;
-    return;
-  }
-
-  // si no existe el modelo/tabla, no forzamos (pero esto te protege en tu caso sí)
-  if (!Subcategory || typeof Subcategory.findByPk !== "function") return;
-
-  const sub = await Subcategory.findByPk(sid, { attributes: ["id"] });
-  if (!sub) payload.subcategory_id = null;
 }
 
 function stockQtyLiteralByBranch(branchId = 0) {
@@ -402,16 +404,12 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // ✅ Usuario NO admin: solo productos que tengan stock en SU sucursal
     if (!admin) {
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push(existsStockInBranch(ctxBranchId));
     }
 
-    // ✅ Admin: opcional filtrar por branch_id si viene
-    if (admin && stockBranchId) {
-      where.branch_id = stockBranchId;
-    }
+    if (admin && stockBranchId) where.branch_id = stockBranchId;
 
     const include = buildProductIncludes({ includeBranch: admin });
 
@@ -467,9 +465,7 @@ async function getOne(req, res, next) {
     const p = await Product.findOne({
       where: { id },
       include,
-      attributes: {
-        include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]],
-      },
+      attributes: { include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]] },
     });
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
@@ -531,10 +527,7 @@ async function getStock(req, res, next) {
 
     const qty = Number(rows?.[0]?.qty || 0);
 
-    return res.json({
-      ok: true,
-      data: { product_id: productId, branch_id: branchId, qty },
-    });
+    return res.json({ ok: true, data: { product_id: productId, branch_id: branchId, qty } });
   } catch (e) {
     next(e);
   }
@@ -550,7 +543,6 @@ async function create(req, res, next) {
 
     const payload = pickBody(req.body || {});
 
-    // ✅ set branch_id según rol
     if (!admin) {
       if (!ctxBranchId) {
         return res.status(400).json({
@@ -564,10 +556,9 @@ async function create(req, res, next) {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
-    // ✅ FIX FK subcategory_id (si no existe => null)
-    await sanitizeSubcategoryId(payload);
+    // ✅ FIX FKs (category/subcategory)
+    await sanitizeCategoryFKs(payload);
 
-    // ✅ VALIDACIÓN (create)
     const errors = validateProductPayload(payload, { isPatch: false });
     if (errors.length) {
       return res.status(400).json({
@@ -581,7 +572,6 @@ async function create(req, res, next) {
     const created = await Product.create(payload);
     return res.status(201).json({ ok: true, message: "Producto creado", data: created });
   } catch (e) {
-    // ✅ Duplicados (Sequelize)
     if (e?.name === "SequelizeUniqueConstraintError") {
       return res.status(409).json({
         ok: false,
@@ -591,7 +581,6 @@ async function create(req, res, next) {
       });
     }
 
-    // ✅ FK
     if (isFkConstraintError(e)) {
       return res.status(400).json({
         ok: false,
@@ -621,10 +610,9 @@ async function update(req, res, next) {
     const patch = pickBody(req.body || {});
     if (!admin) delete patch.branch_id;
 
-    // ✅ FIX FK subcategory_id (si no existe => null)
-    await sanitizeSubcategoryId(patch);
+    // ✅ FIX FKs (category/subcategory)
+    await sanitizeCategoryFKs(patch);
 
-    // ✅ VALIDACIÓN (patch): solo valida lo que viene
     const errors = validateProductPayload(patch, { isPatch: true });
     if (errors.length) {
       return res.status(400).json({
@@ -690,9 +678,7 @@ async function remove(req, res, next) {
     try {
       if (sequelize && typeof sequelize.transaction === "function") {
         await sequelize.transaction(async (t) => {
-          if (ProductImage?.destroy) {
-            await ProductImage.destroy({ where: { product_id: id }, transaction: t });
-          }
+          if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id }, transaction: t });
           await p.destroy({ transaction: t });
         });
       } else {
