@@ -4,6 +4,10 @@ const cors = require("cors");
 
 const v1Routes = require("./routes/v1.routes");
 
+const authMiddleware = require("./middlewares/auth.middleware");
+const branchContextMiddleware = require("./middlewares/branchContext.middleware");
+const errorMiddleware = require("./middlewares/error.middleware");
+
 function createApp() {
   const app = express();
 
@@ -39,7 +43,7 @@ function createApp() {
   app.options("*", cors(corsOptions));
 
   // =====================
-  // ✅ Request logger (DEBUG)
+  // Request logger (DEBUG)
   // =====================
   app.use((req, res, next) => {
     const started = Date.now();
@@ -64,6 +68,12 @@ function createApp() {
   // =====================
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true }));
+
+  // =====================
+  // Auth + Context
+  // =====================
+  app.use(authMiddleware);
+  app.use(branchContextMiddleware);
 
   // =====================
   // Root
@@ -94,27 +104,9 @@ function createApp() {
   });
 
   // =====================
-  // ✅ Error handler FINAL (con stack en dev)
+  // ✅ ERROR HANDLER ÚNICO (FINAL)
   // =====================
-  // eslint-disable-next-line no-unused-vars
-  app.use((err, req, res, next) => {
-    console.error("❌ [API ERROR]", {
-      method: req.method,
-      url: req.originalUrl,
-      message: err?.message,
-      code: err?.code,
-      stack: process.env.NODE_ENV === "production" ? undefined : err?.stack,
-    });
-
-    const status = err?.httpStatus || err?.statusCode || 500;
-
-    return res.status(status).json({
-      ok: false,
-      code: err?.code || "INTERNAL_ERROR",
-      message: err?.message || "Internal Server Error",
-      stack: process.env.NODE_ENV === "production" ? undefined : err?.stack,
-    });
-  });
+  app.use(errorMiddleware);
 
   return app;
 }

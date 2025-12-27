@@ -9,40 +9,53 @@ module.exports = (sequelize, DataTypes) => {
         autoIncrement: true,
       },
 
-      // ✅ MULTI-SUCURSAL (OBLIGATORIO EN DB)
       branch_id: {
         type: DataTypes.BIGINT.UNSIGNED,
         allowNull: false,
       },
 
-      code: DataTypes.STRING,
+      code: { type: DataTypes.STRING(64), allowNull: true },
+
       sku: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(64),
         allowNull: false,
       },
-      barcode: DataTypes.STRING,
+
+      barcode: { type: DataTypes.STRING(64), allowNull: true },
+
       name: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(200),
         allowNull: false,
       },
-      description: DataTypes.TEXT,
 
-      category_id: DataTypes.BIGINT.UNSIGNED,
-      subcategory_id: DataTypes.BIGINT.UNSIGNED,
+      description: { type: DataTypes.TEXT, allowNull: true },
 
-      brand: DataTypes.STRING,
-      model: DataTypes.STRING,
+      category_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
+      subcategory_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
 
-      is_new: DataTypes.BOOLEAN,
-      is_promo: DataTypes.BOOLEAN,
-      is_active: DataTypes.BOOLEAN,
+      is_new: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      is_promo: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
 
-      // precios
-      price_list: DataTypes.DECIMAL(10, 2),
-      price_discount: DataTypes.DECIMAL(10, 2),
-      price_reseller: DataTypes.DECIMAL(10, 2),
+      brand: { type: DataTypes.STRING(120), allowNull: true },
+      model: { type: DataTypes.STRING(120), allowNull: true },
 
-      // (si tenés más columnas en SQL, agregalas acá)
+      warranty_months: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+
+      track_stock: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+
+      sheet_stock_label: { type: DataTypes.STRING(20), allowNull: true },
+      sheet_has_stock: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+
+      is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+
+      cost: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+      price: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+
+      price_list: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+      price_discount: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+      price_reseller: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+
+      tax_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 21 },
     },
     {
       tableName: "products",
