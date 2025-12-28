@@ -8,46 +8,75 @@ function isMiddleware(fn) {
   return typeof fn === "function";
 }
 
+function normalizeOrigin(o) {
+  return String(o || "").trim().replace(/\/$/, "");
+}
+
 function createApp() {
   const app = express();
+
+  // =====================
+  // Parsers (antes del logger si querés ver body)
+  // =====================
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ extended: true }));
 
   // =====================
   // CORS
   // =====================
   const allowedOrigins = (process.env.CORS_ORIGINS || "")
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => normalizeOrigin(s))
     .filter(Boolean);
+
+  const allowLocalhost = String(process.env.CORS_ALLOW_LOCALHOST ?? "true") === "true";
 
   const corsOptions = {
     origin: (origin, callback) => {
+      // requests sin origin (curl/postman) => ok
       if (!origin) return callback(null, true);
-      if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
-        return callback(null, true);
-      }
+
+      const o = normalizeOrigin(origin);
+
+      // ✅ DEV
       if (
-        allowedOrigins.length === 0 ||
-        allowedOrigins.includes("*") ||
-        allowedOrigins.includes(origin)
+        allowLocalhost &&
+        (o.includes("http://localhost") ||
+          o.includes("http://127.0.0.1") ||
+          o.includes("https://localhost") ||
+          o.includes("https://127.0.0.1"))
       ) {
         return callback(null, true);
       }
-      return callback(new Error(`CORS blocked by pos360: ${origin}`));
+
+      // ✅ PROD (lista explícita)
+      if (allowedOrigins.length === 0) {
+        // si no seteaste nada, mejor bloquear para evitar sorpresas
+        return callback(new Error(`CORS blocked (no CORS_ORIGINS set): ${o}`));
+      }
+
+      if (allowedOrigins.includes("*") || allowedOrigins.includes(o)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`CORS blocked by pos360: ${o}`));
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
   };
 
   app.use(cors(corsOptions));
+
+  // ✅ Preflight
   app.options("*", cors(corsOptions));
 
   // =====================
-  // ✅ Request logger (DEBUG)
+  // Request logger (DEBUG)
   // =====================
   app.use((req, res, next) => {
     const started = Date.now();
-
     const q = req.query && Object.keys(req.query).length ? req.query : null;
     const b = req.body && Object.keys(req.body).length ? req.body : null;
 
@@ -64,12 +93,6 @@ function createApp() {
   });
 
   // =====================
-  // Parsers
-  // =====================
-  app.use(express.json({ limit: "10mb" }));
-  app.use(express.urlencoded({ extended: true }));
-
-  // =====================
   // Root
   // =====================
   app.get("/", (req, res) => {
@@ -82,7 +105,7 @@ function createApp() {
   });
 
   // =====================
-  // API v1 (validación)
+  // API v1
   // =====================
   if (!isMiddleware(v1Routes)) {
     console.error("❌ v1Routes inválido. Debe exportar un router middleware.");
@@ -105,7 +128,7 @@ function createApp() {
   });
 
   // =====================
-  // ✅ Error handler FINAL (con stack en dev)
+  // Error handler FINAL
   // =====================
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
