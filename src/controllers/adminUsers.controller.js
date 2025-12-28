@@ -2,65 +2,55 @@
 const bcrypt = require("bcryptjs");
 const { Op } = require("sequelize");
 
-const {
-  User,
-  Role,
-  Permission,
-  Branch,
-  UserRole,
-  UserBranch,
-  RolePermission,
-  sequelize,
-} = require("../models");
+const { User, Role, Branch, UserRole, UserBranch } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
 
-function safeUserRow(u) {
+function isAdminFromReq(req) {
+  const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+  return roles.includes("admin") || roles.includes("super_admin");
+}
+
+function pickUserForList(u) {
+  const roles = Array.isArray(u.roles) ? u.roles.map((r) => r.name) : [];
+  const branches = Array.isArray(u.branches) ? u.branches.map((b) => b.name) : [];
   return {
     id: u.id,
     email: u.email,
     username: u.username,
     first_name: u.first_name ?? null,
     last_name: u.last_name ?? null,
-    is_active: typeof u.is_active === "boolean" ? u.is_active : Boolean(u.is_active),
-    avatar_url: u.avatar_url ?? null,
-    roles: Array.isArray(u.roles) ? u.roles.map((r) => r.name) : [],
-    branches: Array.isArray(u.branches) ? u.branches.map((b) => ({ id: b.id, name: b.name })) : [],
+    is_active: u.is_active === undefined ? true : !!u.is_active,
+    roles,
+    branches,
   };
 }
 
-/**
- * GET /api/v1/admin/users/meta
- * Devuelve data para armar UI (roles, branches, permissions)
- */
-async function getMeta(req, res) {
-  const [roles, branches, permissions] = await Promise.all([
-    Role.findAll({ order: [["id", "ASC"]], attributes: ["id", "name"] }),
-    Branch.findAll({ order: [["id", "ASC"]], attributes: ["id", "name"] }),
-    Permission.findAll({ order: [["id", "ASC"]], attributes: ["id", "code", "description"] }),
-  ]);
+async function meta(req, res) {
+  if (!isAdminFromReq(req)) {
+    return res.status(403).json({ ok: false, code: "FORBIDDEN" });
+  }
+
+  const roles = await Role.findAll({ order: [["id", "ASC"]] });
+  const branches = await Branch.findAll({ order: [["id", "ASC"]] });
 
   return res.json({
     ok: true,
     data: {
-      roles,
-      branches,
-      permissions,
-      hasRolePermissionsPivot: Boolean(RolePermission), // solo info, no rompe nada
+      roles: roles.map((r) => ({ id: r.id, name: r.name })),
+      branches: branches.map((b) => ({ id: b.id, name: b.name })),
     },
   });
 }
 
-/**
- * GET /api/v1/admin/users
- * Query:
- * - q: texto (email/username/nombre)
- * - page, limit
- */
-async function listUsers(req, res) {
+async function list(req, res) {
+  if (!isAdminFromReq(req)) {
+    return res.status(403).json({ ok: false, code: "FORBIDDEN" });
+  }
+
   const q = String(req.query.q ?? "").trim();
   const page = Math.max(1, toInt(req.query.page, 1));
   const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
@@ -81,105 +71,98 @@ async function listUsers(req, res) {
     order: [["id", "DESC"]],
     limit,
     offset,
-    attributes: ["id", "email", "username", "first_name", "last_name", "is_active", "avatar_url"],
+    distinct: true,
     include: [
-      { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-      { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
+      { model: Role, as: "roles", through: { attributes: [] }, attributes: ["id", "name"], required: false },
+      { model: Branch, as: "branches", through: { attributes: [] }, attributes: ["id", "name"], required: false },
     ],
   });
 
+  const items = rows.map(pickUserForList);
+
   return res.json({
     ok: true,
-    data: rows.map(safeUserRow),
+    data: items,
     meta: {
+      total: count,
       page,
       limit,
-      total: count,
-      pages: Math.ceil(count / limit) || 1,
+      pages: Math.max(1, Math.ceil(count / limit)),
+      active_total: items.filter((x) => x.is_active).length,
     },
   });
 }
 
-/**
- * POST /api/v1/admin/users
- * Body:
- * { email, username, password?, first_name?, last_name?, is_active?, role_ids?, branch_ids? }
- */
-async function createUser(req, res) {
-  const body = req.body || {};
+async function create(req, res) {
+  if (!isAdminFromReq(req)) {
+    return res.status(403).json({ ok: false, code: "FORBIDDEN" });
+  }
 
+  const body = req.body || {};
   const email = String(body.email ?? "").trim();
   const username = String(body.username ?? "").trim();
-  const first_name = (body.first_name ?? "").toString().trim() || null;
-  const last_name = (body.last_name ?? "").toString().trim() || null;
-  const is_active = body.is_active === undefined ? true : Boolean(body.is_active);
+  const first_name = String(body.first_name ?? "").trim() || null;
+  const last_name = String(body.last_name ?? "").trim() || null;
 
-  if (!email || !username) {
-    return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "email y username son obligatorios" });
+  const role_ids = Array.isArray(body.role_ids) ? body.role_ids.map((x) => toInt(x)).filter(Boolean) : [];
+  const branch_ids = Array.isArray(body.branch_ids) ? body.branch_ids.map((x) => toInt(x)).filter(Boolean) : [];
+
+  const passwordRaw = String(body.password ?? "").trim();
+  if (!email && !username) {
+    return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "email o username es obligatorio" });
+  }
+  if (!passwordRaw || passwordRaw.length < 6) {
+    return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "password mínimo 6 caracteres" });
   }
 
-  const exists = await User.findOne({
-    where: { [Op.or]: [{ email }, { username }] },
-    attributes: ["id"],
+  // evitar duplicados básicos
+  if (email) {
+    const exists = await User.findOne({ where: { email } });
+    if (exists) return res.status(400).json({ ok: false, code: "DUP_EMAIL", message: "Email ya existe" });
+  }
+  if (username) {
+    const exists = await User.findOne({ where: { username } });
+    if (exists) return res.status(400).json({ ok: false, code: "DUP_USERNAME", message: "Username ya existe" });
+  }
+
+  const hash = await bcrypt.hash(passwordRaw, 10);
+
+  const u = await User.create({
+    email: email || null,
+    username: username || null,
+    first_name,
+    last_name,
+    password: hash,
+    is_active: true,
   });
-  if (exists) {
-    return res.status(400).json({ ok: false, code: "DUPLICATE", message: "email o username ya existe" });
+
+  // roles
+  if (role_ids.length) {
+    const rows = role_ids.map((role_id) => ({ user_id: u.id, role_id }));
+    await UserRole.bulkCreate(rows, { ignoreDuplicates: true });
   }
 
-  const rawPass = String(body.password ?? "360pos1234");
-  const password = await bcrypt.hash(rawPass, 10);
-
-  const t = await sequelize.transaction();
-  try {
-    const u = await User.create(
-      { email, username, password, first_name, last_name, is_active },
-      { transaction: t }
-    );
-
-    const roleIds = Array.isArray(body.role_ids) ? body.role_ids.map((x) => toInt(x)).filter(Boolean) : [];
-    const branchIds = Array.isArray(body.branch_ids) ? body.branch_ids.map((x) => toInt(x)).filter(Boolean) : [];
-
-    if (roleIds.length) {
-      await UserRole.bulkCreate(
-        roleIds.map((rid) => ({ user_id: u.id, role_id: rid })),
-        { transaction: t, ignoreDuplicates: true }
-      );
-    }
-
-    if (branchIds.length) {
-      await UserBranch.bulkCreate(
-        branchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
-        { transaction: t, ignoreDuplicates: true }
-      );
-    }
-
-    await t.commit();
-
-    const out = await User.findByPk(u.id, {
-      attributes: ["id", "email", "username", "first_name", "last_name", "is_active", "avatar_url"],
-      include: [
-        { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-        { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-      ],
-    });
-
-    return res.status(201).json({
-      ok: true,
-      data: safeUserRow(out),
-      // para que el admin copie la clave si quiere (no rompe frontend si lo ignora)
-      temp_password: rawPass,
-    });
-  } catch (e) {
-    await t.rollback();
-    return res.status(500).json({ ok: false, code: "CREATE_FAILED", message: e?.message || "Error" });
+  // branches
+  if (branch_ids.length) {
+    const rows = branch_ids.map((branch_id) => ({ user_id: u.id, branch_id }));
+    await UserBranch.bulkCreate(rows, { ignoreDuplicates: true });
   }
+
+  const full = await User.findByPk(u.id, {
+    include: [
+      { model: Role, as: "roles", through: { attributes: [] }, attributes: ["id", "name"], required: false },
+      { model: Branch, as: "branches", through: { attributes: [] }, attributes: ["id", "name"], required: false },
+    ],
+  });
+
+  return res.status(201).json({ ok: true, data: pickUserForList(full) });
 }
 
-/**
- * PATCH /api/v1/admin/users/:id
- * Body: { first_name?, last_name?, is_active?, role_ids?, branch_ids? }
- */
-async function updateUser(req, res) {
+async function update(req, res) {
+  if (!isAdminFromReq(req)) {
+    return res.status(403).json({ ok: false, code: "FORBIDDEN" });
+  }
+
   const id = toInt(req.params.id);
   if (!id) return res.status(400).json({ ok: false, code: "BAD_ID" });
 
@@ -188,56 +171,70 @@ async function updateUser(req, res) {
 
   const body = req.body || {};
 
-  if ("first_name" in body) u.first_name = (body.first_name ?? "").toString().trim() || null;
-  if ("last_name" in body) u.last_name = (body.last_name ?? "").toString().trim() || null;
-  if ("is_active" in body) u.is_active = Boolean(body.is_active);
+  // datos base
+  if (body.email !== undefined) u.email = String(body.email ?? "").trim() || null;
+  if (body.username !== undefined) u.username = String(body.username ?? "").trim() || null;
+  if (body.first_name !== undefined) u.first_name = String(body.first_name ?? "").trim() || null;
+  if (body.last_name !== undefined) u.last_name = String(body.last_name ?? "").trim() || null;
+  if (body.is_active !== undefined) u.is_active = !!body.is_active;
 
-  const t = await sequelize.transaction();
-  try {
-    await u.save({ transaction: t });
-
-    if (Array.isArray(body.role_ids)) {
-      const roleIds = body.role_ids.map((x) => toInt(x)).filter(Boolean);
-      await UserRole.destroy({ where: { user_id: id }, transaction: t });
-      if (roleIds.length) {
-        await UserRole.bulkCreate(
-          roleIds.map((rid) => ({ user_id: id, role_id: rid })),
-          { transaction: t, ignoreDuplicates: true }
-        );
-      }
+  // password (opcional)
+  const newPass = String(body.password ?? "").trim();
+  if (newPass) {
+    if (newPass.length < 6) {
+      return res.status(400).json({ ok: false, code: "WEAK_PASSWORD", message: "password mínimo 6 caracteres" });
     }
-
-    if (Array.isArray(body.branch_ids)) {
-      const branchIds = body.branch_ids.map((x) => toInt(x)).filter(Boolean);
-      await UserBranch.destroy({ where: { user_id: id }, transaction: t });
-      if (branchIds.length) {
-        await UserBranch.bulkCreate(
-          branchIds.map((bid) => ({ user_id: id, branch_id: bid })),
-          { transaction: t, ignoreDuplicates: true }
-        );
-      }
-    }
-
-    await t.commit();
-
-    const out = await User.findByPk(id, {
-      attributes: ["id", "email", "username", "first_name", "last_name", "is_active", "avatar_url"],
-      include: [
-        { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-        { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-      ],
-    });
-
-    return res.json({ ok: true, data: safeUserRow(out) });
-  } catch (e) {
-    await t.rollback();
-    return res.status(500).json({ ok: false, code: "UPDATE_FAILED", message: e?.message || "Error" });
+    u.password = await bcrypt.hash(newPass, 10);
   }
+
+  await u.save();
+
+  // roles (replace)
+  if (Array.isArray(body.role_ids)) {
+    const role_ids = body.role_ids.map((x) => toInt(x)).filter(Boolean);
+    await UserRole.destroy({ where: { user_id: id } });
+    if (role_ids.length) {
+      await UserRole.bulkCreate(role_ids.map((role_id) => ({ user_id: id, role_id })), { ignoreDuplicates: true });
+    }
+  }
+
+  // branches (replace)
+  if (Array.isArray(body.branch_ids)) {
+    const branch_ids = body.branch_ids.map((x) => toInt(x)).filter(Boolean);
+    await UserBranch.destroy({ where: { user_id: id } });
+    if (branch_ids.length) {
+      await UserBranch.bulkCreate(branch_ids.map((branch_id) => ({ user_id: id, branch_id })), {
+        ignoreDuplicates: true,
+      });
+    }
+  }
+
+  const full = await User.findByPk(id, {
+    include: [
+      { model: Role, as: "roles", through: { attributes: [] }, attributes: ["id", "name"], required: false },
+      { model: Branch, as: "branches", through: { attributes: [] }, attributes: ["id", "name"], required: false },
+    ],
+  });
+
+  return res.json({ ok: true, data: pickUserForList(full) });
 }
 
-module.exports = {
-  getMeta,
-  listUsers,
-  createUser,
-  updateUser,
-};
+async function setStatus(req, res) {
+  if (!isAdminFromReq(req)) {
+    return res.status(403).json({ ok: false, code: "FORBIDDEN" });
+  }
+
+  const id = toInt(req.params.id);
+  if (!id) return res.status(400).json({ ok: false, code: "BAD_ID" });
+
+  const u = await User.findByPk(id);
+  if (!u) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
+
+  const is_active = !!(req.body && req.body.is_active);
+  u.is_active = is_active;
+  await u.save();
+
+  return res.json({ ok: true, data: { id: u.id, is_active: !!u.is_active } });
+}
+
+module.exports = { meta, list, create, update, setStatus };
