@@ -1,93 +1,118 @@
 // src/middlewares/rbac.middleware.js
-const { sequelize } = require("../models");
-const { QueryTypes } = require("sequelize");
+const { User, Role, Permission } = require("../models");
 
-function norm(s) {
-  return String(s || "").trim().toLowerCase();
+function uniq(arr) {
+  return Array.from(new Set((arr || []).filter(Boolean)));
 }
 
-function pickUserId(req) {
-  // JWT payload: { sub, ... }
-  const uid = Number(req?.user?.sub || req?.user?.id || 0);
-  return Number.isFinite(uid) && uid > 0 ? uid : 0;
+function userIdFromReq(req) {
+  const p = req.user || {};
+  return p.sub || p.id || null;
 }
 
-async function loadRoleNames(userId) {
-  const rows = await sequelize.query(
-    `
-    SELECT r.name
-    FROM user_roles ur
-    JOIN roles r ON r.id = ur.role_id
-    WHERE ur.user_id = ?
-    `,
-    { replacements: [userId], type: QueryTypes.SELECT }
-  );
-
-  return rows.map((r) => norm(r.name)).filter(Boolean);
-}
-
-async function loadPermissionCodes(userId) {
-  const rows = await sequelize.query(
-    `
-    SELECT DISTINCT p.code
-    FROM user_roles ur
-    JOIN role_permissions rp ON rp.role_id = ur.role_id
-    JOIN permissions p ON p.id = rp.permission_id
-    WHERE ur.user_id = ?
-    `,
-    { replacements: [userId], type: QueryTypes.SELECT }
-  );
-
-  return rows.map((r) => norm(r.code)).filter(Boolean);
-}
-
-async function loadBranchIds(userId) {
-  const rows = await sequelize.query(
-    `SELECT branch_id FROM user_branches WHERE user_id = ?`,
-    { replacements: [userId], type: QueryTypes.SELECT }
-  );
-
-  return rows
-    .map((r) => Number(r.branch_id))
-    .filter((n) => Number.isFinite(n) && n > 0);
-}
-
-// ✅ Adjunta contexto de acceso al request (no rompe nada)
-async function attachAccessContext(req, res, next) {
+/**
+ * Carga roles/permisos efectivos al request.
+ * - Si el JWT ya trae roles/perms, los respeta.
+ * - Si no, los busca en DB (seguro para prod).
+ */
+async function loadRbac(req, res, next) {
   try {
-    const uid = pickUserId(req);
-    if (!uid) return res.status(401).json({ ok: false, code: "NO_AUTH" });
+    // Si ya vienen en token, no consultamos DB
+    const tokenRoles = Array.isArray(req.user?.roles) ? req.user.roles : null;
+    const tokenPerms = Array.isArray(req.user?.permissions) ? req.user.permissions : null;
 
-    if (!req.access) req.access = {};
+    if (tokenRoles && tokenPerms) {
+      req.rbac = {
+        roles: uniq(tokenRoles.map((x) => String(x))),
+        permissions: uniq(tokenPerms.map((x) => String(x))),
+        isSuperAdmin: tokenRoles.includes("super_admin"),
+      };
+      return next();
+    }
 
-    // Cache por request
-    if (!Array.isArray(req.access.roles)) req.access.roles = await loadRoleNames(uid);
-    if (!Array.isArray(req.access.permissions)) req.access.permissions = await loadPermissionCodes(uid);
-    if (!Array.isArray(req.access.branch_ids)) req.access.branch_ids = await loadBranchIds(uid);
+    const userId = userIdFromReq(req);
+    if (!userId) return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
 
-    req.access.is_super_admin = req.access.roles.includes("super_admin");
+    const u = await User.findByPk(userId, {
+      include: [
+        {
+          model: Role,
+          as: "roles",
+          through: { attributes: [] },
+          include: [
+            {
+              model: Permission,
+              as: "permissions",
+              through: { attributes: [] },
+            },
+          ],
+        },
+      ],
+    });
+
+    if (!u) return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
+
+    const roles = uniq((u.roles || []).map((r) => String(r.name)));
+    const permissions = uniq(
+      (u.roles || []).flatMap((r) => (r.permissions || []).map((p) => String(p.code)))
+    );
+
+    req.rbac = {
+      roles,
+      permissions,
+      isSuperAdmin: roles.includes("super_admin"),
+    };
 
     return next();
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      code: "ACCESS_CONTEXT_FAILED",
-      message: e?.message || "access context failed",
-    });
+    console.error("❌ [RBAC] loadRbac error:", e?.message || e);
+    return res.status(500).json({ ok: false, code: "RBAC_ERROR", message: "Error cargando RBAC" });
   }
 }
 
-// ✅ Gate por permiso
+/**
+ * Requiere un permiso.
+ * - super_admin pasa siempre
+ */
 function requirePermission(code) {
-  const need = norm(code);
-  return async (req, res, next) => {
-    await attachAccessContext(req, res, () => {
-      if (req.access?.is_super_admin) return next();
-      const perms = req.access?.permissions || [];
-      if (perms.includes(need)) return next();
-      return res.status(403).json({ ok: false, code: "FORBIDDEN_PERMISSION", missing: need });
+  return (req, res, next) => {
+    const r = req.rbac || {};
+    if (r.isSuperAdmin) return next();
+
+    const perms = Array.isArray(r.permissions) ? r.permissions : [];
+    if (perms.includes(code)) return next();
+
+    return res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN",
+      message: `Falta permiso: ${code}`,
     });
   };
 }
 
-module.exports = { attachAccessContext, requirePermission };
+/**
+ * Requiere uno de varios permisos (OR)
+ */
+function requireAnyPermission(codes) {
+  const want = Array.isArray(codes) ? codes : [codes];
+  return (req, res, next) => {
+    const r = req.rbac || {};
+    if (r.isSuperAdmin) return next();
+
+    const perms = Array.isArray(r.permissions) ? r.permissions : [];
+    const ok = want.some((c) => perms.includes(c));
+    if (ok) return next();
+
+    return res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN",
+      message: `Falta alguno de: ${want.join(", ")}`,
+    });
+  };
+}
+
+module.exports = {
+  loadRbac,
+  requirePermission,
+  requireAnyPermission,
+};

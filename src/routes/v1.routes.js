@@ -21,6 +21,9 @@ const posRoutes = require("./pos.routes");
 // ✅ ME (perfil)
 const meRoutes = require("./me.routes");
 
+// ✅ ADMIN USERS
+const adminUsersRoutes = require("./adminUsers.routes");
+
 function safeUse(path, ...mws) {
   for (const mw of mws) {
     if (typeof mw !== "function") {
@@ -49,7 +52,10 @@ safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 safeUse("/pos", requireAuth, posRoutes);
 
-// ✅ Perfil (queda protegido por requireAuth)
+// ✅ Perfil
 safeUse("/me", requireAuth, meRoutes);
+
+// ✅ Admin Users (NO rompe nada existente, solo agrega ruta)
+safeUse("/admin/users", requireAuth, adminUsersRoutes);
 
 module.exports = router;
