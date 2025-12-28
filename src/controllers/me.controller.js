@@ -70,6 +70,18 @@ function getUserIdFromReq(req) {
   return p.sub || p.id || null;
 }
 
+function safeAccessFromReq(req) {
+  // ✅ No rompe nada: es un extra opcional
+  // Se llena si en rutas agregamos attachAccessContext (o si algún mw lo setea).
+  const a = req.access || {};
+  return {
+    roles: Array.isArray(a.roles) ? a.roles : Array.isArray(req.user?.roles) ? req.user.roles : [],
+    permissions: Array.isArray(a.permissions) ? a.permissions : [],
+    branch_ids: Array.isArray(a.branch_ids) ? a.branch_ids : [],
+    is_super_admin: Boolean(a.is_super_admin) || (Array.isArray(a.roles) ? a.roles.includes("super_admin") : false),
+  };
+}
+
 // GET /me
 async function getMe(req, res) {
   const userId = getUserIdFromReq(req);
@@ -78,7 +90,13 @@ async function getMe(req, res) {
   const u = await User.findByPk(userId);
   if (!u) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Usuario no encontrado" });
 
-  return res.json({ ok: true, data: safeUser(u, req.user?.roles || []) });
+  // ✅ mantenemos "data" EXACTO para no romper frontend
+  // ✅ agregamos "access" como extra (no obligatorio)
+  return res.json({
+    ok: true,
+    data: safeUser(u, req.user?.roles || []),
+    access: safeAccessFromReq(req),
+  });
 }
 
 // PATCH /me
@@ -96,7 +114,11 @@ async function updateMe(req, res) {
 
   await u.save();
 
-  return res.json({ ok: true, data: safeUser(u, req.user?.roles || []) });
+  return res.json({
+    ok: true,
+    data: safeUser(u, req.user?.roles || []),
+    access: safeAccessFromReq(req),
+  });
 }
 
 // POST /me/avatar (multipart file)
@@ -155,7 +177,11 @@ async function uploadAvatar(req, res) {
   u.avatar_url = publicUrlFor(key);
   await u.save();
 
-  return res.json({ ok: true, data: safeUser(u, req.user?.roles || []) });
+  return res.json({
+    ok: true,
+    data: safeUser(u, req.user?.roles || []),
+    access: safeAccessFromReq(req),
+  });
 }
 
 // POST /me/password

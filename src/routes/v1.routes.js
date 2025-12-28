@@ -49,7 +49,7 @@ safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 safeUse("/pos", requireAuth, posRoutes);
 
-// ✅ Perfil
+// ✅ Perfil (queda protegido por requireAuth)
 safeUse("/me", requireAuth, meRoutes);
 
 module.exports = router;

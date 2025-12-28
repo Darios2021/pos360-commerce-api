@@ -17,9 +17,18 @@ async function bootstrap() {
       console.log(`🚀 API funcionando en puerto ${PORT}`);
     });
   } catch (err) {
-    console.error("❌ Error al conectar DB:", err.message);
+    console.error("❌ Error al conectar DB:", err?.message || err);
 
-    // ⛑️ Modo emergencia
+    const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+    const allowNoDb = String(process.env.ALLOW_NO_DB ?? "false") === "true";
+
+    // ✅ En producción conviene CRASHEAR para que CapRover reinicie
+    if (isProd && !allowNoDb) {
+      console.error("🛑 Producción sin DB: saliendo con code=1 (CapRover reiniciará)");
+      process.exit(1);
+    }
+
+    // 🧪 Dev / emergencia
     app.listen(PORT, () => {
       console.log(`🚨 API en modo emergencia (sin DB) en puerto ${PORT}`);
     });
