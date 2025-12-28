@@ -38,11 +38,15 @@ function safeUse(path, ...mws) {
   router.use(path, ...mws);
 }
 
+// =========================
 // Public primero
+// =========================
 safeUse("/health", healthRoutes);
 safeUse("/auth", authRoutes);
 
+// =========================
 // Protected
+// =========================
 safeUse("/products", requireAuth, productsRoutes);
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
@@ -55,7 +59,7 @@ safeUse("/pos", requireAuth, posRoutes);
 // ✅ Perfil
 safeUse("/me", requireAuth, meRoutes);
 
-// ✅ Admin Users (NO rompe nada existente, solo agrega ruta)
+// ✅ Admin Users (solo agrega ruta, no toca lo demás)
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
 
 module.exports = router;
