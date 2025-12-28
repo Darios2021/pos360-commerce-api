@@ -1,6 +1,6 @@
-// src/controllers/admin.users.controller.js
+// src/controllers/adminUsers.controller.js
 const { Op } = require("sequelize");
-const { User, Role, Permission, Branch, UserRole, RolePermission, UserBranch } = require("../models");
+const { User, Role, Permission, Branch } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -10,6 +10,7 @@ function toInt(v, d = 0) {
 function safeUserRow(u) {
   const roles = Array.isArray(u.roles) ? u.roles.map((r) => r.name).filter(Boolean) : [];
   const branches = Array.isArray(u.branches) ? u.branches.map((b) => ({ id: b.id, name: b.name })) : [];
+
   return {
     id: u.id,
     email: u.email,
@@ -21,15 +22,10 @@ function safeUserRow(u) {
     avatar_url: u.avatar_url ?? null,
     roles,
     branches,
-    created_at: u.created_at ?? null,
-    updated_at: u.updated_at ?? null,
   };
 }
 
-/**
- * GET /api/v1/admin/users/meta
- * Devuelve data para combos en frontend: roles, branches, permissions
- */
+// GET /api/v1/admin/users/meta
 async function getMeta(req, res) {
   const [roles, branches, permissions] = await Promise.all([
     Role.findAll({ order: [["name", "ASC"]] }),
@@ -47,10 +43,7 @@ async function getMeta(req, res) {
   });
 }
 
-/**
- * GET /api/v1/admin/users
- * Query: q, page, limit, branch_id, role
- */
+// GET /api/v1/admin/users?q=&page=1&limit=50&branch_id=&role=
 async function listUsers(req, res) {
   const q = String(req.query.q ?? "").trim();
   const page = Math.max(1, toInt(req.query.page, 1));
@@ -72,7 +65,13 @@ async function listUsers(req, res) {
   if (branchId > 0) where.branch_id = branchId;
 
   const include = [
-    { model: Role, as: "roles", through: { attributes: [] }, required: !!roleName, where: roleName ? { name: roleName } : undefined },
+    {
+      model: Role,
+      as: "roles",
+      through: { attributes: [] },
+      required: !!roleName,
+      ...(roleName ? { where: { name: roleName } } : {}),
+    },
     { model: Branch, as: "branches", through: { attributes: [] } },
   ];
 
@@ -94,27 +93,4 @@ async function listUsers(req, res) {
   });
 }
 
-/**
- * POST /api/v1/admin/users
- * body: { email, username, password, first_name, last_name, is_active, branch_id, roles[], branch_ids[] }
- */
-async function createUser(req, res) {
-  // (minimal) para que el front no muera. Lo completamos después.
-  return res.status(501).json({ ok: false, code: "NOT_IMPLEMENTED", message: "createUser pendiente" });
-}
-
-/**
- * PATCH /api/v1/admin/users/:id
- */
-async function updateUser(req, res) {
-  return res.status(501).json({ ok: false, code: "NOT_IMPLEMENTED", message: "updateUser pendiente" });
-}
-
-/**
- * POST /api/v1/admin/users/:id/password
- */
-async function resetPassword(req, res) {
-  return res.status(501).json({ ok: false, code: "NOT_IMPLEMENTED", message: "resetPassword pendiente" });
-}
-
-module.exports = { getMeta, listUsers, createUser, updateUser, resetPassword };
+module.exports = { getMeta, listUsers };
