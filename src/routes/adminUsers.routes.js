@@ -2,26 +2,22 @@
 const router = require("express").Router();
 
 const {
-  meta,
-  list,
-  create,
-  update,
-  setStatus,
+  getMeta,
+  listUsers,
+  createUser,
+  updateUser,
 } = require("../controllers/adminUsers.controller");
 
-// Meta para combos (roles/sucursales)
-router.get("/meta", meta);
+// Meta para UI
+router.get("/meta", getMeta);
 
 // Listado
-router.get("/", list);
+router.get("/", listUsers);
 
 // Crear
-router.post("/", create);
+router.post("/", createUser);
 
-// Editar (✅ esto te faltaba: por eso el PUT daba 404)
-router.put("/:id", update);
-
-// Activar/Desactivar (opcional)
-router.patch("/:id/status", setStatus);
+// Editar
+router.patch("/:id", updateUser);
 
 module.exports = router;
