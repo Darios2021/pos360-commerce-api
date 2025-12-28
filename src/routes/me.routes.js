@@ -2,20 +2,29 @@
 const router = require("express").Router();
 const multer = require("multer");
 
-const { attachAccessContext } = require("../middlewares/rbac.middleware");
+const me = require("../controllers/me.controller");
 
-const { getMe, updateMe, uploadAvatar, changePassword } = require("../controllers/me.controller");
+// ✅ Validación dura (si falla, te imprime qué exportó realmente)
+function mustFn(name) {
+  const fn = me?.[name];
+  if (typeof fn !== "function") {
+    const keys = me && typeof me === "object" ? Object.keys(me) : null;
+    console.error("❌ [me.routes] Handler inválido:", name);
+    console.error("   typeof:", typeof fn);
+    console.error("   exports keys:", keys);
+    throw new Error(`ME_CONTROLLER_EXPORT_MISSING_${name}`);
+  }
+  return fn;
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
-// OJO: /me ya está protegido con requireAuth en v1.routes.js ✅
-// Acá solo adjuntamos access context (roles/perms/branches) para que /me lo devuelva.
-router.get("/", attachAccessContext, getMe);
-router.patch("/", attachAccessContext, updateMe);
-router.post("/avatar", attachAccessContext, upload.single("file"), uploadAvatar);
-router.post("/password", attachAccessContext, changePassword);
+router.get("/", mustFn("getMe"));
+router.patch("/", mustFn("updateMe"));
+router.post("/avatar", upload.single("file"), mustFn("uploadAvatar"));
+router.post("/password", mustFn("changePassword"));
 
 module.exports = router;
