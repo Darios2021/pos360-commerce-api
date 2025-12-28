@@ -8,15 +8,20 @@ function isMiddleware(fn) {
   return typeof fn === "function";
 }
 
-function normalizeOrigin(o) {
-  return String(o || "").trim().replace(/\/$/, "");
+function normOrigin(v) {
+  return String(v || "")
+    .trim()
+    .replace(/\/$/, ""); // quita "/" final
 }
 
 function createApp() {
   const app = express();
 
+  // ✅ Evita 304/ETag que a veces “pierden” headers CORS detrás de proxy
+  app.disable("etag");
+
   // =====================
-  // Parsers (antes del logger si querés ver body)
+  // Parsers
   // =====================
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true }));
@@ -26,35 +31,22 @@ function createApp() {
   // =====================
   const allowedOrigins = (process.env.CORS_ORIGINS || "")
     .split(",")
-    .map((s) => normalizeOrigin(s))
+    .map((s) => normOrigin(s))
     .filter(Boolean);
-
-  const allowLocalhost = String(process.env.CORS_ALLOW_LOCALHOST ?? "true") === "true";
 
   const corsOptions = {
     origin: (origin, callback) => {
       // requests sin origin (curl/postman) => ok
       if (!origin) return callback(null, true);
 
-      const o = normalizeOrigin(origin);
+      const o = normOrigin(origin);
 
-      // ✅ DEV
-      if (
-        allowLocalhost &&
-        (o.includes("http://localhost") ||
-          o.includes("http://127.0.0.1") ||
-          o.includes("https://localhost") ||
-          o.includes("https://127.0.0.1"))
-      ) {
+      // ✅ permitir localhost SIEMPRE (como vos ya venías haciendo)
+      if (o.includes("localhost") || o.includes("127.0.0.1")) {
         return callback(null, true);
       }
 
-      // ✅ PROD (lista explícita)
-      if (allowedOrigins.length === 0) {
-        // si no seteaste nada, mejor bloquear para evitar sorpresas
-        return callback(new Error(`CORS blocked (no CORS_ORIGINS set): ${o}`));
-      }
-
+      // ✅ allowlist explícita
       if (allowedOrigins.includes("*") || allowedOrigins.includes(o)) {
         return callback(null, true);
       }
@@ -67,16 +59,24 @@ function createApp() {
     optionsSuccessStatus: 204,
   };
 
+  // ✅ CORS headers en todas las respuestas
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin) res.setHeader("Vary", "Origin");
+    next();
+  });
+
   app.use(cors(corsOptions));
 
-  // ✅ Preflight
+  // ✅ Preflight: responder rápido y bien
   app.options("*", cors(corsOptions));
 
   // =====================
-  // Request logger (DEBUG)
+  // ✅ Request logger (DEBUG)
   // =====================
   app.use((req, res, next) => {
     const started = Date.now();
+
     const q = req.query && Object.keys(req.query).length ? req.query : null;
     const b = req.body && Object.keys(req.body).length ? req.body : null;
 
@@ -105,7 +105,7 @@ function createApp() {
   });
 
   // =====================
-  // API v1
+  // API v1 (validación)
   // =====================
   if (!isMiddleware(v1Routes)) {
     console.error("❌ v1Routes inválido. Debe exportar un router middleware.");
@@ -128,7 +128,7 @@ function createApp() {
   });
 
   // =====================
-  // Error handler FINAL
+  // ✅ Error handler FINAL
   // =====================
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
