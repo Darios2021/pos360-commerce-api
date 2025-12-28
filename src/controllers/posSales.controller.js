@@ -587,8 +587,12 @@ async function createSale(req, res, next) {
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
+    const admin = isAdminReq(req);
+
     const branch_id = getAuthBranchId(req);
-    if (!branch_id) {
+
+    // ✅ No-admin: branch_id obligatorio
+    if (!admin && !branch_id) {
       await t.rollback();
       return res.status(400).json({
         ok: false,
@@ -609,7 +613,9 @@ async function deleteSale(req, res, next) {
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
     }
 
-    if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+    // ✅ No-admin: no puede eliminar una venta de otra sucursal
+    // ✅ Admin: puede cross-branch
+    if (!admin && toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
       await t.rollback();
       return res.status(403).json({
         ok: false,
