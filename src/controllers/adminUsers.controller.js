@@ -108,12 +108,7 @@ async function normalizeRoleAndBranchIds(body) {
 }
 
 function errMsg(e) {
-  return (
-    e?.original?.sqlMessage ||
-    e?.original?.message ||
-    e?.message ||
-    "Error"
-  );
+  return e?.original?.sqlMessage || e?.original?.message || e?.message || "Error";
 }
 
 /**
@@ -236,9 +231,19 @@ async function createUser(req, res) {
     const password = await bcrypt.hash(rawPass, 10);
     const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
 
+    // ✅ users.branch_id es NOT NULL en tu DB → hay que setearlo sí o sí
+    const branch_id = branchIds.length ? branchIds[0] : toInt(body.branch_id, 0);
+    if (!branch_id) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "Debés seleccionar al menos una sucursal",
+      });
+    }
+
     try {
       const createdId = await sequelize.transaction(async (t) => {
-        const payload = { email, username, password, first_name, last_name, is_active };
+        const payload = { email, username, password, first_name, last_name, is_active, branch_id };
 
         // si existe avatar_url en model, lo aceptamos
         if (modelHasAttr(User, "avatar_url") && "avatar_url" in body) {
@@ -254,12 +259,19 @@ async function createUser(req, res) {
           );
         }
 
+        // ✅ user_branches: guardamos todas las sucursales elegidas
         if (branchIds.length) {
           await UserBranch.bulkCreate(
             branchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
             { transaction: t }
           );
         }
+
+        // ✅ Garantiza que la sucursal principal esté habilitada también
+        await UserBranch.bulkCreate(
+          [{ user_id: u.id, branch_id }],
+          { transaction: t }
+        );
 
         return u.id;
       });
@@ -307,6 +319,13 @@ async function updateUser(req, res) {
     if ("last_name" in body) u.last_name = (body.last_name ?? "").toString().trim() || null;
     if ("is_active" in body) u.is_active = boolVal(body.is_active, Boolean(u.is_active));
 
+    // ✅ opcional: permitir cambiar sucursal principal por API
+    // si no querés permitirlo, borrá este bloque.
+    if ("branch_id" in body) {
+      const bid = toInt(body.branch_id, 0);
+      if (bid) u.branch_id = bid;
+    }
+
     if (modelHasAttr(User, "avatar_url") && "avatar_url" in body) {
       u.avatar_url = String(body.avatar_url || "").trim() || null;
     }
@@ -335,6 +354,12 @@ async function updateUser(req, res) {
               { transaction: t }
             );
           }
+
+          // ✅ Garantiza que la sucursal principal quede habilitada
+          await UserBranch.bulkCreate(
+            [{ user_id: id, branch_id: u.branch_id }],
+            { transaction: t }
+          );
         }
       });
 
