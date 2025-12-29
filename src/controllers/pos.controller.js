@@ -31,19 +31,31 @@ function normalizeRoles(raw) {
     .filter(Boolean);
 }
 
+function normalizeBranchIds(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map((x) => toInt(x, 0)).filter(Boolean);
+  // si viene "1,2,3"
+  return String(raw || "")
+    .split(",")
+    .map((s) => toInt(s.trim(), 0))
+    .filter(Boolean);
+}
+
 /**
  * ✅ Admin robusto:
- * - roles: ["admin"] o "admin"
- * - role/user_role: "admin"
+ * - roles: ["admin"] / ["super_admin"] / ["superadmin"]
+ * - role/user_role: "admin" / "super_admin" / "superadmin"
  * - is_admin: true
  */
 function isAdminReq(req) {
   const u = req?.user || {};
   const roles = normalizeRoles(u.roles);
-  if (roles.includes("admin") || roles.includes("superadmin")) return true;
+
+  // ✅ incluye variantes reales
+  if (roles.includes("admin") || roles.includes("superadmin") || roles.includes("super_admin")) return true;
 
   const role = String(u.role || u.user_role || "").toLowerCase();
-  if (role === "admin" || role === "superadmin") return true;
+  if (role === "admin" || role === "superadmin" || role === "super_admin") return true;
 
   if (u.is_admin === true) return true;
 
@@ -66,6 +78,9 @@ function logPos(req, level, msg, extra = {}) {
     user_id: req?.user?.id ?? null,
     user_email: req?.user?.email ?? null,
     user_branch_id: req?.user?.branch_id ?? null,
+    user_role: req?.user?.role ?? req?.user?.user_role ?? null,
+    user_roles: req?.user?.roles ?? null,
+    user_branches: req?.user?.branches ?? null,
     ctx_branchId: req?.ctx?.branchId ?? null,
     ctx_warehouseId: req?.ctx?.warehouseId ?? null,
     q_branch_id: req?.query?.branch_id ?? req?.query?.branchId ?? null,
@@ -201,6 +216,7 @@ async function getContext(req, res) {
               roles: req.user.roles,
               role: req.user.role || req.user.user_role || null,
               is_admin: req.user.is_admin || false,
+              branches: req.user.branches || null, // ✅ si viene del token
             }
           : null,
         branch: resolvedBranchId ? { id: resolvedBranchId } : null,
@@ -221,6 +237,7 @@ async function getContext(req, res) {
  * ✅ FIX CLAVE:
  * - Admin: usar SOLO contextos explícitos (query/body) y NO el ctx.
  * - Admin sin warehouse => ADMIN_ALL real (sum stock).
+ * - User con branches habilitadas (req.user.branches) y sin warehouse => USER_SCOPE_ALL (sum stock por sus branches)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
@@ -234,6 +251,10 @@ async function listProductsForPos(req, res) {
 
     let resolvedWarehouseId = toInt(warehouseId, 0);
     const resolvedBranchId = toInt(branchId, 0);
+
+    // ✅ branchIds habilitadas desde token/user (si existen)
+    // IMPORTANTE: esto viene del auth.service (branches: [1,2,3]) o similar
+    const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
 
     // ✅ NO-ADMIN: si falta warehouse pero hay branch => resolver depósito
     if (!admin && !resolvedWarehouseId && resolvedBranchId) {
@@ -304,6 +325,7 @@ async function listProductsForPos(req, res) {
         admin,
         resolvedWarehouseId,
         resolvedBranchId,
+        allowedBranchIds,
         q,
         page,
         limit,
@@ -385,6 +407,7 @@ async function listProductsForPos(req, res) {
       logPos(req, "info", "listProductsForPos (admin-all) query", {
         admin,
         resolvedBranchId,
+        allowedBranchIds,
         q,
         page,
         limit,
@@ -458,15 +481,121 @@ async function listProductsForPos(req, res) {
     }
 
     // =========================================================
-    // ❌ NO ADMIN y sin warehouse => error
+    // ✅ CASO C: USER SIN warehouse y con branches habilitadas => USER_SCOPE_ALL
+    // - si viene branch_id: limita a esa sucursal (pero solo si está habilitada)
+    // - si NO viene branch_id: suma stock en TODAS sus sucursales habilitadas
     // =========================================================
-    logPos(req, "warn", "listProductsForPos blocked: warehouse missing", { branchId, warehouseId });
+    if (!admin && allowedBranchIds.length) {
+      // si el frontend manda branch_id pero el user no lo tiene, bloqueamos
+      if (resolvedBranchId && !allowedBranchIds.includes(resolvedBranchId)) {
+        logPos(req, "warn", "listProductsForPos blocked: branch not allowed", {
+          resolvedBranchId,
+          allowedBranchIds,
+        });
+        return res.status(403).json({
+          ok: false,
+          code: "BRANCH_NOT_ALLOWED",
+          message: `No tenés permisos para operar/ver la sucursal ${resolvedBranchId}.`,
+        });
+      }
+
+      const scopeBranchIds = resolvedBranchId ? [resolvedBranchId] : allowedBranchIds;
+
+      const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
+
+      logPos(req, "info", "listProductsForPos (user-scope-all) query", {
+        admin,
+        resolvedBranchId,
+        scopeBranchIds,
+        allowedBranchIds,
+        q,
+        page,
+        limit,
+        inStock,
+        sellable,
+        priceMode,
+        includeImages,
+      });
+
+      const [rows] = await sequelize.query(
+        `
+        SELECT
+          p.id,
+          p.branch_id,
+          p.code,
+          p.sku,
+          p.barcode,
+          p.name,
+          p.brand,
+          p.model,
+          p.category_id,
+          p.subcategory_id,
+          p.is_new,
+          p.is_promo,
+          p.is_active,
+          p.price,
+          p.price_list,
+          p.price_discount,
+          p.price_reseller,
+          (${priceExpr}) AS effective_price,
+          COALESCE(SUM(sb.qty), 0) AS qty
+          ${imgSelect}
+        FROM products p
+        LEFT JOIN stock_balances sb ON sb.product_id = p.id
+        INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id IN (:branchIds)
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereSellable}
+        GROUP BY p.id
+        ${whereStockTotal}
+        ORDER BY p.name ASC
+        LIMIT :limit OFFSET :offset
+        `,
+        { replacements: { like, limit, offset, branchIds: scopeBranchIds } }
+      );
+
+      const [[countRow]] = await sequelize.query(
+        `
+        SELECT COUNT(DISTINCT p.id) AS total
+        FROM products p
+        LEFT JOIN stock_balances sb ON sb.product_id = p.id
+        INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id IN (:branchIds)
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereSellable}
+        `,
+        { replacements: { like, branchIds: scopeBranchIds } }
+      );
+
+      return res.json({
+        ok: true,
+        data: rows,
+        meta: {
+          page,
+          limit,
+          total: Number(countRow?.total || 0),
+          scope: "USER_SCOPE_ALL",
+          branch_id: resolvedBranchId || null,
+          branch_ids: scopeBranchIds,
+        },
+      });
+    }
+
+    // =========================================================
+    // ❌ NO ADMIN y sin warehouse y sin branches => error
+    // =========================================================
+    logPos(req, "warn", "listProductsForPos blocked: warehouse missing", {
+      branchId,
+      warehouseId,
+      allowedBranchIds,
+    });
 
     return res.status(400).json({
       ok: false,
       code: "WAREHOUSE_REQUIRED",
       message:
-        "Falta warehouse_id (depósito). Enviá warehouse_id o branch_id para resolver el depósito automáticamente.",
+        "Falta warehouse_id (depósito). Enviá warehouse_id o branch_id para resolver el depósito automáticamente. " +
+        "Si el usuario tiene múltiples sucursales, asegurá que el token incluya user.branches=[...].",
     });
   } catch (e) {
     logPos(req, "error", "listProductsForPos error", { err: e.message });
