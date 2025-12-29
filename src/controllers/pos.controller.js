@@ -238,6 +238,11 @@ async function getContext(req, res) {
  * - Admin: usar SOLO contextos explícitos (query/body) y NO el ctx.
  * - Admin sin warehouse => ADMIN_ALL real (sum stock).
  * - User con branches habilitadas (req.user.branches) y sin warehouse => USER_SCOPE_ALL (sum stock por sus branches)
+ *
+ * ✅ FIX NUEVO:
+ * - Si el user tiene múltiples sucursales (branches.length > 1) y NO manda warehouse_id,
+ *   NO autoseleccionamos depósito (porque lo clava en branch principal).
+ *   Deja que caiga al CASO C (USER_SCOPE_ALL).
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
@@ -253,12 +258,26 @@ async function listProductsForPos(req, res) {
     const resolvedBranchId = toInt(branchId, 0);
 
     // ✅ branchIds habilitadas desde token/user (si existen)
-    // IMPORTANTE: esto viene del auth.service (branches: [1,2,3]) o similar
+    // IMPORTANTE: esto viene del auth.service (branches: [1,2,3]) o del DB pivot vía middleware
     const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
 
+    const hasMultiBranches = !admin && allowedBranchIds.length > 1;
+
     // ✅ NO-ADMIN: si falta warehouse pero hay branch => resolver depósito
+    // 🚫 PERO si tiene multi-branches, NO lo resuelvas automático (salvo que venga warehouse explícito)
+    const explicit = resolveExplicitPosContext(req);
+    const cameWarehouseExplicit = toInt(explicit.warehouseId, 0) > 0;
+
     if (!admin && !resolvedWarehouseId && resolvedBranchId) {
-      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+      if (!hasMultiBranches || cameWarehouseExplicit) {
+        resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+      } else {
+        logPos(req, "info", "skip auto-warehouse (multi-branch user)", {
+          resolvedBranchId,
+          allowedBranchIds,
+          explicit,
+        });
+      }
     }
 
     const q = String(req.query.q || "").trim();
@@ -326,6 +345,8 @@ async function listProductsForPos(req, res) {
         resolvedWarehouseId,
         resolvedBranchId,
         allowedBranchIds,
+        hasMultiBranches,
+        explicit,
         q,
         page,
         limit,
@@ -394,8 +415,6 @@ async function listProductsForPos(req, res) {
 
     // =========================================================
     // ✅ CASO B: ADMIN SIN warehouse => VISTA TOTAL (SUM stock)
-    // - si viene branch_id: suma depósitos de esa sucursal
-    // - si NO viene branch_id: suma TODOS los depósitos
     // =========================================================
     if (admin) {
       const joinWarehouses = resolvedBranchId
@@ -408,6 +427,8 @@ async function listProductsForPos(req, res) {
         admin,
         resolvedBranchId,
         allowedBranchIds,
+        hasMultiBranches,
+        explicit,
         q,
         page,
         limit,
@@ -482,8 +503,6 @@ async function listProductsForPos(req, res) {
 
     // =========================================================
     // ✅ CASO C: USER SIN warehouse y con branches habilitadas => USER_SCOPE_ALL
-    // - si viene branch_id: limita a esa sucursal (pero solo si está habilitada)
-    // - si NO viene branch_id: suma stock en TODAS sus sucursales habilitadas
     // =========================================================
     if (!admin && allowedBranchIds.length) {
       // si el frontend manda branch_id pero el user no lo tiene, bloqueamos
@@ -500,7 +519,6 @@ async function listProductsForPos(req, res) {
       }
 
       const scopeBranchIds = resolvedBranchId ? [resolvedBranchId] : allowedBranchIds;
-
       const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
 
       logPos(req, "info", "listProductsForPos (user-scope-all) query", {
@@ -508,6 +526,8 @@ async function listProductsForPos(req, res) {
         resolvedBranchId,
         scopeBranchIds,
         allowedBranchIds,
+        hasMultiBranches,
+        explicit,
         q,
         page,
         limit,
