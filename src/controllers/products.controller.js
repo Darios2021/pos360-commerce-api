@@ -366,6 +366,9 @@ function existsStockInBranch(branchId) {
 // =====================================
 // GET /api/v1/products
 // =====================================
+// =====================================
+// GET /api/v1/products
+// =====================================
 async function list(req, res, next) {
   try {
     const admin = isAdminReq(req);
@@ -385,12 +388,20 @@ async function list(req, res, next) {
       });
     }
 
+    // ✅ IMPORTANTE:
+    // - stockBranchId: sirve SOLO para calcular stock_qty
+    // - ownerBranchId: sirve para el ÁMBITO (products.branch_id)
+    const ownerBranchId = admin
+      ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || req.query.branch_id, 0) // admin puede filtrar dueño si quiere
+      : ctxBranchId;
+
     const stockBranchId = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0)
+      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ownerBranchId || 0
       : ctxBranchId;
 
     const where = {};
 
+    // 🔎 Search
     if (q) {
       const qNum = toFloat(q, NaN);
       where[Op.or] = [
@@ -404,12 +415,39 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
+    // ✅ ÁMBITO REAL (dueño)
+    // - NO admin: siempre por branch_id del producto
+    // - admin: solo si pide ownerBranchId
     if (!admin) {
-      where[Op.and] = where[Op.and] || [];
-      where[Op.and].push(existsStockInBranch(ctxBranchId));
+      where.branch_id = ownerBranchId;
+    } else if (ownerBranchId) {
+      where.branch_id = ownerBranchId;
     }
 
-    if (admin && stockBranchId) where.branch_id = stockBranchId;
+    // ✅ Filtros opcionales por stock / sellable (NO por defecto)
+    const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
+    const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
+
+    if (inStock || sellable) {
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push(existsStockInBranch(stockBranchId));
+    }
+
+    if (sellable) {
+      // si querés, suma condición de precio>0 (opcional)
+      where[Op.and] = where[Op.and] || [];
+      where[Op.and].push(
+        Sequelize.literal(`(
+          GREATEST(
+            COALESCE(Product.price,0),
+            COALESCE(Product.price_list,0),
+            COALESCE(Product.price_discount,0),
+            COALESCE(Product.price_reseller,0),
+            COALESCE(Product.price,0)
+          ) > 0
+        )`)
+      );
+    }
 
     const include = buildProductIncludes({ includeBranch: admin });
 
