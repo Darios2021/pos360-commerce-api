@@ -6,9 +6,11 @@ const {
   listUsers,
   createUser,
   updateUser,
+  toggleActive,
+  resetPassword,
 } = require("../controllers/adminUsers.controller");
 
-// Meta para UI
+// Meta
 router.get("/meta", getMeta);
 
 // Listado
@@ -17,8 +19,13 @@ router.get("/", listUsers);
 // Crear
 router.post("/", createUser);
 
-// Editar (✅ soporta PATCH y PUT porque el frontend te está pegando con PUT)
-router.patch("/:id", updateUser);
+// Editar
 router.put("/:id", updateUser);
+
+// Toggle activo (lo usa tu frontend)
+router.patch("/:id/toggle-active", toggleActive);
+
+// Reset password (admin)
+router.post("/:id/reset-password", resetPassword);
 
 module.exports = router;
