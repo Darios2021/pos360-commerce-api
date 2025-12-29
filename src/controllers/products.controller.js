@@ -507,21 +507,18 @@ async function getOne(req, res, next) {
     });
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
+if (!admin) {
 
-    if (!admin) {
-      const ok = await Product.findOne({
-        where: { id, [Op.and]: [existsStockInBranch(ctxBranchId)] },
-        attributes: ["id"],
-      });
 
-      if (!ok) {
-        return res.status(403).json({
-          ok: false,
-          code: "NO_STOCK_IN_BRANCH",
-          message: "No podés ver un producto sin stock en tu sucursal.",
-        });
-      }
-    }
+  // ✅ ÁMBITO por dueño: el usuario puede ver productos de SU sucursal aunque tengan stock 0
+  if (toInt(p?.branch_id, 0) !== toInt(ctxBranchId, 0)) {
+    return res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN_SCOPE",
+      message: "No tenés permisos para ver productos de otra sucursal.",
+    });
+  }
+}
 
     return res.json({ ok: true, data: p });
   } catch (e) {
