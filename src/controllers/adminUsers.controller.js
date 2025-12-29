@@ -27,6 +27,15 @@ function boolVal(v, d = false) {
   return Boolean(v);
 }
 
+function modelHasAttr(model, attr) {
+  return Boolean(model?.rawAttributes && model.rawAttributes[attr]);
+}
+
+const USER_BASE_ATTRS = ["id", "email", "username", "first_name", "last_name", "is_active"];
+const USER_ATTRS = modelHasAttr(User, "avatar_url")
+  ? [...USER_BASE_ATTRS, "avatar_url"]
+  : USER_BASE_ATTRS;
+
 function safeUserRow(u) {
   return {
     id: u.id,
@@ -35,7 +44,7 @@ function safeUserRow(u) {
     first_name: u.first_name ?? null,
     last_name: u.last_name ?? null,
     is_active: typeof u.is_active === "boolean" ? u.is_active : Boolean(u.is_active),
-    avatar_url: u.avatar_url ?? null,
+    avatar_url: modelHasAttr(User, "avatar_url") ? (u.avatar_url ?? null) : null,
     roles: Array.isArray(u.roles) ? u.roles.map((r) => r.name) : [],
     branches: Array.isArray(u.branches) ? u.branches.map((b) => ({ id: b.id, name: b.name })) : [],
   };
@@ -52,7 +61,6 @@ async function normalizeRoleAndBranchIds(body) {
   if (Array.isArray(body.role_ids)) {
     roleIds = body.role_ids.map((x) => toInt(x)).filter(Boolean);
   } else if (Array.isArray(body.roles)) {
-    // puede venir ["super_admin"] o [{id,name}]
     const names = body.roles
       .map((x) => (typeof x === "string" ? x : x?.name))
       .filter(Boolean);
@@ -64,7 +72,10 @@ async function normalizeRoleAndBranchIds(body) {
     if (ids.length) roleIds = ids;
 
     if (!roleIds.length && names.length) {
-      const found = await Role.findAll({ where: { name: { [Op.in]: names } }, attributes: ["id"] });
+      const found = await Role.findAll({
+        where: { name: { [Op.in]: names } },
+        attributes: ["id"],
+      });
       roleIds = found.map((r) => r.id);
     }
   }
@@ -85,7 +96,10 @@ async function normalizeRoleAndBranchIds(body) {
     if (ids.length) branchIds = ids;
 
     if (!branchIds.length && names.length) {
-      const found = await Branch.findAll({ where: { name: { [Op.in]: names } }, attributes: ["id"] });
+      const found = await Branch.findAll({
+        where: { name: { [Op.in]: names } },
+        attributes: ["id"],
+      });
       branchIds = found.map((b) => b.id);
     }
   }
@@ -93,25 +107,38 @@ async function normalizeRoleAndBranchIds(body) {
   return { roleIds, branchIds };
 }
 
+function errMsg(e) {
+  return (
+    e?.original?.sqlMessage ||
+    e?.original?.message ||
+    e?.message ||
+    "Error"
+  );
+}
+
 /**
  * GET /api/v1/admin/users/meta
  */
 async function getMeta(req, res) {
-  const [roles, branches, permissions] = await Promise.all([
-    Role.findAll({ order: [["id", "ASC"]], attributes: ["id", "name"] }),
-    Branch.findAll({ order: [["id", "ASC"]], attributes: ["id", "name"] }),
-    Permission.findAll({ order: [["id", "ASC"]], attributes: ["id", "code", "description"] }),
-  ]);
+  try {
+    const [roles, branches, permissions] = await Promise.all([
+      Role.findAll({ order: [["id", "ASC"]], attributes: ["id", "name"] }),
+      Branch.findAll({ order: [["id", "ASC"]], attributes: ["id", "name"] }),
+      Permission.findAll({ order: [["id", "ASC"]], attributes: ["id", "code", "description"] }),
+    ]);
 
-  return res.json({
-    ok: true,
-    data: {
-      roles,
-      branches,
-      permissions,
-      hasRolePermissionsPivot: Boolean(RolePermission),
-    },
-  });
+    return res.json({
+      ok: true,
+      data: {
+        roles,
+        branches,
+        permissions,
+        hasRolePermissionsPivot: Boolean(RolePermission),
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, code: "META_FAILED", message: errMsg(e) });
+  }
 }
 
 /**
@@ -119,43 +146,47 @@ async function getMeta(req, res) {
  * Query: q, page, limit
  */
 async function listUsers(req, res) {
-  const q = String(req.query.q ?? "").trim();
-  const page = Math.max(1, toInt(req.query.page, 1));
-  const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
-  const offset = (page - 1) * limit;
+  try {
+    const q = String(req.query.q ?? "").trim();
+    const page = Math.max(1, toInt(req.query.page, 1));
+    const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
+    const offset = (page - 1) * limit;
 
-  const where = {};
-  if (q) {
-    where[Op.or] = [
-      { email: { [Op.like]: `%${q}%` } },
-      { username: { [Op.like]: `%${q}%` } },
-      { first_name: { [Op.like]: `%${q}%` } },
-      { last_name: { [Op.like]: `%${q}%` } },
-    ];
-  }
+    const where = {};
+    if (q) {
+      where[Op.or] = [
+        { email: { [Op.like]: `%${q}%` } },
+        { username: { [Op.like]: `%${q}%` } },
+        { first_name: { [Op.like]: `%${q}%` } },
+        { last_name: { [Op.like]: `%${q}%` } },
+      ];
+    }
 
-  const { rows, count } = await User.findAndCountAll({
-    where,
-    order: [["id", "DESC"]],
-    limit,
-    offset,
-    attributes: ["id", "email", "username", "first_name", "last_name", "is_active", "avatar_url"],
-    include: [
-      { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-      { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-    ],
-  });
-
-  return res.json({
-    ok: true,
-    data: rows.map(safeUserRow),
-    meta: {
-      page,
+    const { rows, count } = await User.findAndCountAll({
+      where,
+      order: [["id", "DESC"]],
       limit,
-      total: count,
-      pages: Math.ceil(count / limit) || 1,
-    },
-  });
+      offset,
+      attributes: USER_ATTRS,
+      include: [
+        { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
+        { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
+      ],
+    });
+
+    return res.json({
+      ok: true,
+      data: rows.map(safeUserRow),
+      meta: {
+        page,
+        limit,
+        total: count,
+        pages: Math.ceil(count / limit) || 1,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, code: "LIST_FAILED", message: errMsg(e) });
+  }
 }
 
 /**
@@ -174,7 +205,11 @@ async function createUser(req, res) {
     const is_active = boolVal(body.is_active, true);
 
     if (!email || !username) {
-      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "email y username son obligatorios" });
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "email y username son obligatorios",
+      });
     }
 
     const exists = await User.findOne({
@@ -182,42 +217,55 @@ async function createUser(req, res) {
       attributes: ["id"],
     });
     if (exists) {
-      return res.status(400).json({ ok: false, code: "DUPLICATE", message: "email o username ya existe" });
+      return res.status(400).json({
+        ok: false,
+        code: "DUPLICATE",
+        message: "email o username ya existe",
+      });
     }
 
     const rawPass = String(body.password ?? "360pos1234");
     if (rawPass.length < 8) {
-      return res.status(400).json({ ok: false, code: "WEAK_PASSWORD", message: "La contraseña debe tener al menos 8 caracteres" });
+      return res.status(400).json({
+        ok: false,
+        code: "WEAK_PASSWORD",
+        message: "La contraseña debe tener al menos 8 caracteres",
+      });
     }
-    const password = await bcrypt.hash(rawPass, 10);
 
+    const password = await bcrypt.hash(rawPass, 10);
     const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
 
-    const t = await sequelize.transaction();
     try {
-      const u = await User.create(
-        { email, username, password, first_name, last_name, is_active },
-        { transaction: t }
-      );
+      const createdId = await sequelize.transaction(async (t) => {
+        const payload = { email, username, password, first_name, last_name, is_active };
 
-      if (roleIds.length) {
-        await UserRole.bulkCreate(
-          roleIds.map((rid) => ({ user_id: u.id, role_id: rid })),
-          { transaction: t, ignoreDuplicates: true }
-        );
-      }
+        // si existe avatar_url en model, lo aceptamos
+        if (modelHasAttr(User, "avatar_url") && "avatar_url" in body) {
+          payload.avatar_url = String(body.avatar_url || "").trim() || null;
+        }
 
-      if (branchIds.length) {
-        await UserBranch.bulkCreate(
-          branchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
-          { transaction: t, ignoreDuplicates: true }
-        );
-      }
+        const u = await User.create(payload, { transaction: t });
 
-      await t.commit();
+        if (roleIds.length) {
+          await UserRole.bulkCreate(
+            roleIds.map((rid) => ({ user_id: u.id, role_id: rid })),
+            { transaction: t }
+          );
+        }
 
-      const out = await User.findByPk(u.id, {
-        attributes: ["id", "email", "username", "first_name", "last_name", "is_active", "avatar_url"],
+        if (branchIds.length) {
+          await UserBranch.bulkCreate(
+            branchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
+            { transaction: t }
+          );
+        }
+
+        return u.id;
+      });
+
+      const out = await User.findByPk(createdId, {
+        attributes: USER_ATTRS,
         include: [
           { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
           { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
@@ -230,15 +278,14 @@ async function createUser(req, res) {
         temp_password: rawPass,
       });
     } catch (e) {
-      await t.rollback();
       return res.status(500).json({
         ok: false,
         code: "CREATE_FAILED",
-        message: e?.message || "Error",
+        message: errMsg(e),
       });
     }
   } catch (e) {
-    return res.status(500).json({ ok: false, code: "INTERNAL_ERROR", message: e?.message || "Error" });
+    return res.status(500).json({ ok: false, code: "INTERNAL_ERROR", message: errMsg(e) });
   }
 }
 
@@ -260,38 +307,39 @@ async function updateUser(req, res) {
     if ("last_name" in body) u.last_name = (body.last_name ?? "").toString().trim() || null;
     if ("is_active" in body) u.is_active = boolVal(body.is_active, Boolean(u.is_active));
 
+    if (modelHasAttr(User, "avatar_url") && "avatar_url" in body) {
+      u.avatar_url = String(body.avatar_url || "").trim() || null;
+    }
+
     const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
 
-    const t = await sequelize.transaction();
     try {
-      await u.save({ transaction: t });
+      await sequelize.transaction(async (t) => {
+        await u.save({ transaction: t });
 
-      // Roles: solo si mandan algo relacionado
-      if (Array.isArray(body.role_ids) || Array.isArray(body.roles)) {
-        await UserRole.destroy({ where: { user_id: id }, transaction: t });
-        if (roleIds.length) {
-          await UserRole.bulkCreate(
-            roleIds.map((rid) => ({ user_id: id, role_id: rid })),
-            { transaction: t, ignoreDuplicates: true }
-          );
+        if (Array.isArray(body.role_ids) || Array.isArray(body.roles)) {
+          await UserRole.destroy({ where: { user_id: id }, transaction: t });
+          if (roleIds.length) {
+            await UserRole.bulkCreate(
+              roleIds.map((rid) => ({ user_id: id, role_id: rid })),
+              { transaction: t }
+            );
+          }
         }
-      }
 
-      // Branches: solo si mandan algo relacionado
-      if (Array.isArray(body.branch_ids) || Array.isArray(body.branches)) {
-        await UserBranch.destroy({ where: { user_id: id }, transaction: t });
-        if (branchIds.length) {
-          await UserBranch.bulkCreate(
-            branchIds.map((bid) => ({ user_id: id, branch_id: bid })),
-            { transaction: t, ignoreDuplicates: true }
-          );
+        if (Array.isArray(body.branch_ids) || Array.isArray(body.branches)) {
+          await UserBranch.destroy({ where: { user_id: id }, transaction: t });
+          if (branchIds.length) {
+            await UserBranch.bulkCreate(
+              branchIds.map((bid) => ({ user_id: id, branch_id: bid })),
+              { transaction: t }
+            );
+          }
         }
-      }
-
-      await t.commit();
+      });
 
       const out = await User.findByPk(id, {
-        attributes: ["id", "email", "username", "first_name", "last_name", "is_active", "avatar_url"],
+        attributes: USER_ATTRS,
         include: [
           { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
           { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
@@ -300,15 +348,10 @@ async function updateUser(req, res) {
 
       return res.json({ ok: true, data: safeUserRow(out) });
     } catch (e) {
-      await t.rollback();
-      return res.status(500).json({
-        ok: false,
-        code: "UPDATE_FAILED",
-        message: e?.message || "Error",
-      });
+      return res.status(500).json({ ok: false, code: "UPDATE_FAILED", message: errMsg(e) });
     }
   } catch (e) {
-    return res.status(500).json({ ok: false, code: "INTERNAL_ERROR", message: e?.message || "Error" });
+    return res.status(500).json({ ok: false, code: "INTERNAL_ERROR", message: errMsg(e) });
   }
 }
 
