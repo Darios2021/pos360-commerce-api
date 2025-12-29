@@ -46,7 +46,9 @@ function safeUserRow(u) {
     is_active: typeof u.is_active === "boolean" ? u.is_active : Boolean(u.is_active),
     avatar_url: modelHasAttr(User, "avatar_url") ? (u.avatar_url ?? null) : null,
     roles: Array.isArray(u.roles) ? u.roles.map((r) => r.name) : [],
-    branches: Array.isArray(u.branches) ? u.branches.map((b) => ({ id: b.id, name: b.name })) : [],
+    branches: Array.isArray(u.branches)
+      ? u.branches.map((b) => ({ id: b.id, name: b.name }))
+      : [],
   };
 }
 
@@ -266,7 +268,7 @@ async function createUser(req, res) {
         if (finalBranchIds.length) {
           await UserBranch.bulkCreate(
             finalBranchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
-            { transaction: t, ignoreDuplicates: true } // ✅ evita Duplicate entry
+            { transaction: t, ignoreDuplicates: true }
           );
         }
 
@@ -299,8 +301,8 @@ async function createUser(req, res) {
 }
 
 /**
- * PATCH/PUT /api/v1/admin/users/:id
- * Body: { first_name?, last_name?, is_active?, role_ids?/roles?, branch_ids?/branches? }
+ * PUT /api/v1/admin/users/:id
+ * Body: { first_name?, last_name?, is_active?, role_ids?/roles?, branch_ids?/branches?, branch_id? }
  */
 async function updateUser(req, res) {
   try {
@@ -316,6 +318,7 @@ async function updateUser(req, res) {
     if ("last_name" in body) u.last_name = (body.last_name ?? "").toString().trim() || null;
     if ("is_active" in body) u.is_active = boolVal(body.is_active, Boolean(u.is_active));
 
+    // opcional: permitir cambiar sucursal principal
     if ("branch_id" in body) {
       const bid = toInt(body.branch_id, 0);
       if (bid) u.branch_id = bid;
@@ -344,6 +347,7 @@ async function updateUser(req, res) {
         if (Array.isArray(body.branch_ids) || Array.isArray(body.branches)) {
           await UserBranch.destroy({ where: { user_id: id }, transaction: t });
 
+          // ✅ siempre incluimos la principal dentro de las habilitadas
           const branchSet = new Set([u.branch_id, ...(branchIds || [])]);
           const finalBranchIds = Array.from(branchSet).filter(Boolean);
 
@@ -373,9 +377,65 @@ async function updateUser(req, res) {
   }
 }
 
+/**
+ * POST /api/v1/admin/users/:id/reset-password
+ * Body: { password }
+ */
+async function resetPassword(req, res) {
+  try {
+    const id = toInt(req.params.id);
+    if (!id) return res.status(400).json({ ok: false, code: "BAD_ID" });
+
+    const u = await User.findByPk(id, { attributes: ["id"] });
+    if (!u) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
+
+    const rawPass = String(req.body?.password ?? "");
+    if (rawPass.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        code: "WEAK_PASSWORD",
+        message: "La contraseña debe tener al menos 8 caracteres",
+      });
+    }
+
+    const hashed = await bcrypt.hash(rawPass, 10);
+    await User.update({ password: hashed }, { where: { id } });
+
+    return res.json({ ok: true, message: "✅ Contraseña actualizada" });
+  } catch (e) {
+    return res.status(500).json({ ok: false, code: "RESET_PASS_FAILED", message: errMsg(e) });
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/users/:id/toggle-active
+ * (si tu frontend usa este endpoint)
+ */
+async function toggleActive(req, res) {
+  try {
+    const id = toInt(req.params.id);
+    if (!id) return res.status(400).json({ ok: false, code: "BAD_ID" });
+
+    const u = await User.findByPk(id);
+    if (!u) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
+
+    u.is_active = !Boolean(u.is_active);
+    await u.save();
+
+    return res.json({
+      ok: true,
+      data: { id: u.id, is_active: Boolean(u.is_active) },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, code: "TOGGLE_FAILED", message: errMsg(e) });
+  }
+}
+
 module.exports = {
   getMeta,
   listUsers,
   createUser,
   updateUser,
+  resetPassword,
+  toggleActive,
 };
