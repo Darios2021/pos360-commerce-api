@@ -255,23 +255,20 @@ async function createUser(req, res) {
         if (roleIds.length) {
           await UserRole.bulkCreate(
             roleIds.map((rid) => ({ user_id: u.id, role_id: rid })),
-            { transaction: t }
+            { transaction: t, ignoreDuplicates: true }
           );
         }
 
-        // ✅ user_branches: guardamos todas las sucursales elegidas
-        if (branchIds.length) {
+        // ✅ user_branches: guardamos todas las sucursales elegidas + forzamos la principal sin duplicar
+        const branchSet = new Set([branch_id, ...(branchIds || [])]);
+        const finalBranchIds = Array.from(branchSet).filter(Boolean);
+
+        if (finalBranchIds.length) {
           await UserBranch.bulkCreate(
-            branchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
-            { transaction: t }
+            finalBranchIds.map((bid) => ({ user_id: u.id, branch_id: bid })),
+            { transaction: t, ignoreDuplicates: true } // ✅ evita Duplicate entry
           );
         }
-
-        // ✅ Garantiza que la sucursal principal esté habilitada también
-        await UserBranch.bulkCreate(
-          [{ user_id: u.id, branch_id }],
-          { transaction: t }
-        );
 
         return u.id;
       });
@@ -319,8 +316,6 @@ async function updateUser(req, res) {
     if ("last_name" in body) u.last_name = (body.last_name ?? "").toString().trim() || null;
     if ("is_active" in body) u.is_active = boolVal(body.is_active, Boolean(u.is_active));
 
-    // ✅ opcional: permitir cambiar sucursal principal por API
-    // si no querés permitirlo, borrá este bloque.
     if ("branch_id" in body) {
       const bid = toInt(body.branch_id, 0);
       if (bid) u.branch_id = bid;
@@ -341,25 +336,23 @@ async function updateUser(req, res) {
           if (roleIds.length) {
             await UserRole.bulkCreate(
               roleIds.map((rid) => ({ user_id: id, role_id: rid })),
-              { transaction: t }
+              { transaction: t, ignoreDuplicates: true }
             );
           }
         }
 
         if (Array.isArray(body.branch_ids) || Array.isArray(body.branches)) {
           await UserBranch.destroy({ where: { user_id: id }, transaction: t });
-          if (branchIds.length) {
+
+          const branchSet = new Set([u.branch_id, ...(branchIds || [])]);
+          const finalBranchIds = Array.from(branchSet).filter(Boolean);
+
+          if (finalBranchIds.length) {
             await UserBranch.bulkCreate(
-              branchIds.map((bid) => ({ user_id: id, branch_id: bid })),
-              { transaction: t }
+              finalBranchIds.map((bid) => ({ user_id: id, branch_id: bid })),
+              { transaction: t, ignoreDuplicates: true }
             );
           }
-
-          // ✅ Garantiza que la sucursal principal quede habilitada
-          await UserBranch.bulkCreate(
-            [{ user_id: id, branch_id: u.branch_id }],
-            { transaction: t }
-          );
         }
       });
 
