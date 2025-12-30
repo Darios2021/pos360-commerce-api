@@ -1,5 +1,5 @@
 // src/models/index.js
-// ✅ COPY-PASTE FINAL (agrega Subcategory + Product->Subcategory + Product->User createdByUser + deja todo blindado)
+// ✅ COPY-PASTE FINAL (Subcategory + Product->Subcategory + Product->User createdByUser)
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -23,7 +23,7 @@ try {
 
 // Inventory
 const Category = require("./Category")(sequelize, DataTypes);
-const Subcategory = require("./Subcategory")(sequelize, DataTypes); // ✅ NUEVO
+const Subcategory = require("./Subcategory")(sequelize, DataTypes); // ✅
 const Product = require("./Product")(sequelize, DataTypes);
 const ProductImage = require("./ProductImage")(sequelize, DataTypes);
 const Branch = require("./Branch")(sequelize, DataTypes);
@@ -113,20 +113,19 @@ safeHasMany(Branch, Product, { foreignKey: "branch_id", as: "products" });
 safeBelongsTo(Product, User, { foreignKey: "created_by", as: "createdByUser" });
 safeHasMany(User, Product, { foreignKey: "created_by", as: "products_created" });
 
-// Productos ↔ Category
+// Product ↔ Category
 safeBelongsTo(Product, Category, { foreignKey: "category_id", as: "category" });
 safeHasMany(Category, Product, { foreignKey: "category_id", as: "products" });
 
-// ✅ Productos ↔ Subcategory (ESTO TE FALTABA SI QUERÉS INCLUDES Y VALIDACIÓN)
+// ✅ Product ↔ Subcategory (FK REAL)
 safeBelongsTo(Product, Subcategory, { foreignKey: "subcategory_id", as: "subcategory" });
 safeHasMany(Subcategory, Product, { foreignKey: "subcategory_id", as: "products" });
 
-// ✅ (opcional pero recomendado) Subcategory ↔ Category si tu tabla tiene category_id
-// Si tu modelo Subcategory tiene category_id, esto habilita include subcategory.category
+// ✅ Subcategory ↔ Category (FK REAL en subcategories)
 safeBelongsTo(Subcategory, Category, { foreignKey: "category_id", as: "category" });
 safeHasMany(Category, Subcategory, { foreignKey: "category_id", as: "subcategories" });
 
-// ✅ Product ↔ Images (blindado)
+// ✅ Product ↔ Images
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
 safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
@@ -146,11 +145,9 @@ safeHasMany(Sale, SaleItem, { foreignKey: "sale_id", as: "items" });
 safeBelongsTo(SaleItem, Sale, { foreignKey: "sale_id", as: "sale" });
 
 safeBelongsTo(SaleItem, Product, { foreignKey: "product_id", as: "product" });
-
-// ✅ warehouse_id NOT NULL + FK en BD
 safeBelongsTo(SaleItem, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 
-// ✅ Pagos
+// Pagos
 safeHasMany(Sale, Payment, { foreignKey: "sale_id", as: "payments" });
 safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 
@@ -158,7 +155,7 @@ safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 safeHasMany(StockMovement, StockMovementItem, { foreignKey: "movement_id", as: "items" });
 safeBelongsTo(StockMovementItem, StockMovement, { foreignKey: "movement_id", as: "movement" });
 
-// ✅ Auditoría
+// Auditoría
 safeBelongsTo(StockMovement, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 safeBelongsTo(StockMovement, User, { foreignKey: "created_by", as: "creator" });
 
@@ -172,7 +169,7 @@ module.exports = {
   UserBranch,
 
   Category,
-  Subcategory, // ✅ EXPORT NUEVO
+  Subcategory,
   Product,
   ProductImage,
   Branch,

@@ -1,7 +1,7 @@
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL
 // (created_by + include createdByUser + created_by_user para el front)
-// FIX REAL: subcategory_id valida contra tabla subcategories (FK real en BD)
+// FIX: subcategory_id valida contra tabla subcategories + alinea category_id automáticamente
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, User, sequelize } = require("../models");
@@ -136,59 +136,43 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   const A = Product?.associations || {};
 
   // Category + parent
-  const catAs = A.category ? "category" : A.Category ? "Category" : null;
-  if (catAs) {
-    const catInclude = { association: catAs, required: false };
-
+  if (A.category) {
+    const catInclude = { association: "category", required: false };
     try {
-      const CatModel = A[catAs]?.target || Category;
+      const CatModel = A.category?.target || Category;
       const CA = CatModel?.associations || {};
-      const parentAs = CA.parent ? "parent" : CA.Parent ? "Parent" : null;
-      if (parentAs) catInclude.include = [{ association: parentAs, required: false }];
-    } catch {
-      // no-op
-    }
-
+      if (CA.parent) catInclude.include = [{ association: "parent", required: false }];
+    } catch {}
     inc.push(catInclude);
   }
 
-  // ✅ Subcategory (FK real)
-  const subAs = A.subcategory ? "subcategory" : null;
-  if (subAs) {
-    // si Subcategory tiene asociación a Category, la incluimos también
-    const subInc = { association: subAs, required: false };
+  // ✅ Subcategory + category
+  if (A.subcategory) {
+    const subInc = { association: "subcategory", required: false };
     try {
-      const SubModel = A[subAs]?.target || Subcategory;
+      const SubModel = A.subcategory?.target || Subcategory;
       const SA = SubModel?.associations || {};
-      const subCatAs = SA.category ? "category" : null;
-      if (subCatAs) subInc.include = [{ association: subCatAs, required: false }];
-    } catch {
-      // no-op
-    }
+      if (SA.category) subInc.include = [{ association: "category", required: false }];
+    } catch {}
     inc.push(subInc);
   }
 
   // Images
-  const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
-  if (imgAs) inc.push({ association: imgAs, required: false });
+  if (A.images) inc.push({ association: "images", required: false });
 
   // Branch (solo admin)
-  if (includeBranch) {
-    const brAs = A.branch ? "branch" : A.Branch ? "Branch" : null;
-    if (brAs) {
-      inc.push({
-        association: brAs,
-        required: false,
-        attributes: ["id", "code", "name"],
-      });
-    }
+  if (includeBranch && A.branch) {
+    inc.push({
+      association: "branch",
+      required: false,
+      attributes: ["id", "code", "name"],
+    });
   }
 
-  // ✅ Creador (Product.belongsTo(User, as: 'createdByUser'))
-  const creatorAs = A.createdByUser ? "createdByUser" : null;
-  if (creatorAs) {
+  // Creador
+  if (A.createdByUser) {
     inc.push({
-      association: creatorAs,
+      association: "createdByUser",
       required: false,
       attributes: ["id", "username", "email", "first_name", "last_name"],
     });
@@ -198,62 +182,46 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 }
 
 /**
- * ✅ Sanitiza FKs REALES:
+ * ✅ Sanitiza FKs:
  * - category_id -> categories.id (si no existe -> NULL)
  * - subcategory_id -> subcategories.id (si no existe -> NULL)
- * - si Subcategory tiene category_id, alinea category_id = sub.category_id
+ * - si subcategory existe: fuerza category_id = sub.category_id (alineado)
  */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
-  // category_id
+  // Normalización básica
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
+    if (payload.category_id != null) payload.category_id = toInt(payload.category_id, 0) || null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
+    if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
+    if (payload.subcategory_id != null) payload.subcategory_id = toInt(payload.subcategory_id, 0) || null;
+  }
 
-    if (payload.category_id != null) {
-      const id = toInt(payload.category_id, 0);
-      if (!id) payload.category_id = null;
-      else {
-        const ok = await Category.findByPk(id, { attributes: ["id"] });
-        if (!ok) payload.category_id = null;
-      }
+  // Si viene subcategory_id, manda la verdad: subcategory manda category
+  if (payload.subcategory_id != null) {
+    const sub = await Subcategory.findByPk(payload.subcategory_id, {
+      attributes: ["id", "category_id"],
+    }).catch(() => null);
+
+    if (!sub) {
+      // NO existe => evita FK
+      payload.subcategory_id = null;
+    } else {
+      const subCatId = toInt(sub.category_id, 0) || null;
+      if (subCatId) payload.category_id = subCatId;
     }
   }
 
-  // subcategory_id (FK real)
-  if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
-    if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
-
-    if (payload.subcategory_id != null) {
-      const sid = toInt(payload.subcategory_id, 0);
-      if (!sid) {
-        payload.subcategory_id = null;
-      } else {
-        // pedimos category_id de la subcat si existe la columna en tu modelo
-        const sub = await Subcategory.findByPk(sid, { attributes: ["id", "category_id"] }).catch(() => null);
-
-        // no existe => null (evita FK)
-        if (!sub) {
-          payload.subcategory_id = null;
-        } else {
-          payload.subcategory_id = toInt(sub.id, null);
-
-          // si tu subcategories tiene category_id, alineamos
-          const subCatId = toInt(sub.category_id, 0);
-          if (subCatId) {
-            payload.category_id = subCatId;
-
-            // además verificamos que exista category (blindado)
-            const ok = await Category.findByPk(subCatId, { attributes: ["id"] });
-            if (!ok) {
-              // si la categoría no existe (raro), mejor dejar null para no romper FK
-              payload.category_id = null;
-              // y de paso sacamos subcategory para no dejar inconsistente
-              payload.subcategory_id = null;
-            }
-          }
-        }
-      }
+  // Validación final category_id (blindado)
+  if (payload.category_id != null) {
+    const ok = await Category.findByPk(payload.category_id, { attributes: ["id"] }).catch(() => null);
+    if (!ok) {
+      payload.category_id = null;
+      // si category no existe, también anulamos subcategory por coherencia
+      payload.subcategory_id = null;
     }
   }
 
@@ -368,7 +336,6 @@ function pickBody(body = {}) {
     "price_reseller",
     "tax_rate",
     "branch_id",
-    // 🔒 created_by NO viene del cliente
   ];
 
   for (const k of fields) if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
@@ -620,7 +587,7 @@ async function create(req, res, next) {
 
     const payload = pickBody(req.body || {});
 
-    // ✅ created_by lo setea SIEMPRE el backend
+    // ✅ created_by backend only
     payload.created_by = toInt(req?.user?.id, 0) || null;
 
     if (!admin) {
@@ -689,7 +656,6 @@ async function update(req, res, next) {
     const patch = pickBody(req.body || {});
     if (!admin) delete patch.branch_id;
 
-    // 🔒 no permitir que modifiquen created_by
     if (Object.prototype.hasOwnProperty.call(patch, "created_by")) delete patch.created_by;
 
     await sanitizeCategoryFKs(patch);
