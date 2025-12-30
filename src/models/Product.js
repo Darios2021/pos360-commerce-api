@@ -14,19 +14,19 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
       },
 
+      // ✅ NUEVO
+      created_by: {
+        type: DataTypes.BIGINT.UNSIGNED,
+        allowNull: true,
+      },
+
       code: { type: DataTypes.STRING(64), allowNull: true },
 
-      sku: {
-        type: DataTypes.STRING(64),
-        allowNull: false,
-      },
+      sku: { type: DataTypes.STRING(64), allowNull: false },
 
       barcode: { type: DataTypes.STRING(64), allowNull: true },
 
-      name: {
-        type: DataTypes.STRING(200),
-        allowNull: false,
-      },
+      name: { type: DataTypes.STRING(200), allowNull: false },
 
       description: { type: DataTypes.TEXT, allowNull: true },
 
@@ -64,6 +64,14 @@ module.exports = (sequelize, DataTypes) => {
       paranoid: false,
     }
   );
+
+  // ✅ ASOCIACIONES
+  Product.associate = (models) => {
+    Product.belongsTo(models.User, {
+      foreignKey: "created_by",
+      as: "createdByUser",
+    });
+  };
 
   return Product;
 };
