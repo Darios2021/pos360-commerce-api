@@ -1,4 +1,6 @@
-// src/models/product.js
+// src/models/Product.js
+// ✅ COPY-PASTE FINAL (agrega created_by al modelo)
+
 module.exports = (sequelize, DataTypes) => {
   const Product = sequelize.define(
     "Product",
@@ -14,7 +16,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
       },
 
-      // ✅ NUEVO
+      // ✅ NUEVO: creador (FK users.id)
       created_by: {
         type: DataTypes.BIGINT.UNSIGNED,
         allowNull: true,
@@ -22,11 +24,17 @@ module.exports = (sequelize, DataTypes) => {
 
       code: { type: DataTypes.STRING(64), allowNull: true },
 
-      sku: { type: DataTypes.STRING(64), allowNull: false },
+      sku: {
+        type: DataTypes.STRING(64),
+        allowNull: false,
+      },
 
       barcode: { type: DataTypes.STRING(64), allowNull: true },
 
-      name: { type: DataTypes.STRING(200), allowNull: false },
+      name: {
+        type: DataTypes.STRING(200),
+        allowNull: false,
+      },
 
       description: { type: DataTypes.TEXT, allowNull: true },
 
@@ -64,14 +72,6 @@ module.exports = (sequelize, DataTypes) => {
       paranoid: false,
     }
   );
-
-  // ✅ ASOCIACIONES
-  Product.associate = (models) => {
-    Product.belongsTo(models.User, {
-      foreignKey: "created_by",
-      as: "createdByUser",
-    });
-  };
 
   return Product;
 };

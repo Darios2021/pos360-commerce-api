@@ -1,4 +1,6 @@
 // src/models/index.js
+// ✅ COPY-PASTE FINAL (agrega Product -> User createdByUser + deja todo blindado)
+
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
 
@@ -102,15 +104,19 @@ safeBelongsToMany(Branch, User, {
 safeBelongsTo(Category, Category, { foreignKey: "parent_id", as: "parent" });
 safeHasMany(Category, Category, { foreignKey: "parent_id", as: "children" });
 
-// ✅ Product ↔ Branch  (ESTO TE FALTABA)
+// ✅ Product ↔ Branch
 safeBelongsTo(Product, Branch, { foreignKey: "branch_id", as: "branch" });
 safeHasMany(Branch, Product, { foreignKey: "branch_id", as: "products" });
+
+// ✅ Product -> User (CREADOR)  ⭐⭐⭐
+safeBelongsTo(Product, User, { foreignKey: "created_by", as: "createdByUser" });
+safeHasMany(User, Product, { foreignKey: "created_by", as: "products_created" });
 
 // Productos ↔ Category
 safeBelongsTo(Product, Category, { foreignKey: "category_id", as: "category" });
 safeHasMany(Category, Product, { foreignKey: "category_id", as: "products" });
 
-// ✅ Product ↔ Images (blindado para no duplicar alias "images")
+// ✅ Product ↔ Images (blindado)
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
 safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
@@ -134,7 +140,7 @@ safeBelongsTo(SaleItem, Product, { foreignKey: "product_id", as: "product" });
 // ✅ warehouse_id NOT NULL + FK en BD
 safeBelongsTo(SaleItem, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
 
-// ✅ Pagos (ALIAS CLAVE para dashboard)
+// ✅ Pagos
 safeHasMany(Sale, Payment, { foreignKey: "sale_id", as: "payments" });
 safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 

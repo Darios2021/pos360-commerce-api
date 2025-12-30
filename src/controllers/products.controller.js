@@ -1,9 +1,10 @@
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL
-// (admin detection robusto + validación de campos + FIX FK category/subcategory + errores claros + created_by/created_by_user)
+// (created_by + include createdByUser + created_by_user para el front)
+// NOTA: si NO tenés modelo Subcategory, acá NO lo importamos.
 
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, Subcategory, ProductImage, User, sequelize } = require("../models"); // ✅ +User
+const { Product, Category, ProductImage, User, sequelize } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -151,10 +152,6 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     inc.push(catInclude);
   }
 
-  // Subcategory (si existe asociación)
-  const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
-  if (subAs) inc.push({ association: subAs, required: false });
-
   // Images
   const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
@@ -171,8 +168,8 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     }
   }
 
-  // ✅ Creador (si existe asociación)
-  const creatorAs = A.createdByUser ? "createdByUser" : A.creator ? "creator" : A.user ? "user" : null;
+  // ✅ Creador (Product.belongsTo(User, as: 'createdByUser'))
+  const creatorAs = A.createdByUser ? "createdByUser" : null;
   if (creatorAs) {
     inc.push({
       association: creatorAs,
@@ -184,11 +181,10 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   return inc;
 }
 
-// ✅ Sanitiza FKs: si no existe category/subcategory -> NULL
+// ✅ Sanitiza category_id (si no existe -> NULL)
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
-  // category_id -> categories.id
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
 
@@ -202,22 +198,10 @@ async function sanitizeCategoryFKs(payload) {
     }
   }
 
-  // subcategory_id -> subcategories.id
+  // Si NO tenés Subcategory model, dejamos subcategory_id en null por seguridad
   if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
     if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
-
-    if (payload.subcategory_id != null) {
-      const id = toInt(payload.subcategory_id, 0);
-      if (!id) payload.subcategory_id = null;
-      else {
-        if (!Subcategory || typeof Subcategory.findByPk !== "function") {
-          payload.subcategory_id = null;
-        } else {
-          const ok = await Subcategory.findByPk(id, { attributes: ["id"] });
-          if (!ok) payload.subcategory_id = null;
-        }
-      }
-    }
+    if (payload.subcategory_id != null) payload.subcategory_id = toInt(payload.subcategory_id, 0) || null;
   }
 
   return payload;
@@ -331,9 +315,7 @@ function pickBody(body = {}) {
     "price_reseller",
     "tax_rate",
     "branch_id",
-
-    // 🔒 NO permitir setear created_by desde el cliente
-    // (lo dejamos fuera a propósito)
+    // 🔒 created_by NO viene del cliente
   ];
 
   for (const k of fields) if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
@@ -410,9 +392,6 @@ async function list(req, res, next) {
       });
     }
 
-    // ✅ IMPORTANTE:
-    // - stockBranchId: sirve SOLO para calcular stock_qty
-    // - ownerBranchId: sirve para el ÁMBITO (products.branch_id)
     const ownerBranchId = admin
       ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || req.query.branch_id, 0)
       : ctxBranchId;
@@ -423,7 +402,6 @@ async function list(req, res, next) {
 
     const where = {};
 
-    // 🔎 Search
     if (q) {
       const qNum = toFloat(q, NaN);
       where[Op.or] = [
@@ -437,14 +415,9 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // ✅ ÁMBITO REAL (dueño)
-    if (!admin) {
-      where.branch_id = ownerBranchId;
-    } else if (ownerBranchId) {
-      where.branch_id = ownerBranchId;
-    }
+    if (!admin) where.branch_id = ownerBranchId;
+    else if (ownerBranchId) where.branch_id = ownerBranchId;
 
-    // ✅ filtros opcionales
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
 
@@ -477,34 +450,17 @@ async function list(req, res, next) {
       offset,
       include,
       distinct: true,
-      attributes: {
-        include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]],
-      },
+      attributes: { include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]] },
     });
 
-    // ✅ sumar created_by_user al JSON para que el front lo muestre
     const data = (rows || []).map((r) => {
       const x = r?.toJSON ? r.toJSON() : r;
-
-      const u =
-        x?.createdByUser ||
-        x?.creator ||
-        x?.user ||
-        null;
-
-      return {
-        ...x,
-        created_by_user: creatorLabelFromUser(u),
-      };
+      const u = x?.createdByUser || null;
+      return { ...x, created_by_user: creatorLabelFromUser(u) };
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
-
-    return res.json({
-      ok: true,
-      data,
-      meta: { page, limit, total: count, pages },
-    });
+    return res.json({ ok: true, data, meta: { page, limit, total: count, pages } });
   } catch (e) {
     next(e);
   }
@@ -543,26 +499,18 @@ async function getOne(req, res, next) {
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-    if (!admin) {
-      if (toInt(p?.branch_id, 0) !== toInt(ctxBranchId, 0)) {
-        return res.status(403).json({
-          ok: false,
-          code: "FORBIDDEN_SCOPE",
-          message: "No tenés permisos para ver productos de otra sucursal.",
-        });
-      }
+    if (!admin && toInt(p?.branch_id, 0) !== toInt(ctxBranchId, 0)) {
+      return res.status(403).json({
+        ok: false,
+        code: "FORBIDDEN_SCOPE",
+        message: "No tenés permisos para ver productos de otra sucursal.",
+      });
     }
 
     const x = p.toJSON();
-    const u = x?.createdByUser || x?.creator || x?.user || null;
+    const u = x?.createdByUser || null;
 
-    return res.json({
-      ok: true,
-      data: {
-        ...x,
-        created_by_user: creatorLabelFromUser(u),
-      },
-    });
+    return res.json({ ok: true, data: { ...x, created_by_user: creatorLabelFromUser(u) } });
   } catch (e) {
     next(e);
   }
@@ -603,7 +551,6 @@ async function getStock(req, res, next) {
     );
 
     const qty = Number(rows?.[0]?.qty || 0);
-
     return res.json({ ok: true, data: { product_id: productId, branch_id: branchId, qty } });
   } catch (e) {
     next(e);
@@ -620,7 +567,7 @@ async function create(req, res, next) {
 
     const payload = pickBody(req.body || {});
 
-    // ✅ created_by lo setea SIEMPRE el backend (no el cliente)
+    // ✅ created_by lo setea SIEMPRE el backend
     payload.created_by = toInt(req?.user?.id, 0) || null;
 
     if (!admin) {
@@ -636,7 +583,6 @@ async function create(req, res, next) {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
-    // ✅ FIX FKs (category/subcategory)
     await sanitizeCategoryFKs(payload);
 
     const errors = validateProductPayload(payload, { isPatch: false });
@@ -693,7 +639,6 @@ async function update(req, res, next) {
     // 🔒 no permitir que modifiquen created_by
     if (Object.prototype.hasOwnProperty.call(patch, "created_by")) delete patch.created_by;
 
-    // ✅ FIX FKs (category/subcategory)
     await sanitizeCategoryFKs(patch);
 
     const errors = validateProductPayload(patch, { isPatch: true });
@@ -722,15 +667,12 @@ async function update(req, res, next) {
     });
 
     const x = updated.toJSON();
-    const u = x?.createdByUser || x?.creator || x?.user || null;
+    const u = x?.createdByUser || null;
 
     return res.json({
       ok: true,
       message: "Producto actualizado",
-      data: {
-        ...x,
-        created_by_user: creatorLabelFromUser(u),
-      },
+      data: { ...x, created_by_user: creatorLabelFromUser(u) },
     });
   } catch (e) {
     if (e?.name === "SequelizeUniqueConstraintError") {
