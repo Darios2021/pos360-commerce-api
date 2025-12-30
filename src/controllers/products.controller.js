@@ -1,10 +1,10 @@
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL
 // (created_by + include createdByUser + created_by_user para el front)
-// FIX: subcategory_id validado contra Category (hija) para NO romper FK
+// FIX REAL: subcategory_id valida contra tabla subcategories (FK real en BD)
 
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, ProductImage, User, sequelize } = require("../models");
+const { Product, Category, Subcategory, ProductImage, User, sequelize } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -152,6 +152,22 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     inc.push(catInclude);
   }
 
+  // ✅ Subcategory (FK real)
+  const subAs = A.subcategory ? "subcategory" : null;
+  if (subAs) {
+    // si Subcategory tiene asociación a Category, la incluimos también
+    const subInc = { association: subAs, required: false };
+    try {
+      const SubModel = A[subAs]?.target || Subcategory;
+      const SA = SubModel?.associations || {};
+      const subCatAs = SA.category ? "category" : null;
+      if (subCatAs) subInc.include = [{ association: subCatAs, required: false }];
+    } catch {
+      // no-op
+    }
+    inc.push(subInc);
+  }
+
   // Images
   const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
@@ -182,16 +198,15 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 }
 
 /**
- * ✅ Sanitiza category/subcategory contra Category (misma tabla)
- * - category_id debe existir o null
- * - subcategory_id debe existir o null
- * - si subcategory_id es PADRE -> pasa a category_id y subcategory_id null
- * - si subcategory_id es HIJA -> fuerza category_id = parent_id (alineación)
+ * ✅ Sanitiza FKs REALES:
+ * - category_id -> categories.id (si no existe -> NULL)
+ * - subcategory_id -> subcategories.id (si no existe -> NULL)
+ * - si Subcategory tiene category_id, alinea category_id = sub.category_id
  */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
-  // ---------- category_id ----------
+  // category_id
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
 
@@ -205,7 +220,7 @@ async function sanitizeCategoryFKs(payload) {
     }
   }
 
-  // ---------- subcategory_id (EN TU CASO: category HIJA) ----------
+  // subcategory_id (FK real)
   if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
     if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
 
@@ -214,35 +229,31 @@ async function sanitizeCategoryFKs(payload) {
       if (!sid) {
         payload.subcategory_id = null;
       } else {
-        const sub = await Category.findByPk(sid, { attributes: ["id", "parent_id"] });
+        // pedimos category_id de la subcat si existe la columna en tu modelo
+        const sub = await Subcategory.findByPk(sid, { attributes: ["id", "category_id"] }).catch(() => null);
 
-        // no existe -> null (evita FK)
+        // no existe => null (evita FK)
         if (!sub) {
           payload.subcategory_id = null;
         } else {
-          const parentId = toInt(sub.parent_id, 0);
+          payload.subcategory_id = toInt(sub.id, null);
 
-          // si es PADRE (no tiene parent) => lo tratamos como rubro
-          if (!parentId) {
-            payload.category_id = toInt(sub.id, null);
-            payload.subcategory_id = null;
-          } else {
-            // si es HIJA => category_id debe ser su parent
-            payload.category_id = parentId;
-            payload.subcategory_id = toInt(sub.id, null);
+          // si tu subcategories tiene category_id, alineamos
+          const subCatId = toInt(sub.category_id, 0);
+          if (subCatId) {
+            payload.category_id = subCatId;
+
+            // además verificamos que exista category (blindado)
+            const ok = await Category.findByPk(subCatId, { attributes: ["id"] });
+            if (!ok) {
+              // si la categoría no existe (raro), mejor dejar null para no romper FK
+              payload.category_id = null;
+              // y de paso sacamos subcategory para no dejar inconsistente
+              payload.subcategory_id = null;
+            }
           }
         }
       }
-    }
-  }
-
-  // re-chequeo final de category_id (por si se ajustó arriba)
-  if (payload.category_id != null) {
-    const id = toInt(payload.category_id, 0);
-    if (!id) payload.category_id = null;
-    else {
-      const ok = await Category.findByPk(id, { attributes: ["id"] });
-      if (!ok) payload.category_id = null;
     }
   }
 

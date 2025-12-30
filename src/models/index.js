@@ -1,5 +1,5 @@
 // src/models/index.js
-// ✅ COPY-PASTE FINAL (agrega Product -> User createdByUser + deja todo blindado)
+// ✅ COPY-PASTE FINAL (agrega Subcategory + Product->Subcategory + Product->User createdByUser + deja todo blindado)
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -23,6 +23,7 @@ try {
 
 // Inventory
 const Category = require("./Category")(sequelize, DataTypes);
+const Subcategory = require("./Subcategory")(sequelize, DataTypes); // ✅ NUEVO
 const Product = require("./Product")(sequelize, DataTypes);
 const ProductImage = require("./ProductImage")(sequelize, DataTypes);
 const Branch = require("./Branch")(sequelize, DataTypes);
@@ -108,13 +109,22 @@ safeHasMany(Category, Category, { foreignKey: "parent_id", as: "children" });
 safeBelongsTo(Product, Branch, { foreignKey: "branch_id", as: "branch" });
 safeHasMany(Branch, Product, { foreignKey: "branch_id", as: "products" });
 
-// ✅ Product -> User (CREADOR)  ⭐⭐⭐
+// ✅ Product -> User (CREADOR)
 safeBelongsTo(Product, User, { foreignKey: "created_by", as: "createdByUser" });
 safeHasMany(User, Product, { foreignKey: "created_by", as: "products_created" });
 
 // Productos ↔ Category
 safeBelongsTo(Product, Category, { foreignKey: "category_id", as: "category" });
 safeHasMany(Category, Product, { foreignKey: "category_id", as: "products" });
+
+// ✅ Productos ↔ Subcategory (ESTO TE FALTABA SI QUERÉS INCLUDES Y VALIDACIÓN)
+safeBelongsTo(Product, Subcategory, { foreignKey: "subcategory_id", as: "subcategory" });
+safeHasMany(Subcategory, Product, { foreignKey: "subcategory_id", as: "products" });
+
+// ✅ (opcional pero recomendado) Subcategory ↔ Category si tu tabla tiene category_id
+// Si tu modelo Subcategory tiene category_id, esto habilita include subcategory.category
+safeBelongsTo(Subcategory, Category, { foreignKey: "category_id", as: "category" });
+safeHasMany(Category, Subcategory, { foreignKey: "category_id", as: "subcategories" });
 
 // ✅ Product ↔ Images (blindado)
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
@@ -162,6 +172,7 @@ module.exports = {
   UserBranch,
 
   Category,
+  Subcategory, // ✅ EXPORT NUEVO
   Product,
   ProductImage,
   Branch,
