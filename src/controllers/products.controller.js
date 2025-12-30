@@ -1,7 +1,7 @@
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL
 // (created_by + include createdByUser + created_by_user para el front)
-// NOTA: si NO tenés modelo Subcategory, acá NO lo importamos.
+// FIX: subcategory_id validado contra Category (hija) para NO romper FK
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, ProductImage, User, sequelize } = require("../models");
@@ -181,10 +181,17 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   return inc;
 }
 
-// ✅ Sanitiza category_id (si no existe -> NULL)
+/**
+ * ✅ Sanitiza category/subcategory contra Category (misma tabla)
+ * - category_id debe existir o null
+ * - subcategory_id debe existir o null
+ * - si subcategory_id es PADRE -> pasa a category_id y subcategory_id null
+ * - si subcategory_id es HIJA -> fuerza category_id = parent_id (alineación)
+ */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
+  // ---------- category_id ----------
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
 
@@ -198,10 +205,45 @@ async function sanitizeCategoryFKs(payload) {
     }
   }
 
-  // Si NO tenés Subcategory model, dejamos subcategory_id en null por seguridad
+  // ---------- subcategory_id (EN TU CASO: category HIJA) ----------
   if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
     if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
-    if (payload.subcategory_id != null) payload.subcategory_id = toInt(payload.subcategory_id, 0) || null;
+
+    if (payload.subcategory_id != null) {
+      const sid = toInt(payload.subcategory_id, 0);
+      if (!sid) {
+        payload.subcategory_id = null;
+      } else {
+        const sub = await Category.findByPk(sid, { attributes: ["id", "parent_id"] });
+
+        // no existe -> null (evita FK)
+        if (!sub) {
+          payload.subcategory_id = null;
+        } else {
+          const parentId = toInt(sub.parent_id, 0);
+
+          // si es PADRE (no tiene parent) => lo tratamos como rubro
+          if (!parentId) {
+            payload.category_id = toInt(sub.id, null);
+            payload.subcategory_id = null;
+          } else {
+            // si es HIJA => category_id debe ser su parent
+            payload.category_id = parentId;
+            payload.subcategory_id = toInt(sub.id, null);
+          }
+        }
+      }
+    }
+  }
+
+  // re-chequeo final de category_id (por si se ajustó arriba)
+  if (payload.category_id != null) {
+    const id = toInt(payload.category_id, 0);
+    if (!id) payload.category_id = null;
+    else {
+      const ok = await Category.findByPk(id, { attributes: ["id"] });
+      if (!ok) payload.category_id = null;
+    }
   }
 
   return payload;
