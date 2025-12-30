@@ -1,10 +1,11 @@
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL
-// (created_by + include createdByUser + created_by_user para el front)
-// FIX: subcategory_id valida contra tabla subcategories + alinea category_id automáticamente
+// (admin detection robusto + validación de campos + FIX FK category/subcategory + errores claros + created_by/created_by_user)
+// ✅ Anti-500: includes defensivos (solo incluye asociaciones si existen en Product.associations)
+// ✅ FIX REAL: subcategory_id valida contra tabla subcategories + alinea category_id con subcategory.category_id
 
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, Subcategory, ProductImage, User, sequelize } = require("../models");
+const { Product, Category, Subcategory, ProductImage, User, sequelize } = require("../models"); // ✅ +Subcategory +User
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -131,48 +132,72 @@ function creatorLabelFromUser(u) {
   );
 }
 
+/**
+ * ✅ Includes defensivos
+ * - Solo agrega asociaciones si existen en Product.associations
+ * - Evita 500 por "Association with alias ... does not exist"
+ */
 function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
   const A = Product?.associations || {};
 
   // Category + parent
-  if (A.category) {
-    const catInclude = { association: "category", required: false };
+  const catAs = A.category ? "category" : A.Category ? "Category" : null;
+  if (catAs) {
+    const catInclude = { association: catAs, required: false };
+
     try {
-      const CatModel = A.category?.target || Category;
+      const CatModel = A[catAs]?.target || Category;
       const CA = CatModel?.associations || {};
-      if (CA.parent) catInclude.include = [{ association: "parent", required: false }];
-    } catch {}
+      const parentAs = CA.parent ? "parent" : CA.Parent ? "Parent" : null;
+      if (parentAs) catInclude.include = [{ association: parentAs, required: false }];
+    } catch {
+      // no-op
+    }
+
     inc.push(catInclude);
   }
 
-  // ✅ Subcategory + category
-  if (A.subcategory) {
-    const subInc = { association: "subcategory", required: false };
+  // ✅ Subcategory (si existe asociación)
+  const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
+  if (subAs) {
+    const subInclude = { association: subAs, required: false };
+
+    // si Subcategory tiene asociación a Category, la incluimos
     try {
-      const SubModel = A.subcategory?.target || Subcategory;
+      const SubModel = A[subAs]?.target || Subcategory;
       const SA = SubModel?.associations || {};
-      if (SA.category) subInc.include = [{ association: "category", required: false }];
-    } catch {}
-    inc.push(subInc);
+      const subCatAs = SA.category ? "category" : SA.Category ? "Category" : null;
+      if (subCatAs) subInclude.include = [{ association: subCatAs, required: false }];
+    } catch {
+      // no-op
+    }
+
+    inc.push(subInclude);
   }
 
   // Images
-  if (A.images) inc.push({ association: "images", required: false });
+  const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
+  if (imgAs) inc.push({ association: imgAs, required: false });
 
   // Branch (solo admin)
-  if (includeBranch && A.branch) {
-    inc.push({
-      association: "branch",
-      required: false,
-      attributes: ["id", "code", "name"],
-    });
+  if (includeBranch) {
+    const brAs = A.branch ? "branch" : A.Branch ? "Branch" : null;
+    if (brAs) {
+      inc.push({
+        association: brAs,
+        required: false,
+        attributes: ["id", "code", "name"],
+      });
+    }
   }
 
-  // Creador
-  if (A.createdByUser) {
+  // ✅ Creador (si existe asociación)
+  // ideal: Product.belongsTo(User, as: 'createdByUser')
+  const creatorAs = A.createdByUser ? "createdByUser" : null;
+  if (creatorAs) {
     inc.push({
-      association: "createdByUser",
+      association: creatorAs,
       required: false,
       attributes: ["id", "username", "email", "first_name", "last_name"],
     });
@@ -183,45 +208,62 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 
 /**
  * ✅ Sanitiza FKs:
- * - category_id -> categories.id (si no existe -> NULL)
- * - subcategory_id -> subcategories.id (si no existe -> NULL)
- * - si subcategory existe: fuerza category_id = sub.category_id (alineado)
+ * - category_id -> categories.id (si no existe => NULL)
+ * - subcategory_id -> subcategories.id (si no existe => NULL)
+ * - si subcategory existe y tiene category_id, alinea payload.category_id = sub.category_id
  */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
-  // Normalización básica
+  // category_id -> categories.id
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
-    if (payload.category_id != null) payload.category_id = toInt(payload.category_id, 0) || null;
-  }
-  if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
-    if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
-    if (payload.subcategory_id != null) payload.subcategory_id = toInt(payload.subcategory_id, 0) || null;
-  }
 
-  // Si viene subcategory_id, manda la verdad: subcategory manda category
-  if (payload.subcategory_id != null) {
-    const sub = await Subcategory.findByPk(payload.subcategory_id, {
-      attributes: ["id", "category_id"],
-    }).catch(() => null);
-
-    if (!sub) {
-      // NO existe => evita FK
-      payload.subcategory_id = null;
-    } else {
-      const subCatId = toInt(sub.category_id, 0) || null;
-      if (subCatId) payload.category_id = subCatId;
+    if (payload.category_id != null) {
+      const id = toInt(payload.category_id, 0);
+      if (!id) payload.category_id = null;
+      else {
+        const ok = await Category.findByPk(id, { attributes: ["id"] });
+        if (!ok) payload.category_id = null;
+      }
     }
   }
 
-  // Validación final category_id (blindado)
-  if (payload.category_id != null) {
-    const ok = await Category.findByPk(payload.category_id, { attributes: ["id"] }).catch(() => null);
-    if (!ok) {
-      payload.category_id = null;
-      // si category no existe, también anulamos subcategory por coherencia
-      payload.subcategory_id = null;
+  // subcategory_id -> subcategories.id + alinear category_id
+  if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
+    if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
+
+    if (payload.subcategory_id != null) {
+      const sid = toInt(payload.subcategory_id, 0);
+      if (!sid) {
+        payload.subcategory_id = null;
+      } else {
+        if (!Subcategory || typeof Subcategory.findByPk !== "function") {
+          // si el modelo no está cargado, evitamos romper FK
+          payload.subcategory_id = null;
+        } else {
+          const sub = await Subcategory.findByPk(sid, { attributes: ["id", "category_id"] }).catch(() => null);
+
+          if (!sub) {
+            payload.subcategory_id = null; // evita FK
+          } else {
+            payload.subcategory_id = toInt(sub.id, null);
+
+            // alinear category_id con la subcategory
+            const subCatId = toInt(sub.category_id, 0);
+            if (subCatId) {
+              payload.category_id = subCatId;
+
+              // blindado: confirmar categoría
+              const ok = await Category.findByPk(subCatId, { attributes: ["id"] });
+              if (!ok) {
+                payload.category_id = null;
+                payload.subcategory_id = null;
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -336,6 +378,8 @@ function pickBody(body = {}) {
     "price_reseller",
     "tax_rate",
     "branch_id",
+
+    // 🔒 NO permitir setear created_by desde el cliente
   ];
 
   for (const k of fields) if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
@@ -412,6 +456,9 @@ async function list(req, res, next) {
       });
     }
 
+    // ✅ IMPORTANTE:
+    // - stockBranchId: sirve SOLO para calcular stock_qty
+    // - ownerBranchId: sirve para el ÁMBITO (products.branch_id)
     const ownerBranchId = admin
       ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || req.query.branch_id, 0)
       : ctxBranchId;
@@ -422,6 +469,7 @@ async function list(req, res, next) {
 
     const where = {};
 
+    // 🔎 Search
     if (q) {
       const qNum = toFloat(q, NaN);
       where[Op.or] = [
@@ -435,9 +483,14 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    if (!admin) where.branch_id = ownerBranchId;
-    else if (ownerBranchId) where.branch_id = ownerBranchId;
+    // ✅ ÁMBITO REAL (dueño)
+    if (!admin) {
+      where.branch_id = ownerBranchId;
+    } else if (ownerBranchId) {
+      where.branch_id = ownerBranchId;
+    }
 
+    // ✅ filtros opcionales
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
 
@@ -470,9 +523,12 @@ async function list(req, res, next) {
       offset,
       include,
       distinct: true,
-      attributes: { include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]] },
+      attributes: {
+        include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]],
+      },
     });
 
+    // ✅ sumar created_by_user al JSON para que el front lo muestre
     const data = (rows || []).map((r) => {
       const x = r?.toJSON ? r.toJSON() : r;
       const u = x?.createdByUser || null;
@@ -480,7 +536,12 @@ async function list(req, res, next) {
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
-    return res.json({ ok: true, data, meta: { page, limit, total: count, pages } });
+
+    return res.json({
+      ok: true,
+      data,
+      meta: { page, limit, total: count, pages },
+    });
   } catch (e) {
     next(e);
   }
@@ -519,18 +580,23 @@ async function getOne(req, res, next) {
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-    if (!admin && toInt(p?.branch_id, 0) !== toInt(ctxBranchId, 0)) {
-      return res.status(403).json({
-        ok: false,
-        code: "FORBIDDEN_SCOPE",
-        message: "No tenés permisos para ver productos de otra sucursal.",
-      });
+    if (!admin) {
+      if (toInt(p?.branch_id, 0) !== toInt(ctxBranchId, 0)) {
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_SCOPE",
+          message: "No tenés permisos para ver productos de otra sucursal.",
+        });
+      }
     }
 
     const x = p.toJSON();
     const u = x?.createdByUser || null;
 
-    return res.json({ ok: true, data: { ...x, created_by_user: creatorLabelFromUser(u) } });
+    return res.json({
+      ok: true,
+      data: { ...x, created_by_user: creatorLabelFromUser(u) },
+    });
   } catch (e) {
     next(e);
   }
@@ -571,6 +637,7 @@ async function getStock(req, res, next) {
     );
 
     const qty = Number(rows?.[0]?.qty || 0);
+
     return res.json({ ok: true, data: { product_id: productId, branch_id: branchId, qty } });
   } catch (e) {
     next(e);
@@ -587,7 +654,7 @@ async function create(req, res, next) {
 
     const payload = pickBody(req.body || {});
 
-    // ✅ created_by backend only
+    // ✅ created_by lo setea SIEMPRE el backend (no el cliente)
     payload.created_by = toInt(req?.user?.id, 0) || null;
 
     if (!admin) {
@@ -603,6 +670,7 @@ async function create(req, res, next) {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
+    // ✅ FIX FKs (category/subcategory)
     await sanitizeCategoryFKs(payload);
 
     const errors = validateProductPayload(payload, { isPatch: false });
@@ -656,8 +724,10 @@ async function update(req, res, next) {
     const patch = pickBody(req.body || {});
     if (!admin) delete patch.branch_id;
 
+    // 🔒 no permitir que modifiquen created_by
     if (Object.prototype.hasOwnProperty.call(patch, "created_by")) delete patch.created_by;
 
+    // ✅ FIX FKs (category/subcategory)
     await sanitizeCategoryFKs(patch);
 
     const errors = validateProductPayload(patch, { isPatch: true });
