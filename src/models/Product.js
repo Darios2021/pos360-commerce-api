@@ -1,5 +1,7 @@
 // src/models/Product.js
-// ✅ COPY-PASTE FINAL (agrega created_by al modelo)
+// ✅ COPY-PASTE FINAL (created_by + FIX timestamps reales de tu BD)
+// Tu tabla products tiene: created_at / updated_at (según SHOW CREATE TABLE)
+// Entonces mapeamos createdAt/updatedAt a esos nombres para evitar 500.
 
 module.exports = (sequelize, DataTypes) => {
   const Product = sequelize.define(
@@ -47,7 +49,11 @@ module.exports = (sequelize, DataTypes) => {
       brand: { type: DataTypes.STRING(120), allowNull: true },
       model: { type: DataTypes.STRING(120), allowNull: true },
 
-      warranty_months: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+      warranty_months: {
+        type: DataTypes.INTEGER.UNSIGNED,
+        allowNull: false,
+        defaultValue: 0,
+      },
 
       track_stock: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
@@ -68,7 +74,12 @@ module.exports = (sequelize, DataTypes) => {
     {
       tableName: "products",
       underscored: true,
+
+      // ✅ CLAVE: en tu BD existen created_at / updated_at
       timestamps: true,
+      createdAt: "created_at",
+      updatedAt: "updated_at",
+
       paranoid: false,
     }
   );
