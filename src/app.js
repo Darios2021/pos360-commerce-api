@@ -1,4 +1,11 @@
 // src/app.js
+// ✅ COPY-PASTE FINAL COMPLETO
+// - Mantiene tu estructura: module.exports = { createApp }
+// - CORS robusto + X-Branch-Id
+// - Request logger
+// - 404
+// - ✅ Error handler con sqlMessage real (db) para matar el 500 ciego
+
 const express = require("express");
 const cors = require("cors");
 
@@ -36,11 +43,17 @@ function createApp() {
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Branch-Id"],
   };
 
   app.use(cors(corsOptions));
   app.options("*", cors(corsOptions));
+
+  // =====================
+  // Parsers (primero)
+  // =====================
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
   // =====================
   // ✅ Request logger (DEBUG)
@@ -64,12 +77,6 @@ function createApp() {
   });
 
   // =====================
-  // Parsers
-  // =====================
-  app.use(express.json({ limit: "10mb" }));
-  app.use(express.urlencoded({ extended: true }));
-
-  // =====================
   // Root
   // =====================
   app.get("/", (req, res) => {
@@ -87,10 +94,7 @@ function createApp() {
   if (!isMiddleware(v1Routes)) {
     console.error("❌ v1Routes inválido. Debe exportar un router middleware.");
     console.error("   typeof:", typeof v1Routes);
-    console.error(
-      "   keys:",
-      v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null
-    );
+    console.error("   keys:", v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null);
     throw new Error("INVALID_V1_ROUTES_EXPORT");
   }
 
@@ -108,24 +112,29 @@ function createApp() {
   });
 
   // =====================
-  // ✅ Error handler FINAL (con stack en dev)
+  // ✅ Error handler FINAL (incluye sqlMessage real)
   // =====================
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
+    const dbCode = err?.original?.code || err?.parent?.code || err?.code || null;
+    const sqlMessage = err?.original?.sqlMessage || err?.parent?.sqlMessage || null;
+    const status = err?.httpStatus || err?.statusCode || err?.status || 500;
+
     console.error("❌ [API ERROR]", {
       method: req.method,
       url: req.originalUrl,
       message: err?.message,
-      code: err?.code,
+      name: err?.name,
+      code: dbCode,
+      sqlMessage,
       stack: process.env.NODE_ENV === "production" ? undefined : err?.stack,
     });
 
-    const status = err?.httpStatus || err?.statusCode || 500;
-
     return res.status(status).json({
       ok: false,
-      code: err?.code || "INTERNAL_ERROR",
+      code: dbCode || "INTERNAL_ERROR",
       message: err?.message || "Internal Server Error",
+      db: sqlMessage,
       stack: process.env.NODE_ENV === "production" ? undefined : err?.stack,
     });
   });
