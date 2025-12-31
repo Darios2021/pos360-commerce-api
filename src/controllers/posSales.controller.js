@@ -275,18 +275,26 @@ async function listSales(req, res, next) {
     else if (from) where.sold_at = { [Op.gte]: from };
     else if (to) where.sold_at = { [Op.lte]: to };
 
-    if (q) {
-      const qNum = toFloat(q, NaN);
-      where[Op.or] = [
-        { customer_name: { [Op.like]: `%${q}%` } },
-        { sale_number: { [Op.like]: `%${q}%` } },
-      ];
+if (q) {
+  const qNum = toFloat(q, NaN);
+  where[Op.or] = [
+    { customer_name: { [Op.like]: `%${q}%` } },
+    { sale_number: { [Op.like]: `%${q}%` } },
+    { customer_phone: { [Op.like]: `%${q}%` } },
+    { customer_doc: { [Op.like]: `%${q}%` } },
+  ];
 
-      if (Number.isFinite(qNum)) {
-        where[Op.or].push({ id: toInt(qNum, 0) });
-        where[Op.or].push({ total: qNum });
-      }
-    }
+  if (Number.isFinite(qNum)) {
+    where[Op.or].push({ id: toInt(qNum, 0) });
+    where[Op.or].push({ total: qNum });
+  }
+}
+
+
+
+
+
+
 
     const { count, rows } = await Sale.findAndCountAll({
       where,

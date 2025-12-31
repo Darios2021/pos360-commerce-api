@@ -523,6 +523,11 @@ async function listProductsForPos(req, res) {
  * ✅ FIX: guarda customer_phone + customer_doc
  * ✅ FIX: soporta body.extra.customer (frontend nuevo)
  */
+
+/**
+ * ✅ POS CREATE SALE (admin no vende)
+ * ✅ FIX: guarda customer_phone/customer_doc (soporta body.customer_* y body.extra.customer)
+ */
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -542,48 +547,45 @@ async function createSale(req, res) {
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
+    // ======================================================
+    // ✅ Cliente: soportar dos formatos
+    // 1) body.customer_name / customer_doc / customer_phone (legacy)
+    // 2) body.extra.customer = { first_name,last_name,phone,doc,dni,cuit,name }
+    // ======================================================
+    const extra = body.extra && typeof body.extra === "object" ? body.extra : {};
+    const c = extra.customer && typeof extra.customer === "object" ? extra.customer : (body.customer || {});
+
+    const first = String(c.first_name || "").trim();
+    const last = String(c.last_name || "").trim();
+    const fullName = String(`${first} ${last}`.trim());
+
+    const customer_name =
+      String(body.customer_name || "").trim() ||
+      fullName ||
+      String(c.name || "").trim() ||
+      "Consumidor Final";
+
+    const customer_phone =
+      String(body.customer_phone || "").trim() ||
+      String(c.phone || "").trim() ||
+      String(c.whatsapp || "").trim() ||
+      null;
+
+    const customer_doc =
+      String(body.customer_doc || "").trim() ||
+      String(c.doc || "").trim() ||
+      String(c.dni || "").trim() ||
+      String(c.cuit || "").trim() ||
+      null;
+
+    const note = body.note || null;
+
     if (!req.user?.id) {
       logPos(req, "warn", "createSale blocked: unauthorized");
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No autenticado" });
     }
 
     const userId = toInt(req.user.id, 0);
-
-    // ✅ Cliente: soporta body.customer_* y body.extra.customer
-    const extra = body.extra || {};
-    const c = extra.customer || body.customer || {};
-
-    const cFirst = String(c.first_name || c.firstName || "").trim();
-    const cLast = String(c.last_name || c.lastName || "").trim();
-    const cNameDirect = String(c.name || c.customer_name || body.customer_name || "").trim();
-
-    const customer_name =
-      [cFirst, cLast].filter(Boolean).join(" ").trim() ||
-      cNameDirect ||
-      "Consumidor Final";
-
-    const customer_phone =
-      String(
-        c.whatsapp ||
-          c.phone ||
-          c.customer_phone ||
-          body.customer_phone ||
-          body.customerPhone ||
-          ""
-      ).trim() || null;
-
-    const customer_doc =
-      String(
-        c.doc ||
-          c.dni ||
-          c.cuit ||
-          c.customer_doc ||
-          body.customer_doc ||
-          body.customerDoc ||
-          ""
-      ).trim() || null;
-
-    const note = body.note || extra.note || null;
 
     const userBranchId = toInt(req.user.branch_id, 0);
     const { warehouseId: ctxWarehouseId } = resolvePosContext(req);
@@ -669,7 +671,7 @@ async function createSale(req, res) {
         status: "PAID",
         sale_number: null,
 
-        // ✅ cliente (se guarda en columns existentes)
+        // ✅ GUARDA CLIENTE
         customer_name,
         customer_phone,
         customer_doc,
@@ -724,7 +726,9 @@ async function createSale(req, res) {
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
+          new Error(
+            `Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`
+          ),
           { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
         );
       }
@@ -819,6 +823,12 @@ async function createSale(req, res) {
         branch_id: sale.branch_id,
         user_id: sale.user_id,
         warehouse_id: resolvedWarehouseId,
+
+        // ✅ DEVOLVEMOS CLIENTE (para front)
+        customer_name: sale.customer_name,
+        customer_phone: sale.customer_phone,
+        customer_doc: sale.customer_doc,
+
         subtotal: sale.subtotal,
         total: sale.total,
         paid_total: sale.paid_total,
@@ -837,6 +847,9 @@ async function createSale(req, res) {
     return res.status(status).json({ ok: false, code, message: e.message });
   }
 }
+
+
+
 
 module.exports = {
   getContext,
