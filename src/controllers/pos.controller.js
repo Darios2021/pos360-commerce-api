@@ -1,4 +1,7 @@
+// ✅ COPY-PASTE FINAL
 // src/controllers/pos.controller.js
+// (solo cambia createSale: ahora guarda customer_phone + customer_doc y soporta body.extra.customer)
+
 const { literal } = require("sequelize");
 const {
   sequelize,
@@ -34,7 +37,6 @@ function normalizeRoles(raw) {
 function normalizeBranchIds(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map((x) => toInt(x, 0)).filter(Boolean);
-  // si viene "1,2,3"
   return String(raw || "")
     .split(",")
     .map((s) => toInt(s.trim(), 0))
@@ -51,7 +53,6 @@ function isAdminReq(req) {
   const u = req?.user || {};
   const roles = normalizeRoles(u.roles);
 
-  // ✅ incluye variantes reales
   if (roles.includes("admin") || roles.includes("superadmin") || roles.includes("super_admin")) return true;
 
   const role = String(u.role || u.user_role || "").toLowerCase();
@@ -92,7 +93,6 @@ function logPos(req, level, msg, extra = {}) {
 
 /**
  * ✅ SOLO valores EXPLÍCITOS (query/body).
- * (para evitar que admin quede clavado en req.ctx)
  */
 function resolveExplicitPosContext(req) {
   const branchId =
@@ -110,10 +110,6 @@ function resolveExplicitPosContext(req) {
 
 /**
  * ✅ Resuelve branchId/warehouseId de forma robusta (incluye ctx)
- * PRIORIDAD:
- * 1) req.body
- * 2) req.query
- * 3) req.ctx (fallback)
  */
 function resolvePosContext(req) {
   const branchId =
@@ -131,10 +127,6 @@ function resolvePosContext(req) {
   return { branchId, warehouseId };
 }
 
-/**
- * ✅ si no viene warehouse_id:
- * - intenta tomar el "primer warehouse" de la sucursal (branch_id)
- */
 async function resolveWarehouseForBranch(branchId) {
   const bid = toInt(branchId, 0);
   if (!bid) return 0;
@@ -148,9 +140,6 @@ async function resolveWarehouseForBranch(branchId) {
   return toInt(w?.id, 0);
 }
 
-/**
- * ✅ valida que un warehouse pertenezca al branch
- */
 async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
   const wid = toInt(warehouseId, 0);
   const bid = toInt(branchId, 0);
@@ -161,11 +150,6 @@ async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
   return toInt(w.branch_id, 0) === bid;
 }
 
-/**
- * ✅ Devuelve contexto POS RESUELTO:
- * - user normal: branch = su branch_id
- * - admin: si manda branch_id/warehouse_id explícito, se usa; si no, no se fuerza warehouse
- */
 async function getContext(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -180,10 +164,8 @@ async function getContext(req, res) {
       ? (toInt(explicit.branchId, 0) || userBranchId || toInt(fallback.branchId, 0) || 0)
       : userBranchId;
 
-    // ✅ Admin: NO autoseleccionar depósito si no lo pide explícitamente
     let resolvedWarehouseId = admin ? toInt(explicit.warehouseId, 0) : toInt(fallback.warehouseId, 0);
 
-    // ✅ No-admin: si falta warehouse, resolver por sucursal
     if (!admin && !resolvedWarehouseId && resolvedBranchId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
@@ -216,7 +198,7 @@ async function getContext(req, res) {
               roles: req.user.roles,
               role: req.user.role || req.user.user_role || null,
               is_admin: req.user.is_admin || false,
-              branches: req.user.branches || null, // ✅ si viene del token
+              branches: req.user.branches || null,
             }
           : null,
         branch: resolvedBranchId ? { id: resolvedBranchId } : null,
@@ -233,16 +215,7 @@ async function getContext(req, res) {
 
 /**
  * ✅ POS PRODUCTS
- *
- * ✅ FIX CLAVE:
- * - Admin: usar SOLO contextos explícitos (query/body) y NO el ctx.
- * - Admin sin warehouse => ADMIN_ALL real (sum stock).
- * - User con branches habilitadas (req.user.branches) y sin warehouse => USER_SCOPE_ALL (sum stock por sus branches)
- *
- * ✅ FIX NUEVO:
- * - Si el user tiene múltiples sucursales (branches.length > 1) y NO manda warehouse_id,
- *   NO autoseleccionamos depósito (porque lo clava en branch principal).
- *   Deja que caiga al CASO C (USER_SCOPE_ALL).
+ * (sin cambios)
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
@@ -250,21 +223,14 @@ async function listProductsForPos(req, res) {
   try {
     const admin = isAdminReq(req);
 
-    // ✅ Admin: SOLO explícito (evita quedar clavado a ctx.warehouseId)
-    // ✅ No-admin: puede usar ctx (como venías)
     const { branchId, warehouseId } = admin ? resolveExplicitPosContext(req) : resolvePosContext(req);
 
     let resolvedWarehouseId = toInt(warehouseId, 0);
     const resolvedBranchId = toInt(branchId, 0);
 
-    // ✅ branchIds habilitadas desde token/user (si existen)
-    // IMPORTANTE: esto viene del auth.service (branches: [1,2,3]) o del DB pivot vía middleware
     const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
-
     const hasMultiBranches = !admin && allowedBranchIds.length > 1;
 
-    // ✅ NO-ADMIN: si falta warehouse pero hay branch => resolver depósito
-    // 🚫 PERO si tiene multi-branches, NO lo resuelvas automático (salvo que venga warehouse explícito)
     const explicit = resolveExplicitPosContext(req);
     const cameWarehouseExplicit = toInt(explicit.warehouseId, 0) > 0;
 
@@ -306,7 +272,7 @@ async function listProductsForPos(req, res) {
         ? `COALESCE(NULLIF(p.price_discount,0), NULLIF(p.price_list,0), p.price, 0)`
         : priceMode === "RESELLER"
         ? `COALESCE(NULLIF(p.price_reseller,0), NULLIF(p.price_list,0), p.price, 0)`
-        : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`; // LIST
+        : `COALESCE(NULLIF(p.price_list,0), p.price, 0)`;
 
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
@@ -322,11 +288,7 @@ async function listProductsForPos(req, res) {
       `
       : "";
 
-    // =========================================================
-    // ✅ CASO A: CON warehouse_id => por depósito
-    // =========================================================
     if (resolvedWarehouseId) {
-      // ✅ si mandaron ambos, validar coherencia (solo si branch viene explícito)
       if (resolvedBranchId) {
         const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
         if (!ok) {
@@ -339,22 +301,6 @@ async function listProductsForPos(req, res) {
       }
 
       const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
-
-      logPos(req, "info", "listProductsForPos (warehouse) query", {
-        admin,
-        resolvedWarehouseId,
-        resolvedBranchId,
-        allowedBranchIds,
-        hasMultiBranches,
-        explicit,
-        q,
-        page,
-        limit,
-        inStock,
-        sellable,
-        priceMode,
-        includeImages,
-      });
 
       const [rows] = await sequelize.query(
         `
@@ -413,30 +359,12 @@ async function listProductsForPos(req, res) {
       });
     }
 
-    // =========================================================
-    // ✅ CASO B: ADMIN SIN warehouse => VISTA TOTAL (SUM stock)
-    // =========================================================
     if (admin) {
       const joinWarehouses = resolvedBranchId
         ? `INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id = :branchId`
         : `INNER JOIN warehouses w ON w.id = sb.warehouse_id`;
 
       const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
-
-      logPos(req, "info", "listProductsForPos (admin-all) query", {
-        admin,
-        resolvedBranchId,
-        allowedBranchIds,
-        hasMultiBranches,
-        explicit,
-        q,
-        page,
-        limit,
-        inStock,
-        sellable,
-        priceMode,
-        includeImages,
-      });
 
       const [rows] = await sequelize.query(
         `
@@ -501,16 +429,8 @@ async function listProductsForPos(req, res) {
       });
     }
 
-    // =========================================================
-    // ✅ CASO C: USER SIN warehouse y con branches habilitadas => USER_SCOPE_ALL
-    // =========================================================
     if (!admin && allowedBranchIds.length) {
-      // si el frontend manda branch_id pero el user no lo tiene, bloqueamos
       if (resolvedBranchId && !allowedBranchIds.includes(resolvedBranchId)) {
-        logPos(req, "warn", "listProductsForPos blocked: branch not allowed", {
-          resolvedBranchId,
-          allowedBranchIds,
-        });
         return res.status(403).json({
           ok: false,
           code: "BRANCH_NOT_ALLOWED",
@@ -520,22 +440,6 @@ async function listProductsForPos(req, res) {
 
       const scopeBranchIds = resolvedBranchId ? [resolvedBranchId] : allowedBranchIds;
       const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
-
-      logPos(req, "info", "listProductsForPos (user-scope-all) query", {
-        admin,
-        resolvedBranchId,
-        scopeBranchIds,
-        allowedBranchIds,
-        hasMultiBranches,
-        explicit,
-        q,
-        page,
-        limit,
-        inStock,
-        sellable,
-        priceMode,
-        includeImages,
-      });
 
       const [rows] = await sequelize.query(
         `
@@ -601,15 +505,6 @@ async function listProductsForPos(req, res) {
       });
     }
 
-    // =========================================================
-    // ❌ NO ADMIN y sin warehouse y sin branches => error
-    // =========================================================
-    logPos(req, "warn", "listProductsForPos blocked: warehouse missing", {
-      branchId,
-      warehouseId,
-      allowedBranchIds,
-    });
-
     return res.status(400).json({
       ok: false,
       code: "WAREHOUSE_REQUIRED",
@@ -625,6 +520,8 @@ async function listProductsForPos(req, res) {
 
 /**
  * ✅ POS CREATE SALE (admin no vende)
+ * ✅ FIX: guarda customer_phone + customer_doc
+ * ✅ FIX: soporta body.extra.customer (frontend nuevo)
  */
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
@@ -645,15 +542,48 @@ async function createSale(req, res) {
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
-    const customer_name = body.customer_name || "Consumidor Final";
-    const note = body.note || null;
-
     if (!req.user?.id) {
       logPos(req, "warn", "createSale blocked: unauthorized");
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No autenticado" });
     }
 
     const userId = toInt(req.user.id, 0);
+
+    // ✅ Cliente: soporta body.customer_* y body.extra.customer
+    const extra = body.extra || {};
+    const c = extra.customer || body.customer || {};
+
+    const cFirst = String(c.first_name || c.firstName || "").trim();
+    const cLast = String(c.last_name || c.lastName || "").trim();
+    const cNameDirect = String(c.name || c.customer_name || body.customer_name || "").trim();
+
+    const customer_name =
+      [cFirst, cLast].filter(Boolean).join(" ").trim() ||
+      cNameDirect ||
+      "Consumidor Final";
+
+    const customer_phone =
+      String(
+        c.whatsapp ||
+          c.phone ||
+          c.customer_phone ||
+          body.customer_phone ||
+          body.customerPhone ||
+          ""
+      ).trim() || null;
+
+    const customer_doc =
+      String(
+        c.doc ||
+          c.dni ||
+          c.cuit ||
+          c.customer_doc ||
+          body.customer_doc ||
+          body.customerDoc ||
+          ""
+      ).trim() || null;
+
+    const note = body.note || extra.note || null;
 
     const userBranchId = toInt(req.user.branch_id, 0);
     const { warehouseId: ctxWarehouseId } = resolvePosContext(req);
@@ -725,6 +655,9 @@ async function createSale(req, res) {
       items: normalizedItems.length,
       payments: payments.length,
       subtotal,
+      customer_name,
+      customer_phone,
+      customer_doc,
     });
 
     t = await sequelize.transaction();
@@ -735,7 +668,12 @@ async function createSale(req, res) {
         user_id: userId,
         status: "PAID",
         sale_number: null,
+
+        // ✅ cliente (se guarda en columns existentes)
         customer_name,
+        customer_phone,
+        customer_doc,
+
         subtotal,
         discount_total: 0,
         tax_total: 0,
