@@ -3,8 +3,10 @@
 // - Mantiene tu estructura: module.exports = { createApp }
 // - CORS robusto + X-Branch-Id
 // - Request logger
+// - Root
+// - ✅ /api/v1/public (ecommerce)
 // - 404
-// - ✅ Error handler con sqlMessage real (db) para matar el 500 ciego
+// - ✅ Error handler con sqlMessage real (db)
 
 const express = require("express");
 const cors = require("cors");
@@ -98,6 +100,7 @@ function createApp() {
     throw new Error("INVALID_V1_ROUTES_EXPORT");
   }
 
+  // ✅ Todo el API va por /api/v1
   app.use("/api/v1", v1Routes);
 
   // =====================

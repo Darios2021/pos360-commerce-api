@@ -1,12 +1,20 @@
 // src/routes/v1.routes.js
+// ✅ COPY-PASTE FINAL COMPLETO
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
 
+// =========================
 // Public
+// =========================
 const healthRoutes = require("./health.routes");
 const authRoutes = require("./auth.routes");
 
+// 🛒 Ecommerce Public
+const publicEcomRoutes = require("./public.routes");
+
+// =========================
 // Protected
+// =========================
 const productsRoutes = require("./products.routes");
 const categoriesRoutes = require("./categories.routes");
 const subcategoriesRoutes = require("./subcategories.routes");
@@ -44,6 +52,9 @@ function safeUse(path, ...mws) {
 safeUse("/health", healthRoutes);
 safeUse("/auth", authRoutes);
 
+// 🛒 Ecommerce público (SIN AUTH)
+safeUse("/public", publicEcomRoutes);
+
 // =========================
 // Protected
 // =========================
@@ -59,7 +70,7 @@ safeUse("/pos", requireAuth, posRoutes);
 // ✅ Perfil
 safeUse("/me", requireAuth, meRoutes);
 
-// ✅ Admin Users (solo agrega ruta, no toca lo demás)
+// ✅ Admin Users
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
 
 module.exports = router;
