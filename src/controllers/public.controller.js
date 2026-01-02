@@ -92,28 +92,31 @@ module.exports = {
   // =========================
   // Catálogo
   // =========================
-  async listCatalog(req, res) {
-    try {
-      const branch_id = toInt(req.query.branch_id);
-      if (!branch_id) {
-        return res.status(400).json({ ok: false, code: "VALIDATION_ERROR", message: "branch_id es obligatorio" });
-      }
-
-      const result = await PublicService.listCatalog({
-        branch_id,
-        search: toStr(req.query.search),
-        category_id: toInt(req.query.category_id) || null,
-        subcategory_id: toInt(req.query.subcategory_id) || null,
-        in_stock: toBoolLike(req.query.in_stock, true),
-        page: Math.max(1, toInt(req.query.page, 1)),
-        limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
-      });
-
-      res.json({ ok: true, ...result });
-    } catch (err) {
-      res.status(500).json({ ok: false, code: "PUBLIC_CATALOG_ERROR", message: err?.message });
+async listCatalog(req, res) {
+  try {
+    const branch_id = toInt(req.query.branch_id);
+    if (!branch_id) {
+      return res.status(400).json({ ok: false, code: "VALIDATION_ERROR", message: "branch_id es obligatorio" });
     }
-  },
+
+    const include_children = toBoolLike(req.query.include_children, false);
+
+    const result = await PublicService.listCatalog({
+      branch_id,
+      search: toStr(req.query.search),
+      category_id: toInt(req.query.category_id) || null,       // rubro padre o subrubro
+      subcategory_id: toInt(req.query.subcategory_id) || null, // (lo dejamos por compatibilidad, pero NO lo usamos acá)
+      include_children,
+      in_stock: toBoolLike(req.query.in_stock, true),
+      page: Math.max(1, toInt(req.query.page, 1)),
+      limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
+    });
+
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, code: "PUBLIC_CATALOG_ERROR", message: err?.message });
+  }
+},
 
   // =========================
   // Producto por ID
