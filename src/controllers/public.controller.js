@@ -2,6 +2,7 @@
 // ✅ COPY-PASTE FINAL
 
 const PublicService = require("../services/public.service");
+const { Category } = require("../models"); // ✅ NUEVO
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -24,6 +25,61 @@ function toBoolLike(v, d = false) {
 }
 
 module.exports = {
+  // =========================
+  // ✅ RUBROS (categories parent_id NULL)
+  // GET /api/v1/public/categories
+  // =========================
+  async listCategories(req, res) {
+    try {
+      const items = await Category.findAll({
+        where: { is_active: 1, parent_id: null },
+        order: [["name", "ASC"]],
+        attributes: ["id", "name"],
+      });
+      return res.json({ ok: true, items });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_CATEGORIES_ERROR",
+        message: err?.message || "Error listando categorías",
+      });
+    }
+  },
+
+  // =========================
+  // ✅ SUBRUBROS (categories parent_id = category_id)
+  // GET /api/v1/public/subcategories?category_id=1
+  // =========================
+  async listSubcategories(req, res) {
+    try {
+      const category_id = toInt(req.query.category_id);
+      if (!category_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "category_id es obligatorio",
+        });
+      }
+
+      const items = await Category.findAll({
+        where: { is_active: 1, parent_id: category_id },
+        order: [["name", "ASC"]],
+        attributes: ["id", "name", "parent_id"],
+      });
+
+      return res.json({ ok: true, items });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_SUBCATEGORIES_ERROR",
+        message: err?.message || "Error listando subcategorías",
+      });
+    }
+  },
+
+  // =========================
+  // Sucursales
+  // =========================
   async listBranches(req, res) {
     try {
       const items = await PublicService.listBranches();
@@ -33,6 +89,9 @@ module.exports = {
     }
   },
 
+  // =========================
+  // Catálogo
+  // =========================
   async listCatalog(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
@@ -56,6 +115,9 @@ module.exports = {
     }
   },
 
+  // =========================
+  // Producto por ID
+  // =========================
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
@@ -74,7 +136,9 @@ module.exports = {
     }
   },
 
-  // ✅ Crear pedido Ecommerce (sin pago)
+  // =========================
+  // Crear pedido Ecommerce (sin pago)
+  // =========================
   async createOrder(req, res) {
     try {
       const payload = req.body || {};
