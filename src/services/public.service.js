@@ -27,9 +27,9 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
   const where = ["branch_id = :branch_id"];
   const repl = { branch_id, limit, offset: (page - 1) * limit };
 
-  // ✅ Categorías estilo inventario:
-  // - Si include_children=1 y category_id es padre -> trae padre + hijos (subrubros)
-  // - Si include_children=0 -> filtra exacto por category_id (subrubro)
+  // ✅ inventario-style:
+  // include_children=1 => category_id IN (padre + hijos)
+  // include_children=0 => category_id = exacto
   if (category_id) {
     if (include_children) {
       where.push(`
@@ -75,6 +75,8 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
   const total = Number(countRow?.total || 0);
   return { items, page, limit, total, pages: total ? Math.ceil(total / limit) : 0 };
 },
+
+
 
 
 
