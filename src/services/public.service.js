@@ -1,6 +1,5 @@
 // src/services/public.service.js
 // ✅ COPY-PASTE FINAL
-// FIX ML: category_id (rubro padre) incluye hijos via categories.parent_id
 
 const { sequelize } = require("../models");
 
@@ -14,6 +13,36 @@ function pad6(n) {
 }
 
 module.exports = {
+  // =========================
+  // ✅ Taxonomía (MISMA lógica que inventario)
+  // categories = rubros y subrubros (parent_id)
+  // =========================
+  async listCategories() {
+    const [rows] = await sequelize.query(`
+      SELECT id, name
+      FROM categories
+      WHERE is_active = 1 AND parent_id IS NULL
+      ORDER BY name ASC
+    `);
+    return rows || [];
+  },
+
+  async listSubcategories({ category_id }) {
+    const [rows] = await sequelize.query(
+      `
+      SELECT id, name, parent_id
+      FROM categories
+      WHERE is_active = 1 AND parent_id = :category_id
+      ORDER BY name ASC
+      `,
+      { replacements: { category_id } }
+    );
+    return rows || [];
+  },
+
+  // =========================
+  // Branches
+  // =========================
   async listBranches() {
     const [rows] = await sequelize.query(`
       SELECT id, name, code, address, city
@@ -23,66 +52,62 @@ module.exports = {
     `);
     return rows || [];
   },
-async listCatalog({ branch_id, search, category_id, include_children, in_stock, page, limit }) {
-  const where = ["branch_id = :branch_id"];
-  const repl = { branch_id, limit, offset: (page - 1) * limit };
 
-  // ✅ inventario-style:
-  // include_children=1 => category_id IN (padre + hijos)
-  // include_children=0 => category_id = exacto
-  if (category_id) {
-    if (include_children) {
-      where.push(`
-        category_id IN (
-          SELECT id FROM categories
-          WHERE id = :cat_id OR parent_id = :cat_id
-        )
-      `);
-      repl.cat_id = category_id;
-    } else {
-      where.push("category_id = :category_id");
-      repl.category_id = category_id;
+  // =========================
+  // ✅ Catalog (padre + hijos si include_children=1)
+  // =========================
+  async listCatalog({ branch_id, search, category_id, include_children, in_stock, page, limit }) {
+    const where = ["branch_id = :branch_id"];
+    const repl = { branch_id, limit, offset: (page - 1) * limit };
+
+    if (category_id) {
+      if (include_children) {
+        // ✅ trae productos cuyo category_id sea el padre o cualquiera de sus hijos
+        where.push(`
+          category_id IN (
+            SELECT id
+            FROM categories
+            WHERE id = :cat_id OR parent_id = :cat_id
+          )
+        `);
+        repl.cat_id = category_id;
+      } else {
+        // exacto (subrubro)
+        where.push("category_id = :category_id");
+        repl.category_id = category_id;
+      }
     }
-  }
 
-  if (search) {
-    repl.q = `%${escLike(search)}%`;
-    where.push(`
-      (name LIKE :q ESCAPE '\\'
-      OR brand LIKE :q ESCAPE '\\'
-      OR model LIKE :q ESCAPE '\\'
-      OR sku LIKE :q ESCAPE '\\'
-      OR barcode LIKE :q ESCAPE '\\')
-    `);
-  }
+    if (search) {
+      repl.q = `%${escLike(search)}%`;
+      where.push(`
+        (name LIKE :q ESCAPE '\\'
+        OR brand LIKE :q ESCAPE '\\'
+        OR model LIKE :q ESCAPE '\\'
+        OR sku LIKE :q ESCAPE '\\'
+        OR barcode LIKE :q ESCAPE '\\')
+      `);
+    }
 
-  if (in_stock) where.push("(track_stock = 0 OR stock_qty > 0)");
+    if (in_stock) where.push("(track_stock = 0 OR stock_qty > 0)");
 
-  const whereSql = `WHERE ${where.join(" AND ")}`;
+    const whereSql = `WHERE ${where.join(" AND ")}`;
 
-  const [[countRow]] = await sequelize.query(
-    `SELECT COUNT(*) AS total FROM v_public_catalog ${whereSql}`,
-    { replacements: repl }
-  );
+    const [[countRow]] = await sequelize.query(
+      `SELECT COUNT(*) AS total FROM v_public_catalog ${whereSql}`,
+      { replacements: repl }
+    );
 
-  const [items] = await sequelize.query(
-    `SELECT * FROM v_public_catalog ${whereSql}
-     ORDER BY product_id DESC
-     LIMIT :limit OFFSET :offset`,
-    { replacements: repl }
-  );
+    const [items] = await sequelize.query(
+      `SELECT * FROM v_public_catalog ${whereSql}
+       ORDER BY product_id DESC
+       LIMIT :limit OFFSET :offset`,
+      { replacements: repl }
+    );
 
-  const total = Number(countRow?.total || 0);
-  return { items, page, limit, total, pages: total ? Math.ceil(total / limit) : 0 };
-},
-
-
-
-
-
-
-
-
+    const total = Number(countRow?.total || 0);
+    return { items, page, limit, total, pages: total ? Math.ceil(total / limit) : 0 };
+  },
 
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
@@ -94,10 +119,11 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
     return rows?.[0] || null;
   },
 
-  // ✅ Crear pedido Ecommerce (sin pago)
+  // =========================
+  // Crear pedido Ecommerce (sin pago)
+  // =========================
   async createOrder({ branch_id, items, customer, fulfillment, notes }) {
     return await sequelize.transaction(async (t) => {
-      // 1) Validar productos vs catálogo (incluye precios + track_stock + stock_qty)
       const productIds = [...new Set(items.map((i) => i.product_id))];
 
       const [rows] = await sequelize.query(
@@ -112,19 +138,15 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
 
       const map = new Map(rows.map((r) => [Number(r.product_id), r]));
 
-      // 2) Armar líneas y chequear stock
       const lines = [];
       let subtotal = 0;
 
       for (const it of items) {
         const p = map.get(Number(it.product_id));
-        if (!p) {
-          throw new Error(`Producto inválido o no pertenece a la sucursal: ${it.product_id}`);
-        }
+        if (!p) throw new Error(`Producto inválido o no pertenece a la sucursal: ${it.product_id}`);
 
         const qty = Number(it.qty);
 
-        // precio final: si hay discount > 0 usarlo, sino price_list, sino price
         const unit_price =
           Number(p.price_discount) > 0
             ? Number(p.price_discount)
@@ -134,20 +156,13 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
 
         if (Number(p.track_stock) === 1) {
           const available = Number(p.stock_qty);
-          if (qty > available) {
-            throw new Error(`Sin stock suficiente para "${p.name}". Disponible: ${available}`);
-          }
+          if (qty > available) throw new Error(`Sin stock suficiente para "${p.name}". Disponible: ${available}`);
         }
 
         const line_total = Number((unit_price * qty).toFixed(2));
         subtotal += line_total;
 
-        lines.push({
-          product_id: Number(it.product_id),
-          qty,
-          unit_price,
-          line_total,
-        });
+        lines.push({ product_id: Number(it.product_id), qty, unit_price, line_total });
       }
 
       subtotal = Number(subtotal.toFixed(2));
@@ -155,7 +170,9 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
       const shipping_total = 0;
       const total = Number((subtotal - discount_total + shipping_total).toFixed(2));
 
-      // 3) Upsert customer (por email si viene)
+      // (Tu lógica de customers/orders/items queda igual)
+      // Nota: requiere tablas ecom_customers/ecom_orders/ecom_order_items
+
       let customer_id = null;
       const email = String(customer?.email || "").trim().toLowerCase();
 
@@ -206,7 +223,6 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
             }
           );
 
-          // recuperar id con SELECT seguro
           const [row2] = await sequelize.query(
             `SELECT id FROM ecom_customers WHERE email = :email LIMIT 1`,
             { replacements: { email }, transaction: t }
@@ -215,7 +231,6 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
         }
       }
 
-      // 4) Insert order con public_code temporal
       await sequelize.query(
         `
         INSERT INTO ecom_orders
@@ -251,23 +266,19 @@ async listCatalog({ branch_id, search, category_id, include_children, in_stock, 
         }
       );
 
-      // Obtener order_id de forma segura
-      const [[orderRow]] = await sequelize.query(
-        `SELECT id FROM ecom_orders ORDER BY id DESC LIMIT 1`,
-        { transaction: t }
-      );
+      const [[orderRow]] = await sequelize.query(`SELECT id FROM ecom_orders ORDER BY id DESC LIMIT 1`, {
+        transaction: t,
+      });
       const order_id = Number(orderRow.id);
 
-      // 5) Generar public_code (EC-YYYY-000001)
       const year = new Date().getFullYear();
       const public_code = `EC-${year}-${pad6(order_id)}`;
 
-      await sequelize.query(
-        `UPDATE ecom_orders SET public_code = :public_code WHERE id = :id`,
-        { replacements: { public_code, id: order_id }, transaction: t }
-      );
+      await sequelize.query(`UPDATE ecom_orders SET public_code = :public_code WHERE id = :id`, {
+        replacements: { public_code, id: order_id },
+        transaction: t,
+      });
 
-      // 6) Insert items
       for (const ln of lines) {
         await sequelize.query(
           `

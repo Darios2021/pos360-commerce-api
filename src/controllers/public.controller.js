@@ -2,7 +2,6 @@
 // ✅ COPY-PASTE FINAL
 
 const PublicService = require("../services/public.service");
-const { Category } = require("../models"); // ✅ NUEVO
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -26,16 +25,11 @@ function toBoolLike(v, d = false) {
 
 module.exports = {
   // =========================
-  // ✅ RUBROS (categories parent_id NULL)
-  // GET /api/v1/public/categories
+  // ✅ Taxonomía (usa categories + parent_id)
   // =========================
   async listCategories(req, res) {
     try {
-      const items = await Category.findAll({
-        where: { is_active: 1, parent_id: null },
-        order: [["name", "ASC"]],
-        attributes: ["id", "name"],
-      });
+      const items = await PublicService.listCategories(); // padres
       return res.json({ ok: true, items });
     } catch (err) {
       return res.status(500).json({
@@ -46,27 +40,16 @@ module.exports = {
     }
   },
 
-  // =========================
-  // ✅ SUBRUBROS (categories parent_id = category_id)
-  // GET /api/v1/public/subcategories?category_id=1
-  // =========================
   async listSubcategories(req, res) {
     try {
       const category_id = toInt(req.query.category_id);
       if (!category_id) {
-        return res.status(400).json({
-          ok: false,
-          code: "VALIDATION_ERROR",
-          message: "category_id es obligatorio",
-        });
+        return res
+          .status(400)
+          .json({ ok: false, code: "VALIDATION_ERROR", message: "category_id es obligatorio" });
       }
 
-      const items = await Category.findAll({
-        where: { is_active: 1, parent_id: category_id },
-        order: [["name", "ASC"]],
-        attributes: ["id", "name", "parent_id"],
-      });
-
+      const items = await PublicService.listSubcategories({ category_id }); // hijos
       return res.json({ ok: true, items });
     } catch (err) {
       return res.status(500).json({
@@ -78,64 +61,81 @@ module.exports = {
   },
 
   // =========================
-  // Sucursales
+  // Branches
   // =========================
   async listBranches(req, res) {
     try {
       const items = await PublicService.listBranches();
-      res.json({ ok: true, items });
+      return res.json({ ok: true, items });
     } catch (err) {
-      res.status(500).json({ ok: false, code: "PUBLIC_BRANCHES_ERROR", message: err?.message });
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_BRANCHES_ERROR",
+        message: err?.message || "Error listando sucursales",
+      });
     }
   },
 
   // =========================
-  // Catálogo
+  // Catalog
   // =========================
-async listCatalog(req, res) {
-  try {
-    const branch_id = toInt(req.query.branch_id);
-    if (!branch_id) {
-      return res.status(400).json({ ok: false, code: "VALIDATION_ERROR", message: "branch_id es obligatorio" });
+  async listCatalog(req, res) {
+    try {
+      const branch_id = toInt(req.query.branch_id);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "branch_id es obligatorio",
+        });
+      }
+
+      const result = await PublicService.listCatalog({
+        branch_id,
+        search: toStr(req.query.search),
+        // ✅ IMPORTANTE:
+        // category_id = rubro padre o subrubro (hijo)
+        category_id: toInt(req.query.category_id) || null,
+        // ✅ include_children: si category_id es padre, trae hijos también
+        include_children: toBoolLike(req.query.include_children, false),
+        in_stock: toBoolLike(req.query.in_stock, true),
+        page: Math.max(1, toInt(req.query.page, 1)),
+        limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
+      });
+
+      return res.json({ ok: true, ...result });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_CATALOG_ERROR",
+        message: err?.message || "Error listando catálogo",
+      });
     }
+  },
 
-    const include_children = toBoolLike(req.query.include_children, false);
-
-    const result = await PublicService.listCatalog({
-      branch_id,
-      search: toStr(req.query.search),
-      category_id: toInt(req.query.category_id) || null,       // rubro padre o subrubro
-      subcategory_id: toInt(req.query.subcategory_id) || null, // (lo dejamos por compatibilidad, pero NO lo usamos acá)
-      include_children,
-      in_stock: toBoolLike(req.query.in_stock, true),
-      page: Math.max(1, toInt(req.query.page, 1)),
-      limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
-    });
-
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    res.status(500).json({ ok: false, code: "PUBLIC_CATALOG_ERROR", message: err?.message });
-  }
-},
-
-  // =========================
-  // Producto por ID
-  // =========================
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
       const product_id = toInt(req.params.id);
 
       if (!branch_id || !product_id) {
-        return res.status(400).json({ ok: false, code: "VALIDATION_ERROR", message: "branch_id e id son obligatorios" });
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "branch_id e id son obligatorios",
+        });
       }
 
       const item = await PublicService.getProductById({ branch_id, product_id });
       if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-      res.json({ ok: true, item });
+      return res.json({ ok: true, item });
     } catch (err) {
-      res.status(500).json({ ok: false, code: "PUBLIC_PRODUCT_ERROR", message: err?.message });
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_PRODUCT_ERROR",
+        message: err?.message || "Error obteniendo producto",
+      });
     }
   },
 
@@ -159,7 +159,6 @@ async listCatalog(req, res) {
       const customer = payload.customer || {};
       const fulfillment = payload.fulfillment || {};
 
-      // Normalizar items: {product_id, qty}
       const normItems = items
         .map((it) => ({
           product_id: toInt(it.product_id),
@@ -182,7 +181,7 @@ async listCatalog(req, res) {
           doc_number: toStr(customer.doc_number),
         },
         fulfillment: {
-          type: toStr(fulfillment.type) || "pickup", // pickup|delivery
+          type: toStr(fulfillment.type) || "pickup",
           ship_name: toStr(fulfillment.ship_name),
           ship_phone: toStr(fulfillment.ship_phone),
           ship_address1: toStr(fulfillment.ship_address1),
