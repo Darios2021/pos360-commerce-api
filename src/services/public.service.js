@@ -1,5 +1,6 @@
 // src/services/public.service.js
 // ✅ COPY-PASTE FINAL
+// FIX ML: category_id (rubro padre) incluye hijos via categories.parent_id
 
 const { sequelize } = require("../models");
 
@@ -24,40 +25,58 @@ module.exports = {
   },
 
   async listCatalog({ branch_id, search, category_id, subcategory_id, in_stock, page, limit }) {
-    const where = ["branch_id = :branch_id"];
+    // ✅ v_public_catalog lo vamos a referenciar como "v" para poder join
+    const where = ["v.branch_id = :branch_id"];
     const repl = { branch_id, limit, offset: (page - 1) * limit };
 
-    if (category_id) {
-      where.push("category_id = :category_id");
+    // ✅ SUBRUBRO (en tu data real es category HIJA)
+    // Si el front manda subcategory_id=25 (PARLANTES), debe filtrar v.category_id=25
+    if (subcategory_id) {
+      where.push("v.category_id = :subcategory_id");
+      repl.subcategory_id = subcategory_id;
+    } else if (category_id) {
+      // ✅ RUBRO (padre): incluye productos directos al padre + productos en categorías hijas
+      // Ej AUDIO=2 => v.category_id=2 OR categories.parent_id=2
+      where.push("(v.category_id = :category_id OR c.parent_id = :category_id)");
       repl.category_id = category_id;
     }
-    if (subcategory_id) {
-      where.push("subcategory_id = :subcategory_id");
-      repl.subcategory_id = subcategory_id;
-    }
+
     if (search) {
       repl.q = `%${escLike(search)}%`;
       where.push(`
-        (name LIKE :q ESCAPE '\\'
-        OR brand LIKE :q ESCAPE '\\'
-        OR model LIKE :q ESCAPE '\\'
-        OR sku LIKE :q ESCAPE '\\'
-        OR barcode LIKE :q ESCAPE '\\')
+        (v.name LIKE :q ESCAPE '\\'
+        OR v.brand LIKE :q ESCAPE '\\'
+        OR v.model LIKE :q ESCAPE '\\'
+        OR v.sku LIKE :q ESCAPE '\\'
+        OR v.barcode LIKE :q ESCAPE '\\')
       `);
     }
-    if (in_stock) where.push("(track_stock = 0 OR stock_qty > 0)");
+
+    if (in_stock) where.push("(v.track_stock = 0 OR v.stock_qty > 0)");
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
 
+    // ✅ COUNT con JOIN a categories (para parent_id)
     const [[countRow]] = await sequelize.query(
-      `SELECT COUNT(*) AS total FROM v_public_catalog ${whereSql}`,
+      `
+      SELECT COUNT(*) AS total
+      FROM v_public_catalog v
+      LEFT JOIN categories c ON c.id = v.category_id
+      ${whereSql}
+      `,
       { replacements: repl }
     );
 
+    // ✅ ITEMS con JOIN a categories (para mismo filtro)
     const [items] = await sequelize.query(
-      `SELECT * FROM v_public_catalog ${whereSql}
-       ORDER BY product_id DESC
-       LIMIT :limit OFFSET :offset`,
+      `
+      SELECT v.*
+      FROM v_public_catalog v
+      LEFT JOIN categories c ON c.id = v.category_id
+      ${whereSql}
+      ORDER BY v.product_id DESC
+      LIMIT :limit OFFSET :offset
+      `,
       { replacements: repl }
     );
 
@@ -170,7 +189,7 @@ module.exports = {
             }
           );
         } else {
-          const [ins] = await sequelize.query(
+          await sequelize.query(
             `
             INSERT INTO ecom_customers (email, first_name, last_name, phone, doc_number, created_at, updated_at)
             VALUES (:email, :first_name, :last_name, :phone, :doc_number, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -187,8 +206,7 @@ module.exports = {
             }
           );
 
-          // Sequelize raw insert retorna metadata distinta según driver;
-          // recuperamos id con SELECT seguro
+          // recuperar id con SELECT seguro
           const [row2] = await sequelize.query(
             `SELECT id FROM ecom_customers WHERE email = :email LIMIT 1`,
             { replacements: { email }, transaction: t }
@@ -197,8 +215,8 @@ module.exports = {
         }
       }
 
-      // 4) Insert order con public_code temporal (después lo definimos con el id)
-      const [meta] = await sequelize.query(
+      // 4) Insert order con public_code temporal
+      await sequelize.query(
         `
         INSERT INTO ecom_orders
           (public_code, branch_id, customer_id, status, currency,
