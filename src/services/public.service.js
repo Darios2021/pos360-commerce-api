@@ -1,8 +1,12 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (FIX definitivo)
+// ✅ COPY-PASTE FINAL (MODELO POS/INVENTARIO)
 // - /public/categories: devuelve TODO (padres + hijos) con parent_id
-// - Chips (subrubros): usa JOIN a products SOLO cuando hay subcategory_id
-// - Search: SIN ESCAPE (evita parse errors 500)
+// - Rubros: parent_id IS NULL
+// - Subrubros: parent_id = :category_id
+// - Catálogo:
+//    * "Todos" (rubro): vc.category_id = padre
+//    * Chip: vc.subcategory_id = hijo (porque tu vista tiene subcategory_id)
+// - Search: robusto (LOWER + CONCAT) -> evita errores por ESCAPE / caracteres raros
 
 const { sequelize } = require("../models");
 
@@ -18,11 +22,11 @@ function toBoolLike(v, d = false) {
 
 module.exports = {
   // =====================
-  // ✅ Taxonomía
+  // ✅ Taxonomía (POS model)
   // =====================
   async listCategories() {
     const [rows] = await sequelize.query(`
-      SELECT id, name, parent_id
+      SELECT id, name, parent_id, is_active
       FROM categories
       WHERE is_active = 1
       ORDER BY
@@ -36,7 +40,7 @@ module.exports = {
   async listSubcategories({ category_id }) {
     const [rows] = await sequelize.query(
       `
-      SELECT id, name, parent_id
+      SELECT id, name, parent_id, is_active
       FROM categories
       WHERE is_active = 1 AND parent_id = :category_id
       ORDER BY name ASC
@@ -60,7 +64,7 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Catalog (chips + search robusto)
+  // ✅ Catalog (v_public_catalog)
   // =====================
   async listCatalog({
     branch_id,
@@ -72,66 +76,62 @@ module.exports = {
     page,
     limit,
   }) {
-    const where = ["vc.branch_id = :branch_id"];
+    // ✅ defensivo: si no viene branch_id, NO rompas
+    const bid = Number(branch_id || 0);
+
+    const where = [];
     const repl = {
-      branch_id,
+      branch_id: bid,
       limit: Number(limit || 24),
       offset: (Math.max(1, Number(page || 1)) - 1) * Number(limit || 24),
     };
 
-    const cid = Number(category_id || 0);       // padre
-    const sid = Number(subcategory_id || 0);    // hijo
+    // Si bid es 0, NO filtramos por sucursal (para que no reviente / no quede vacío)
+    // Si vos SIEMPRE querés sucursal obligatoria, dejá solo el WHERE fijo y listo.
+    if (bid > 0) where.push("vc.branch_id = :branch_id");
+
+    const cid = Number(category_id || 0);        // padre
+    const sid = Number(subcategory_id || 0);     // hijo
     const inc = toBoolLike(include_children, false);
     void inc;
 
-    // ✅ JOIN SOLO cuando hay chip (sid)
-    const joinProducts = sid ? `JOIN products p ON p.id = vc.product_id` : "";
-
-    if (sid) {
-      where.push("p.category_id = :child_id");
-      repl.child_id = sid;
-
-      if (cid) {
-        where.push(`
-          :child_id IN (
-            SELECT id FROM categories
-            WHERE parent_id = :category_id AND is_active = 1
-          )
-        `);
-        repl.category_id = cid;
-      }
-    } else if (cid) {
+    // ✅ "Todos" del rubro (padre)
+    if (cid) {
       where.push("vc.category_id = :category_id");
       repl.category_id = cid;
     }
 
-    // ✅ SEARCH SIN ESCAPE (evita 500 por parse)
-    const q = String(search || "").trim();
-    if (q.length) {
-      repl.q = `%${q}%`;
-      where.push(`
-        (
-          vc.name LIKE :q
-          OR vc.brand LIKE :q
-          OR vc.model LIKE :q
-          OR vc.sku LIKE :q
-          OR vc.barcode LIKE :q
-          OR vc.code LIKE :q
-        )
-      `);
+    // ✅ Chip (hijo) -> tu vista TIENE subcategory_id, usalo directo (sin JOIN)
+    if (sid) {
+      where.push("vc.subcategory_id = :subcategory_id");
+      repl.subcategory_id = sid;
     }
 
-    // ✅ stock (tu vista tiene track_stock y stock_qty, perfecto)
+    // ✅ SEARCH robusto (no ESCAPE)
+    const q = String(search || "").trim().toLowerCase();
+    if (q.length) {
+      repl.q = q;
+
+      where.push(`(
+        LOWER(vc.name) LIKE CONCAT('%', :q, '%')
+        OR LOWER(COALESCE(vc.brand, '')) LIKE CONCAT('%', :q, '%')
+        OR LOWER(COALESCE(vc.model, '')) LIKE CONCAT('%', :q, '%')
+        OR LOWER(COALESCE(vc.sku, '')) LIKE CONCAT('%', :q, '%')
+        OR LOWER(COALESCE(vc.barcode, '')) LIKE CONCAT('%', :q, '%')
+        OR LOWER(COALESCE(vc.code, '')) LIKE CONCAT('%', :q, '%')
+      )`);
+    }
+
+    // ✅ stock (tu vista tiene track_stock y stock_qty)
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    const whereSql = `WHERE ${where.join(" AND ")}`;
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
     const [[countRow]] = await sequelize.query(
       `SELECT COUNT(*) AS total
        FROM v_public_catalog vc
-       ${joinProducts}
        ${whereSql}`,
       { replacements: repl }
     );
@@ -139,7 +139,6 @@ module.exports = {
     const [items] = await sequelize.query(
       `SELECT vc.*
        FROM v_public_catalog vc
-       ${joinProducts}
        ${whereSql}
        ORDER BY vc.product_id DESC
        LIMIT :limit OFFSET :offset`,
@@ -161,9 +160,10 @@ module.exports = {
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
       `SELECT * FROM v_public_catalog
-       WHERE branch_id = :branch_id AND product_id = :product_id
+       WHERE (:branch_id = 0 OR branch_id = :branch_id)
+         AND product_id = :product_id
        LIMIT 1`,
-      { replacements: { branch_id, product_id } }
+      { replacements: { branch_id: Number(branch_id || 0), product_id } }
     );
     return rows?.[0] || null;
   },
