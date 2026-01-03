@@ -77,6 +77,9 @@ async listCategories() {
  // =====================
 // ✅ Catalog (FIX chips con v_public_catalog “aplanado”)
 // =====================
+// =====================
+// ✅ Catalog (FIX chips con v_public_catalog “aplanado”)
+// =====================
 async listCatalog({
   branch_id,
   search,
@@ -97,9 +100,10 @@ async listCatalog({
   const cid = Number(category_id || 0);       // padre
   const sid = Number(subcategory_id || 0);    // hijo
   const inc = toBoolLike(include_children, false);
+  void inc;
 
-  // ✅ JOIN a products para poder filtrar por categoría real (hijo)
-  const joinProducts = `JOIN products p ON p.id = vc.product_id`;
+  // ✅ JOIN SOLO cuando hay chip (sid)
+  const joinProducts = sid ? `JOIN products p ON p.id = vc.product_id` : "";
 
   // ✅ Chip: filtrar por products.category_id (hijo REAL)
   if (sid) {
@@ -117,16 +121,14 @@ async listCatalog({
       repl.category_id = cid;
     }
   } else if (cid) {
-    repl.category_id = cid;
-
-    // ✅ En tu vista vc.category_id es el PADRE, así que “Todos” es vc.category_id = padre
-    // include_children no hace falta acá porque ya viene “aplanado” a padre
-    // (lo dejo igual por compat, pero es redundante)
+    // ✅ “Todos” por rubro (PADRE normalizado en la vista)
     where.push("vc.category_id = :category_id");
+    repl.category_id = cid;
   }
 
-  if (search) {
-    repl.q = `%${escLike(search)}%`;
+  const q = String(search || "").trim();
+  if (q.length) {
+    repl.q = `%${escLike(q)}%`;
     where.push(`
       (vc.name LIKE :q ESCAPE '\\'
       OR vc.brand LIKE :q ESCAPE '\\'
@@ -136,7 +138,11 @@ async listCatalog({
     `);
   }
 
-  if (in_stock) where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+  // ✅ Solo aplicar si verdaderamente viene en_stock = 1/true
+  // (Si tu vista no tiene track_stock/stock_qty, directamente dejalo comentado)
+  if (toBoolLike(in_stock, false)) {
+    where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+  }
 
   const whereSql = `WHERE ${where.join(" AND ")}`;
 
@@ -169,6 +175,7 @@ async listCatalog({
     pages: total ? Math.ceil(total / lim) : 0,
   };
 },
+
 
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
