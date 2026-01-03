@@ -1,9 +1,11 @@
 // src/services/public.service.js
 // ✅ COPY-PASTE FINAL
-// FIX:
-// - "Todos" SIEMPRE debe quedar acotado al rubro (category_id del padre)
-// - subrubro filtra por subcategory_id (y fallback a category_id por compat)
-// - include_children normalizado (por si viene "true"/"1")
+// FIX REAL según tu DB:
+// - Subrubros salen de tabla `subcategories` (NO de categories.parent_id)
+// - "Todos" queda SIEMPRE acotado al rubro (category_id)
+// - include_children incluye productos del rubro por:
+//   category_id = rubro OR subcategory_id IN (subcategories del rubro)
+// - búsqueda + stock ok
 
 const { sequelize } = require("../models");
 
@@ -11,11 +13,14 @@ function escLike(s) {
   return String(s).replace(/[%_]/g, (m) => "\\" + m);
 }
 
-function toBoolLike(v) {
+function toBoolLike(v, d = false) {
+  if (v === undefined || v === null || v === "") return d;
   if (v === true || v === 1) return true;
   if (v === false || v === 0) return false;
-  const s = String(v ?? "").toLowerCase().trim();
-  return ["1", "true", "yes", "si"].includes(s);
+  const s = String(v).toLowerCase().trim();
+  if (["1", "true", "yes", "si"].includes(s)) return true;
+  if (["0", "false", "no"].includes(s)) return false;
+  return d;
 }
 
 module.exports = {
@@ -23,23 +28,22 @@ module.exports = {
   // ✅ Taxonomía
   // =====================
   async listCategories() {
-    // padres (parent_id IS NULL)
     const [rows] = await sequelize.query(`
       SELECT id, name
       FROM categories
-      WHERE is_active = 1 AND parent_id IS NULL
+      WHERE is_active = 1
       ORDER BY name ASC
     `);
     return rows || [];
   },
 
+  // ✅ SUBRUBROS REALES: tabla subcategories, filtrado por category_id
   async listSubcategories({ category_id }) {
-    // hijos de un padre
     const [rows] = await sequelize.query(
       `
-      SELECT id, name, parent_id
-      FROM categories
-      WHERE is_active = 1 AND parent_id = :category_id
+      SELECT id, name, category_id
+      FROM subcategories
+      WHERE is_active = 1 AND category_id = :category_id
       ORDER BY name ASC
       `,
       { replacements: { category_id } }
@@ -61,7 +65,7 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Catalog (con include_children)
+  // ✅ Catalog (con include_children REAL)
   // =====================
   async listCatalog({
     branch_id,
@@ -82,48 +86,38 @@ module.exports = {
 
     const cid = Number(category_id || 0);
     const sid = Number(subcategory_id || 0);
-    const inc = toBoolLike(include_children);
+    const inc = toBoolLike(include_children, false);
 
-    // ✅ 1) Si viene subrubro: filtra por subcategory_id
-    // (y fallback a category_id por si en la vista el hijo viene en category_id)
+    // ✅ 1) Subrubro puntual
     if (sid) {
-      where.push(`(
-        subcategory_id = :subcategory_id
-        OR category_id = :subcategory_id
-      )`);
+      where.push("subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
 
-      // 🔒 Si además viene category_id, también lo acotamos al rubro
+      // 🔒 Si además viene el rubro, acota también (por seguridad)
       if (cid) {
-        where.push(`category_id = :category_id`);
+        where.push("category_id = :category_id");
         repl.category_id = cid;
       }
     }
-    // ✅ 2) Si NO viene subrubro y viene rubro:
-    // "Todos" => SIEMPRE category_id = rubro (acotado)
+    // ✅ 2) Rubro (TODOS dentro del rubro)
     else if (cid) {
       repl.category_id = cid;
 
-      // 🔒 Esta línea es LA CLAVE:
-      // aun con include_children=true, nunca puede traer productos de otros rubros
-      where.push(`category_id = :category_id`);
-
-      // Opcional: si tu vista a veces guarda el rubro en parent_category_id,
-      // descomentá esto (solo si existe esa columna en v_public_catalog):
-      // where.push(`(category_id = :category_id OR parent_category_id = :category_id)`);
-
-      // Si querés "include_children" de verdad (subrubros del rubro),
-      // NO hace falta agregar nada acá porque ya estás acotado al rubro.
-      // Pero si tu v_public_catalog tiene casos raros donde category_id = subrubro,
-      // entonces sí usamos el IN de hijos como fallback:
+      // 🔒 CLAVE: "Todos" SIEMPRE dentro del rubro
+      // include_children=true agrega fallback por subcategories del rubro (por datos mixtos)
       if (inc) {
-        where.push(`(
-          category_id = :category_id
-          OR category_id IN (
-            SELECT id FROM categories
-            WHERE parent_id = :category_id AND is_active = 1
+        where.push(`
+          (
+            category_id = :category_id
+            OR subcategory_id IN (
+              SELECT id FROM subcategories
+              WHERE category_id = :category_id AND is_active = 1
+            )
           )
-        )`);
+        `);
+      } else {
+        // clásico: solo category_id
+        where.push("category_id = :category_id");
       }
     }
 
