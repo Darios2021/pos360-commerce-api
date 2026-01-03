@@ -1,15 +1,18 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (Catalog + Suggestions estilo ML)
+// ✅ COPY-PASTE FINAL (SEARCH ROBUSTO + SUGGESTIONS + CHIPS OK)
+//
 // - /public/categories: devuelve TODO (padres + hijos) con parent_id
 // - Rubros: parent_id IS NULL
 // - Subrubros: parent_id = :category_id
-// - Catálogo: usa v_public_catalog (vc)
-// - Chip: usa products.category_id REAL cuando viene subcategory_id
-// - Suggestions: endpoint dedicado, liviano y "menos estricto"
+// - Catálogo: vc.category_id = padre (normalizado en la vista)
+// - Chip: filtra por products.category_id (hijo real) vía subcategory_id
+// - Search: menos estricto, busca en name/brand/model/sku/barcode/code/description/category/subcategory
+// - Suggestions: autocomplete tipo ML (devuelve top N)
 
 const { sequelize } = require("../models");
 
 function escLike(s) {
+  // escapamos % _ para LIKE
   return String(s).replace(/[%_]/g, (m) => "\\" + m);
 }
 
@@ -23,61 +26,20 @@ function toBoolLike(v, d = false) {
   return d;
 }
 
-function tokenize(q) {
-  const s = String(q || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-  if (!s) return [];
-  return s
-    .split(/[\s\-_/.,;:+]+/g)
-    .filter(Boolean)
-    .filter((t) => t.length >= 2)
-    .slice(0, 6);
-}
-
-function searchFieldsOr(paramName) {
-  // ✅ super compatible: LOWER + LIKE
-  return `
-    (
-      LOWER(vc.name) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.brand,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.model,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.sku,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.barcode,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.code,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.category_name,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${paramName} ESCAPE '\\'
-      OR LOWER(COALESCE(vc.description,'')) LIKE :${paramName} ESCAPE '\\'
-    )
-  `;
-}
-
-function applyTokenSearch(whereArr, replObj, rawSearch, mode /* AND | OR */) {
-  const raw = String(rawSearch || "").trim();
-  if (!raw) return { tokenCount: 0 };
-
-  const tokens = tokenize(raw);
-  if (!tokens.length) return { tokenCount: 0 };
-
-  const tokenClauses = [];
-  tokens.forEach((tok, i) => {
-    const key = `q${i}`;
-    replObj[key] = `%${escLike(tok)}%`;
-    tokenClauses.push(searchFieldsOr(key));
-  });
-
-  whereArr.push(`(${tokenClauses.join(mode === "OR" ? " OR " : " AND ")})`);
-  return { tokenCount: tokens.length };
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
 }
 
 module.exports = {
   // =====================
-  // ✅ Taxonomía
+  // ✅ Taxonomía (POS model)
   // =====================
+
+  // ✅ IMPORTANTE: devolver TODO (padres + hijos)
   async listCategories() {
     const [rows] = await sequelize.query(`
-      SELECT id, name, parent_id
+      SELECT id, name, parent_id, is_active
       FROM categories
       WHERE is_active = 1
       ORDER BY
@@ -88,10 +50,11 @@ module.exports = {
     return rows || [];
   },
 
+  // ✅ SUBRUBROS REALES = categories hijas
   async listSubcategories({ category_id }) {
     const [rows] = await sequelize.query(
       `
-      SELECT id, name, parent_id
+      SELECT id, name, parent_id, is_active
       FROM categories
       WHERE is_active = 1 AND parent_id = :category_id
       ORDER BY name ASC
@@ -115,40 +78,39 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Catalog
+  // ✅ Catalog (ROBUSTO)
   // =====================
   async listCatalog({
     branch_id,
     search,
     category_id,
     subcategory_id,
-    include_children,
+    include_children, // compat, no hace falta si tu vista ya normaliza padre
     in_stock,
     page,
     limit,
   }) {
-    const whereBase = ["vc.branch_id = :branch_id"];
-    const replBase = {
-      branch_id,
-      limit: Number(limit || 24),
-      offset: (Math.max(1, Number(page || 1)) - 1) * Number(limit || 24),
+    const where = ["vc.branch_id = :branch_id"];
+    const repl = {
+      branch_id: toInt(branch_id, 0),
+      limit: Math.min(100, Math.max(1, toInt(limit, 24))),
+      offset: (Math.max(1, toInt(page, 1)) - 1) * Math.min(100, Math.max(1, toInt(limit, 24))),
     };
 
-    const cid = Number(category_id || 0);
-    const sid = Number(subcategory_id || 0);
-    const inc = toBoolLike(include_children, false);
-    void inc;
+    const cid = toInt(category_id, 0);      // padre
+    const sid = toInt(subcategory_id, 0);   // hijo (real)
+    void include_children;
 
+    // ✅ JOIN SOLO cuando hay chip (sid)
+    // Porque v_public_catalog está “aplanado” por padre, pero products.category_id guarda el hijo real
     const joinProducts = sid ? `JOIN products p ON p.id = vc.product_id` : "";
 
-    const where = [...whereBase];
-    const repl = { ...replBase };
-
-    // ✅ filtros de categoría
     if (sid) {
+      // chip: filtra por categoría real del producto
       where.push("p.category_id = :child_id");
       repl.child_id = sid;
 
+      // opcional: asegurar que el hijo pertenece al padre
       if (cid) {
         where.push(`
           :child_id IN (
@@ -159,20 +121,39 @@ module.exports = {
         repl.category_id = cid;
       }
     } else if (cid) {
+      // “Todos” dentro del rubro (padre normalizado en vista)
       where.push("vc.category_id = :category_id");
       repl.category_id = cid;
     }
 
-    // stock (solo si viene true/1)
+    // ✅ SEARCH menos estricto + a prueba de NULL
+    const q = String(search || "").trim();
+    if (q.length) {
+      repl.q = `%${escLike(q.toLowerCase())}%`;
+
+      // OJO: LOWER(COALESCE(...,'')) evita NULL y hace match “tipo ML”
+      where.push(`
+        (
+          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '\\'
+        )
+      `);
+    }
+
+    // stock (si viene in_stock=1)
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    // ✅ búsqueda menos estricta por tokens
-    const { tokenCount } = applyTokenSearch(where, repl, search, "AND");
     const whereSql = `WHERE ${where.join(" AND ")}`;
 
-    // COUNT
     const [[countRow]] = await sequelize.query(
       `SELECT COUNT(*) AS total
        FROM v_public_catalog vc
@@ -181,70 +162,6 @@ module.exports = {
       { replacements: repl }
     );
 
-    let total = Number(countRow?.total || 0);
-
-    // ✅ fallback OR si no encontró nada y hay 2+ tokens
-    if (total === 0 && tokenCount >= 2) {
-      const where2 = [...whereBase];
-      const repl2 = { ...replBase };
-
-      // repetir filtros cat
-      if (sid) {
-        where2.push("p.category_id = :child_id");
-        repl2.child_id = sid;
-
-        if (cid) {
-          where2.push(`
-            :child_id IN (
-              SELECT id FROM categories
-              WHERE parent_id = :category_id AND is_active = 1
-            )
-          `);
-          repl2.category_id = cid;
-        }
-      } else if (cid) {
-        where2.push("vc.category_id = :category_id");
-        repl2.category_id = cid;
-      }
-
-      if (toBoolLike(in_stock, false)) {
-        where2.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
-      }
-
-      applyTokenSearch(where2, repl2, search, "OR");
-      const whereSql2 = `WHERE ${where2.join(" AND ")}`;
-
-      const [[countRow2]] = await sequelize.query(
-        `SELECT COUNT(*) AS total
-         FROM v_public_catalog vc
-         ${joinProducts}
-         ${whereSql2}`,
-        { replacements: repl2 }
-      );
-
-      total = Number(countRow2?.total || 0);
-
-      const [items2] = await sequelize.query(
-        `SELECT vc.*
-         FROM v_public_catalog vc
-         ${joinProducts}
-         ${whereSql2}
-         ORDER BY vc.product_id DESC
-         LIMIT :limit OFFSET :offset`,
-        { replacements: repl2 }
-      );
-
-      const lim = Number(repl2.limit);
-      return {
-        items: items2 || [],
-        page: Math.max(1, Number(page || 1)),
-        limit: lim,
-        total,
-        pages: total ? Math.ceil(total / lim) : 0,
-      };
-    }
-
-    // ITEMS normal
     const [items] = await sequelize.query(
       `SELECT vc.*
        FROM v_public_catalog vc
@@ -255,52 +172,35 @@ module.exports = {
       { replacements: repl }
     );
 
-    const lim = Number(repl.limit);
+    const total = Number(countRow?.total || 0);
+
     return {
       items: items || [],
-      page: Math.max(1, Number(page || 1)),
-      limit: lim,
+      page: Math.max(1, toInt(page, 1)),
+      limit: repl.limit,
       total,
-      pages: total ? Math.ceil(total / lim) : 0,
+      pages: total ? Math.ceil(total / repl.limit) : 0,
     };
   },
 
   // =====================
-  // ✅ Suggestions (ENDPOINT NUEVO)
+  // 🔮 Suggestions (autocomplete)
   // =====================
-  async listSuggestions({ branch_id, q, limit }) {
-    const raw = String(q || "").trim();
-    const tokens = tokenize(raw);
-    const lim = Math.min(15, Math.max(1, Number(limit || 8)));
+  async listSuggestions({ branch_id, q, limit = 8 }) {
+    const branch = toInt(branch_id, 0);
+    const text = String(q || "").trim().toLowerCase();
+    const lim = Math.min(20, Math.max(1, toInt(limit, 8)));
 
-    if (!branch_id || !tokens.length) return [];
+    if (!branch) return [];
+    if (text.length < 2) return [];
 
-    const where = ["vc.branch_id = :branch_id"];
-    const repl = { branch_id };
+    const repl = {
+      branch_id: branch,
+      q: `%${escLike(text)}%`,
+      limit: lim,
+    };
 
-    // ✅ OR por tokens para sugerencias (siempre debe traer algo)
-    const tokenClauses = [];
-    tokens.forEach((tok, i) => {
-      const key = `q${i}`;
-      repl[key] = `%${escLike(tok)}%`;
-      tokenClauses.push(searchFieldsOr(key));
-    });
-    where.push(`(${tokenClauses.join(" OR ")})`);
-
-    // ✅ score simple: cuántos tokens pegan en name/brand/model (prioriza título)
-    // (MySQL compatible usando SUM de booleanos)
-    const scoreExprParts = tokens.map((_, i) => `
-      (
-        (LOWER(vc.name) LIKE :q${i}) +
-        (LOWER(COALESCE(vc.brand,'')) LIKE :q${i}) +
-        (LOWER(COALESCE(vc.model,'')) LIKE :q${i})
-      )
-    `);
-
-    const scoreExpr = scoreExprParts.join(" + ");
-
-    const whereSql = `WHERE ${where.join(" AND ")}`;
-
+    // ✅ buscamos en los mismos campos “menos estrictos”
     const [rows] = await sequelize.query(
       `
       SELECT
@@ -308,15 +208,29 @@ module.exports = {
         vc.name,
         vc.brand,
         vc.model,
+        vc.category_id,
         vc.category_name,
+        vc.subcategory_id,
         vc.subcategory_name,
         vc.image_url,
-        (${scoreExpr}) AS score
+        vc.price,
+        vc.price_list,
+        vc.price_discount
       FROM v_public_catalog vc
-      ${whereSql}
-      GROUP BY vc.product_id, vc.name, vc.brand, vc.model, vc.category_name, vc.subcategory_name, vc.image_url
-      ORDER BY score DESC, vc.product_id DESC
-      LIMIT ${lim}
+      WHERE vc.branch_id = :branch_id
+        AND (
+          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '\\'
+          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '\\'
+        )
+      ORDER BY vc.product_id DESC
+      LIMIT :limit
       `,
       { replacements: repl }
     );
@@ -324,12 +238,15 @@ module.exports = {
     return rows || [];
   },
 
+  // =====================
+  // Producto
+  // =====================
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
       `SELECT * FROM v_public_catalog
        WHERE branch_id = :branch_id AND product_id = :product_id
        LIMIT 1`,
-      { replacements: { branch_id, product_id } }
+      { replacements: { branch_id: toInt(branch_id, 0), product_id: toInt(product_id, 0) } }
     );
     return rows?.[0] || null;
   },
