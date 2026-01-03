@@ -13,7 +13,7 @@ function toStr(v) {
 }
 function toBoolLike(v, d = false) {
   if (v === undefined || v === null || v === "") return d;
-  const s = String(v).toLowerCase().trim();
+  const s = String(v).toLowerCase();
   if (["1", "true", "yes", "si"].includes(s)) return true;
   if (["0", "false", "no"].includes(s)) return false;
   return d;
@@ -61,7 +61,7 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Branches
+  // Branches
   // =====================
   async listBranches(req, res) {
     try {
@@ -97,7 +97,7 @@ module.exports = {
         category_id: toInt(req.query.category_id) || null,
         subcategory_id: toInt(req.query.subcategory_id) || null,
         include_children: toBoolLike(req.query.include_children, false),
-        in_stock: toBoolLike(req.query.in_stock, true),
+        in_stock: toBoolLike(req.query.in_stock, false),
         page: Math.max(1, toInt(req.query.page, 1)),
         limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
       });
@@ -130,6 +130,9 @@ module.exports = {
       const q = toStr(req.query.q);
       const limit = Math.min(15, Math.max(1, toInt(req.query.limit, 8)));
 
+      // ✅ si no hay texto, no pegues a DB (evita ruido)
+      if (!q) return res.json({ ok: true, items: [] });
+
       const items = await PublicService.listSuggestions({ branch_id, q, limit });
       return res.json({ ok: true, items });
     } catch (err) {
@@ -142,9 +145,6 @@ module.exports = {
     }
   },
 
-  // =====================
-  // ✅ Product detail
-  // =====================
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
