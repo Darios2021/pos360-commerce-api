@@ -1,8 +1,10 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (POS taxonomy real con categories.parent_id)
-// - Subrubros salen de categories (hijos por parent_id)
-// - Chip subrubro filtra por products.category_id = ID_HIJO (NO subcategory_id)
-// - "Todos" trae padre + hijos (include_children=1), siempre acotado al rubro
+// ✅ COPY-PASTE FINAL (con VIEW corregida)
+// - Rubros: categories.parent_id IS NULL
+// - Subrubros: categories.parent_id = rubro_id
+// - Catalog:
+//    * Todos: category_id = rubro_id
+//    * Chip:  subcategory_id = id_hijo (y además category_id = rubro_id para acotar)
 
 const { sequelize } = require("../models");
 
@@ -22,21 +24,19 @@ function toBoolLike(v, d = false) {
 
 module.exports = {
   // =====================
-  // ✅ Taxonomía (REAL)
+  // ✅ Taxonomía (POS real)
   // =====================
   async listCategories() {
-    // devuelve TODO (padres + hijos)
     const [rows] = await sequelize.query(`
-      SELECT id, name, parent_id
+      SELECT id, name
       FROM categories
-      WHERE is_active = 1
-      ORDER BY parent_id IS NOT NULL, parent_id, name
+      WHERE is_active = 1 AND parent_id IS NULL
+      ORDER BY name ASC
     `);
     return rows || [];
   },
 
   async listSubcategories({ category_id }) {
-    // hijos por parent_id
     const [rows] = await sequelize.query(
       `
       SELECT id, name, parent_id
@@ -68,9 +68,9 @@ module.exports = {
   async listCatalog({
     branch_id,
     search,
-    category_id,       // rubro padre
-    subcategory_id,    // subrubro = ID hijo (pero filtra por products.category_id)
-    include_children,
+    category_id,       // rubro (PADRE)
+    subcategory_id,    // subrubro (HIJO)
+    include_children,  // lo dejamos por compat, pero con la VIEW nueva no es necesario
     in_stock,
     page,
     limit,
@@ -87,42 +87,22 @@ module.exports = {
 
     const parentId = Number(category_id || 0);
     const childId = Number(subcategory_id || 0);
-    const inc = toBoolLike(include_children, false);
 
-    // ✅ 1) CHIP subrubro: products.category_id = ID_HIJO
+    // ✅ 1) Chip subrubro
     if (childId) {
-      where.push("category_id = :child_id");
+      where.push("subcategory_id = :child_id");
       repl.child_id = childId;
 
-      // (opcional pero recomendado) validar que ese hijo pertenezca al padre actual
+      // 🔒 acotar al rubro actual (evita que un chip “de otro rubro” devuelva cosas)
       if (parentId) {
-        where.push(`
-          EXISTS (
-            SELECT 1
-            FROM categories c
-            WHERE c.id = :child_id AND c.parent_id = :parent_id AND c.is_active = 1
-          )
-        `);
+        where.push("category_id = :parent_id");
         repl.parent_id = parentId;
       }
     }
-    // ✅ 2) "Todos" dentro del rubro: padre + hijos
+    // ✅ 2) Todos dentro del rubro
     else if (parentId) {
+      where.push("category_id = :parent_id");
       repl.parent_id = parentId;
-
-      if (inc) {
-        where.push(`
-          (
-            category_id = :parent_id
-            OR category_id IN (
-              SELECT id FROM categories
-              WHERE parent_id = :parent_id AND is_active = 1
-            )
-          )
-        `);
-      } else {
-        where.push("category_id = :parent_id");
-      }
     }
 
     if (search) {
@@ -136,7 +116,6 @@ module.exports = {
       `);
     }
 
-    // stock opcional
     if (toBoolLike(in_stock, true)) {
       where.push("(track_stock = 0 OR stock_qty > 0)");
     }
