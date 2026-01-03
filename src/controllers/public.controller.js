@@ -1,14 +1,10 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL (con include_children + taxonomy endpoints)
+// ✅ COPY-PASTE FINAL (Catalog + Suggestions)
 
 const PublicService = require("../services/public.service");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
-  return Number.isFinite(n) ? n : d;
-}
-function toNum(v, d = 0) {
-  const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
 function toStr(v) {
@@ -32,6 +28,7 @@ module.exports = {
       const items = await PublicService.listCategories();
       return res.json({ ok: true, items });
     } catch (err) {
+      console.error("PUBLIC_CATEGORIES_ERROR", err);
       return res.status(500).json({
         ok: false,
         code: "PUBLIC_CATEGORIES_ERROR",
@@ -54,6 +51,7 @@ module.exports = {
       const items = await PublicService.listSubcategories({ category_id });
       return res.json({ ok: true, items });
     } catch (err) {
+      console.error("PUBLIC_SUBCATEGORIES_ERROR", err);
       return res.status(500).json({
         ok: false,
         code: "PUBLIC_SUBCATEGORIES_ERROR",
@@ -70,6 +68,7 @@ module.exports = {
       const items = await PublicService.listBranches();
       return res.json({ ok: true, items });
     } catch (err) {
+      console.error("PUBLIC_BRANCHES_ERROR", err);
       return res.status(500).json({
         ok: false,
         code: "PUBLIC_BRANCHES_ERROR",
@@ -79,7 +78,7 @@ module.exports = {
   },
 
   // =====================
-  // Catalog
+  // ✅ Catalog
   // =====================
   async listCatalog(req, res) {
     try {
@@ -97,7 +96,7 @@ module.exports = {
         search: toStr(req.query.search),
         category_id: toInt(req.query.category_id) || null,
         subcategory_id: toInt(req.query.subcategory_id) || null,
-        include_children: toBoolLike(req.query.include_children, false), // ✅ NUEVO
+        include_children: toBoolLike(req.query.include_children, false),
         in_stock: toBoolLike(req.query.in_stock, true),
         page: Math.max(1, toInt(req.query.page, 1)),
         limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
@@ -105,10 +104,40 @@ module.exports = {
 
       return res.json({ ok: true, ...result });
     } catch (err) {
+      console.error("PUBLIC_CATALOG_ERROR", err);
       return res.status(500).json({
         ok: false,
         code: "PUBLIC_CATALOG_ERROR",
         message: err?.message || "Error listando catálogo",
+      });
+    }
+  },
+
+  // =====================
+  // ✅ Suggestions
+  // =====================
+  async listSuggestions(req, res) {
+    try {
+      const branch_id = toInt(req.query.branch_id);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "branch_id es obligatorio",
+        });
+      }
+
+      const q = toStr(req.query.q);
+      const limit = Math.min(15, Math.max(1, toInt(req.query.limit, 8)));
+
+      const items = await PublicService.listSuggestions({ branch_id, q, limit });
+      return res.json({ ok: true, items });
+    } catch (err) {
+      console.error("PUBLIC_SUGGESTIONS_ERROR", err);
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_SUGGESTIONS_ERROR",
+        message: err?.message || "Error listando sugerencias",
       });
     }
   },
@@ -137,6 +166,7 @@ module.exports = {
 
       return res.json({ ok: true, item });
     } catch (err) {
+      console.error("PUBLIC_PRODUCT_ERROR", err);
       return res.status(500).json({
         ok: false,
         code: "PUBLIC_PRODUCT_ERROR",

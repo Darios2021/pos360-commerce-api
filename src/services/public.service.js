@@ -1,16 +1,11 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (robusto + compatible)
+// ✅ COPY-PASTE FINAL (Catalog + Suggestions estilo ML)
 // - /public/categories: devuelve TODO (padres + hijos) con parent_id
 // - Rubros: parent_id IS NULL
 // - Subrubros: parent_id = :category_id
-// - Catálogo: vc.category_id = padre (vista normalizada)
-// - Chip: filtra por products.category_id = hijo (vía subcategory_id)
-//
-// ✅ BUSCADOR "tipo ML" (menos estricto):
-// - Busca en: name, brand, model, sku, barcode, code, category_name, subcategory_name, description
-// - Tokeniza la búsqueda: "cargador 55w" => ["cargador","55w"]
-// - Modo normal: AND por tokens (cada token puede matchear cualquier campo)
-// - Fallback: si da 0 y hay 2+ tokens => OR por tokens (para que "traiga algo")
+// - Catálogo: usa v_public_catalog (vc)
+// - Chip: usa products.category_id REAL cuando viene subcategory_id
+// - Suggestions: endpoint dedicado, liviano y "menos estricto"
 
 const { sequelize } = require("../models");
 
@@ -33,11 +28,47 @@ function tokenize(q) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
-
   if (!s) return [];
-  const parts = s.split(/[\s\-_/.,;:+]+/g).filter(Boolean);
-  // tokens cortos hacen ruido; 2+ va bien para ecommerce
-  return parts.filter((t) => t.length >= 2).slice(0, 6);
+  return s
+    .split(/[\s\-_/.,;:+]+/g)
+    .filter(Boolean)
+    .filter((t) => t.length >= 2)
+    .slice(0, 6);
+}
+
+function searchFieldsOr(paramName) {
+  // ✅ super compatible: LOWER + LIKE
+  return `
+    (
+      LOWER(vc.name) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.brand,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.model,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.sku,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.barcode,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.code,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.category_name,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${paramName} ESCAPE '\\'
+      OR LOWER(COALESCE(vc.description,'')) LIKE :${paramName} ESCAPE '\\'
+    )
+  `;
+}
+
+function applyTokenSearch(whereArr, replObj, rawSearch, mode /* AND | OR */) {
+  const raw = String(rawSearch || "").trim();
+  if (!raw) return { tokenCount: 0 };
+
+  const tokens = tokenize(raw);
+  if (!tokens.length) return { tokenCount: 0 };
+
+  const tokenClauses = [];
+  tokens.forEach((tok, i) => {
+    const key = `q${i}`;
+    replObj[key] = `%${escLike(tok)}%`;
+    tokenClauses.push(searchFieldsOr(key));
+  });
+
+  whereArr.push(`(${tokenClauses.join(mode === "OR" ? " OR " : " AND ")})`);
+  return { tokenCount: tokens.length };
 }
 
 module.exports = {
@@ -103,126 +134,194 @@ module.exports = {
       offset: (Math.max(1, Number(page || 1)) - 1) * Number(limit || 24),
     };
 
-    const cid = Number(category_id || 0);       // padre (vc.category_id)
-    const sid = Number(subcategory_id || 0);    // hijo (products.category_id REAL)
+    const cid = Number(category_id || 0);
+    const sid = Number(subcategory_id || 0);
     const inc = toBoolLike(include_children, false);
     void inc;
 
-    // ✅ JOIN SOLO si hay chip (sid)
     const joinProducts = sid ? `JOIN products p ON p.id = vc.product_id` : "";
 
-    // ====== filtros base ======
-    const whereCat = [...whereBase];
-    const replCat = { ...replBase };
+    const where = [...whereBase];
+    const repl = { ...replBase };
 
+    // ✅ filtros de categoría
     if (sid) {
-      whereCat.push("p.category_id = :child_id");
-      replCat.child_id = sid;
+      where.push("p.category_id = :child_id");
+      repl.child_id = sid;
 
-      // opcional: validar pertenencia al padre
       if (cid) {
-        whereCat.push(`
+        where.push(`
           :child_id IN (
             SELECT id FROM categories
             WHERE parent_id = :category_id AND is_active = 1
           )
         `);
-        replCat.category_id = cid;
+        repl.category_id = cid;
       }
     } else if (cid) {
-      whereCat.push("vc.category_id = :category_id");
-      replCat.category_id = cid;
+      where.push("vc.category_id = :category_id");
+      repl.category_id = cid;
     }
 
-    // stock
+    // stock (solo si viene true/1)
     if (toBoolLike(in_stock, false)) {
-      whereCat.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+      where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    // ====== búsqueda ======
-    const searchFieldsOr = (paramName) => `
-      (
-        LOWER(vc.name) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.brand,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.model,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.sku,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.barcode,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.code,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.category_name,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${paramName} ESCAPE '\\'
-        OR LOWER(COALESCE(vc.description,'')) LIKE :${paramName} ESCAPE '\\'
-      )
-    `;
+    // ✅ búsqueda menos estricta por tokens
+    const { tokenCount } = applyTokenSearch(where, repl, search, "AND");
+    const whereSql = `WHERE ${where.join(" AND ")}`;
 
-    function applySearch(whereArr, replObj, mode /* "AND" | "OR" */) {
-      const raw = String(search || "").trim();
-      if (!raw) return;
+    // COUNT
+    const [[countRow]] = await sequelize.query(
+      `SELECT COUNT(*) AS total
+       FROM v_public_catalog vc
+       ${joinProducts}
+       ${whereSql}`,
+      { replacements: repl }
+    );
 
-      const tokens = tokenize(raw);
-      if (!tokens.length) return;
+    let total = Number(countRow?.total || 0);
 
-      const tokenClauses = [];
+    // ✅ fallback OR si no encontró nada y hay 2+ tokens
+    if (total === 0 && tokenCount >= 2) {
+      const where2 = [...whereBase];
+      const repl2 = { ...replBase };
 
-      tokens.forEach((tok, i) => {
-        const key = `q${i}`;
-        replObj[key] = `%${escLike(tok.toLowerCase())}%`;
-        tokenClauses.push(searchFieldsOr(key));
-      });
+      // repetir filtros cat
+      if (sid) {
+        where2.push("p.category_id = :child_id");
+        repl2.child_id = sid;
 
-      whereArr.push(`(${tokenClauses.join(mode === "OR" ? " OR " : " AND ")})`);
-    }
+        if (cid) {
+          where2.push(`
+            :child_id IN (
+              SELECT id FROM categories
+              WHERE parent_id = :category_id AND is_active = 1
+            )
+          `);
+          repl2.category_id = cid;
+        }
+      } else if (cid) {
+        where2.push("vc.category_id = :category_id");
+        repl2.category_id = cid;
+      }
 
-    async function run(mode) {
-      const where = [...whereCat];
-      const repl = { ...replCat };
+      if (toBoolLike(in_stock, false)) {
+        where2.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+      }
 
-      applySearch(where, repl, mode);
+      applyTokenSearch(where2, repl2, search, "OR");
+      const whereSql2 = `WHERE ${where2.join(" AND ")}`;
 
-      const whereSql = `WHERE ${where.join(" AND ")}`;
-
-      const [[countRow]] = await sequelize.query(
+      const [[countRow2]] = await sequelize.query(
         `SELECT COUNT(*) AS total
          FROM v_public_catalog vc
          ${joinProducts}
-         ${whereSql}`,
-        { replacements: repl }
+         ${whereSql2}`,
+        { replacements: repl2 }
       );
 
-      const [items] = await sequelize.query(
+      total = Number(countRow2?.total || 0);
+
+      const [items2] = await sequelize.query(
         `SELECT vc.*
          FROM v_public_catalog vc
          ${joinProducts}
-         ${whereSql}
+         ${whereSql2}
          ORDER BY vc.product_id DESC
          LIMIT :limit OFFSET :offset`,
-        { replacements: repl }
+        { replacements: repl2 }
       );
 
+      const lim = Number(repl2.limit);
       return {
-        items: items || [],
-        total: Number(countRow?.total || 0),
+        items: items2 || [],
+        page: Math.max(1, Number(page || 1)),
+        limit: lim,
+        total,
+        pages: total ? Math.ceil(total / lim) : 0,
       };
     }
 
-    // 1) AND por tokens
-    let result = await run("AND");
+    // ITEMS normal
+    const [items] = await sequelize.query(
+      `SELECT vc.*
+       FROM v_public_catalog vc
+       ${joinProducts}
+       ${whereSql}
+       ORDER BY vc.product_id DESC
+       LIMIT :limit OFFSET :offset`,
+      { replacements: repl }
+    );
 
-    // 2) fallback OR por tokens (si hay 2+ tokens y total=0)
-    const tokCount = tokenize(String(search || "")).length;
-    if (result.total === 0 && tokCount >= 2) {
-      result = await run("OR");
-    }
-
-    const lim = Number(replBase.limit);
-    const total = Number(result.total || 0);
-
+    const lim = Number(repl.limit);
     return {
-      items: result.items || [],
+      items: items || [],
       page: Math.max(1, Number(page || 1)),
       limit: lim,
       total,
       pages: total ? Math.ceil(total / lim) : 0,
     };
+  },
+
+  // =====================
+  // ✅ Suggestions (ENDPOINT NUEVO)
+  // =====================
+  async listSuggestions({ branch_id, q, limit }) {
+    const raw = String(q || "").trim();
+    const tokens = tokenize(raw);
+    const lim = Math.min(15, Math.max(1, Number(limit || 8)));
+
+    if (!branch_id || !tokens.length) return [];
+
+    const where = ["vc.branch_id = :branch_id"];
+    const repl = { branch_id };
+
+    // ✅ OR por tokens para sugerencias (siempre debe traer algo)
+    const tokenClauses = [];
+    tokens.forEach((tok, i) => {
+      const key = `q${i}`;
+      repl[key] = `%${escLike(tok)}%`;
+      tokenClauses.push(searchFieldsOr(key));
+    });
+    where.push(`(${tokenClauses.join(" OR ")})`);
+
+    // ✅ score simple: cuántos tokens pegan en name/brand/model (prioriza título)
+    // (MySQL compatible usando SUM de booleanos)
+    const scoreExprParts = tokens.map((_, i) => `
+      (
+        (LOWER(vc.name) LIKE :q${i}) +
+        (LOWER(COALESCE(vc.brand,'')) LIKE :q${i}) +
+        (LOWER(COALESCE(vc.model,'')) LIKE :q${i})
+      )
+    `);
+
+    const scoreExpr = scoreExprParts.join(" + ");
+
+    const whereSql = `WHERE ${where.join(" AND ")}`;
+
+    const [rows] = await sequelize.query(
+      `
+      SELECT
+        vc.product_id,
+        vc.name,
+        vc.brand,
+        vc.model,
+        vc.category_name,
+        vc.subcategory_name,
+        vc.image_url,
+        (${scoreExpr}) AS score
+      FROM v_public_catalog vc
+      ${whereSql}
+      GROUP BY vc.product_id, vc.name, vc.brand, vc.model, vc.category_name, vc.subcategory_name, vc.image_url
+      ORDER BY score DESC, vc.product_id DESC
+      LIMIT ${lim}
+      `,
+      { replacements: repl }
+    );
+
+    return rows || [];
   },
 
   async getProductById({ branch_id, product_id }) {

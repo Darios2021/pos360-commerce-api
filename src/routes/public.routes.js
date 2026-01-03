@@ -1,26 +1,46 @@
 // src/routes/public.routes.js
 // ✅ COPY-PASTE FINAL
-// Rutas públicas para Ecommerce (catálogo, sucursales, taxonomía, detalle producto)
+// Rutas públicas Ecommerce (catálogo, sugerencias, taxonomía, sucursales, producto)
 
 const express = require("express");
 const router = express.Router();
 
 const PublicController = require("../controllers/public.controller");
 
-// Health simple (opcional)
-router.get("/health", (req, res) => res.json({ ok: true, scope: "public" }));
+// =====================
+// Health (opcional)
+// =====================
+router.get("/health", (req, res) => {
+  res.json({ ok: true, scope: "public" });
+});
 
-// ✅ Taxonomía (rubros / subrubros)
+// =====================
+// Taxonomía
+// =====================
+// Rubros + subrubros (padres e hijos)
 router.get("/categories", PublicController.listCategories);
 router.get("/subcategories", PublicController.listSubcategories);
 
-// Sucursales activas
+// =====================
+// Sucursales
+// =====================
 router.get("/branches", PublicController.listBranches);
 
-// Catálogo por sucursal (con filtros y paginación)
+// =====================
+// 🔍 Search & Catalog
+// =====================
+
+// 🔮 SUGERENCIAS (autocomplete tipo MercadoLibre)
+router.get("/suggestions", PublicController.listSuggestions);
+
+// 📦 Catálogo público (paginado + filtros)
 router.get("/catalog", PublicController.listCatalog);
 
-// Detalle de producto (por sucursal)
+// =====================
+// Producto
+// =====================
+
+// Detalle de producto (requiere branch_id)
 router.get("/products/:id", PublicController.getProductById);
 
 module.exports = router;
