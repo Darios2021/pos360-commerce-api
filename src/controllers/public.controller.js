@@ -1,5 +1,7 @@
 // src/controllers/public.controller.js
 // ✅ COPY-PASTE FINAL (Catalog + Suggestions)
+// - /public/catalog usa query: branch_id, search, category_id, subcategory_id, in_stock, page, limit
+// - /public/suggestions usa query: branch_id, q, limit
 
 const PublicService = require("../services/public.service");
 
@@ -13,9 +15,11 @@ function toStr(v) {
 }
 function toBoolLike(v, d = false) {
   if (v === undefined || v === null || v === "") return d;
-  const s = String(v).toLowerCase();
-  if (["1", "true", "yes", "si"].includes(s)) return true;
-  if (["0", "false", "no"].includes(s)) return false;
+  if (v === true || v === 1 || v === "1") return true;
+  if (v === false || v === 0 || v === "0") return false;
+  const s = String(v).toLowerCase().trim();
+  if (["true", "yes", "si"].includes(s)) return true;
+  if (["false", "no"].includes(s)) return false;
   return d;
 }
 
@@ -61,7 +65,7 @@ module.exports = {
   },
 
   // =====================
-  // Branches
+  // ✅ Branches
   // =====================
   async listBranches(req, res) {
     try {
@@ -96,8 +100,9 @@ module.exports = {
         search: toStr(req.query.search),
         category_id: toInt(req.query.category_id) || null,
         subcategory_id: toInt(req.query.subcategory_id) || null,
+        // include_children lo mantenemos por compatibilidad (aunque tu vista ya viene normalizada)
         include_children: toBoolLike(req.query.include_children, false),
-        in_stock: toBoolLike(req.query.in_stock, false),
+        in_stock: toBoolLike(req.query.in_stock, false), // default: NO filtrar stock en tienda
         page: Math.max(1, toInt(req.query.page, 1)),
         limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
       });
@@ -114,7 +119,7 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Suggestions
+  // ✅ Suggestions (autocomplete)
   // =====================
   async listSuggestions(req, res) {
     try {
@@ -128,10 +133,7 @@ module.exports = {
       }
 
       const q = toStr(req.query.q);
-      const limit = Math.min(15, Math.max(1, toInt(req.query.limit, 8)));
-
-      // ✅ si no hay texto, no pegues a DB (evita ruido)
-      if (!q) return res.json({ ok: true, items: [] });
+      const limit = Math.min(20, Math.max(1, toInt(req.query.limit, 8)));
 
       const items = await PublicService.listSuggestions({ branch_id, q, limit });
       return res.json({ ok: true, items });
@@ -145,6 +147,9 @@ module.exports = {
     }
   },
 
+  // =====================
+  // ✅ Producto
+  // =====================
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);

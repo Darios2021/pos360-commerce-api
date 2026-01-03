@@ -1,29 +1,29 @@
 // src/routes/public.routes.js
 // ✅ COPY-PASTE FINAL
-// Rutas públicas para Ecommerce (catálogo, sucursales, taxonomía, detalle, sugerencias)
+// Rutas públicas Ecommerce (taxonomía + catálogo + sugerencias + producto)
 
 const express = require("express");
 const router = express.Router();
 
 const PublicController = require("../controllers/public.controller");
 
-// Health simple (opcional)
+// Health
 router.get("/health", (req, res) => res.json({ ok: true, scope: "public" }));
 
-// ✅ Taxonomía (rubros / subrubros)
+// Taxonomía
 router.get("/categories", PublicController.listCategories);
 router.get("/subcategories", PublicController.listSubcategories);
 
-// ✅ Sucursales activas
+// Sucursales
 router.get("/branches", PublicController.listBranches);
 
-// ✅ Catálogo por sucursal (con filtros y paginación)
+// Catálogo
 router.get("/catalog", PublicController.listCatalog);
 
-// ✅ Sugerencias para buscador (typeahead)
+// ✅ Sugerencias (autocomplete tipo ML)
 router.get("/suggestions", PublicController.listSuggestions);
 
-// ✅ Detalle de producto (por sucursal)
+// Producto
 router.get("/products/:id", PublicController.getProductById);
 
 module.exports = router;
