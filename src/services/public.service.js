@@ -1,15 +1,16 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (MODELO POS/INVENTARIO)
+// ✅ COPY-PASTE FINAL (robusto + compatible)
 // - /public/categories: devuelve TODO (padres + hijos) con parent_id
 // - Rubros: parent_id IS NULL
 // - Subrubros: parent_id = :category_id
-// - Catálogo: "Todos" = vc.category_id = padre (vista normalizada)
+// - Catálogo: vc.category_id = padre (vista normalizada)
 // - Chip: filtra por products.category_id = hijo (vía subcategory_id)
-// ✅ MEJORA BUSCADOR:
-// - Busca por name/brand/model/sku/barcode/code + category_name/subcategory_name + description
-// - Tokeniza búsqueda (tipo ML): "cargador 55w" => tokens ["cargador","55w"]
-// - Modo NORMAL: AND por tokens (cada token matchea en cualquier campo)
-// - Fallback: si total=0 y hay 2+ tokens => OR por tokens (menos estricto)
+//
+// ✅ BUSCADOR "tipo ML" (menos estricto):
+// - Busca en: name, brand, model, sku, barcode, code, category_name, subcategory_name, description
+// - Tokeniza la búsqueda: "cargador 55w" => ["cargador","55w"]
+// - Modo normal: AND por tokens (cada token puede matchear cualquier campo)
+// - Fallback: si da 0 y hay 2+ tokens => OR por tokens (para que "traiga algo")
 
 const { sequelize } = require("../models");
 
@@ -34,18 +35,15 @@ function tokenize(q) {
     .replace(/\s+/g, " ");
 
   if (!s) return [];
-  // split por espacios y símbolos comunes, quedate con tokens útiles
   const parts = s.split(/[\s\-_/.,;:+]+/g).filter(Boolean);
-  // tokens de 2+ chars para evitar ruido; si querés permitir 1 char, bajalo
+  // tokens cortos hacen ruido; 2+ va bien para ecommerce
   return parts.filter((t) => t.length >= 2).slice(0, 6);
 }
 
 module.exports = {
   // =====================
-  // ✅ Taxonomía (POS model)
+  // ✅ Taxonomía
   // =====================
-
-  // ✅ IMPORTANTE: devolver TODO (padres + hijos)
   async listCategories() {
     const [rows] = await sequelize.query(`
       SELECT id, name, parent_id
@@ -59,7 +57,6 @@ module.exports = {
     return rows || [];
   },
 
-  // ✅ SUBRUBROS REALES = categories hijas
   async listSubcategories({ category_id }) {
     const [rows] = await sequelize.query(
       `
@@ -87,7 +84,7 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Catalog (v_public_catalog “aplanado”)
+  // ✅ Catalog
   // =====================
   async listCatalog({
     branch_id,
@@ -106,15 +103,15 @@ module.exports = {
       offset: (Math.max(1, Number(page || 1)) - 1) * Number(limit || 24),
     };
 
-    const cid = Number(category_id || 0);       // padre
-    const sid = Number(subcategory_id || 0);    // hijo
+    const cid = Number(category_id || 0);       // padre (vc.category_id)
+    const sid = Number(subcategory_id || 0);    // hijo (products.category_id REAL)
     const inc = toBoolLike(include_children, false);
     void inc;
 
-    // ✅ JOIN SOLO cuando hay chip (sid) para filtrar por products.category_id (hijo real)
+    // ✅ JOIN SOLO si hay chip (sid)
     const joinProducts = sid ? `JOIN products p ON p.id = vc.product_id` : "";
 
-    // ====== filtros de categoría ======
+    // ====== filtros base ======
     const whereCat = [...whereBase];
     const replCat = { ...replBase };
 
@@ -122,6 +119,7 @@ module.exports = {
       whereCat.push("p.category_id = :child_id");
       replCat.child_id = sid;
 
+      // opcional: validar pertenencia al padre
       if (cid) {
         whereCat.push(`
           :child_id IN (
@@ -132,57 +130,53 @@ module.exports = {
         replCat.category_id = cid;
       }
     } else if (cid) {
-      // ✅ “Todos” por rubro (PADRE normalizado en la vista)
       whereCat.push("vc.category_id = :category_id");
       replCat.category_id = cid;
     }
 
-    // ====== stock ======
+    // stock
     if (toBoolLike(in_stock, false)) {
       whereCat.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    // ====== búsqueda (menos estricta tipo ML) ======
-    // Campos disponibles en v_public_catalog (según tu DESCRIBE):
-    // name, description, brand, model, sku, barcode, code, category_name, subcategory_name
-    const fieldsSql = `
+    // ====== búsqueda ======
+    const searchFieldsOr = (paramName) => `
       (
-        vc.name            COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.brand,'')           COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.model,'')           COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.sku,'')             COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.barcode,'')         COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.code,'')            COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.category_name,'')   COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.subcategory_name,'')COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
-        OR COALESCE(vc.description,'')     COLLATE utf8mb4_general_ci LIKE :Q ESCAPE '\\'
+        LOWER(vc.name) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.brand,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.model,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.sku,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.barcode,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.code,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.category_name,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${paramName} ESCAPE '\\'
+        OR LOWER(COALESCE(vc.description,'')) LIKE :${paramName} ESCAPE '\\'
       )
     `;
 
-    function applySearchTo(whereArr, replObj, mode /* "AND" | "OR" */) {
+    function applySearch(whereArr, replObj, mode /* "AND" | "OR" */) {
       const raw = String(search || "").trim();
       if (!raw) return;
 
       const tokens = tokenize(raw);
       if (!tokens.length) return;
 
-      const pieces = [];
+      const tokenClauses = [];
+
       tokens.forEach((tok, i) => {
         const key = `q${i}`;
-        replObj[key] = `%${escLike(tok)}%`;
-        pieces.push(fieldsSql.replaceAll(":Q", `:${key}`));
+        replObj[key] = `%${escLike(tok.toLowerCase())}%`;
+        tokenClauses.push(searchFieldsOr(key));
       });
 
-      // ✅ NORMAL: AND por tokens
-      // ✅ fallback: OR por tokens
-      whereArr.push(`(${pieces.join(mode === "OR" ? " OR " : " AND ")})`);
+      whereArr.push(`(${tokenClauses.join(mode === "OR" ? " OR " : " AND ")})`);
     }
 
-    async function runQuery(mode) {
+    async function run(mode) {
       const where = [...whereCat];
       const repl = { ...replCat };
 
-      applySearchTo(where, repl, mode);
+      applySearch(where, repl, mode);
 
       const whereSql = `WHERE ${where.join(" AND ")}`;
 
@@ -210,13 +204,13 @@ module.exports = {
       };
     }
 
-    // 1) modo normal (AND tokens)
-    let result = await runQuery("AND");
+    // 1) AND por tokens
+    let result = await run("AND");
 
-    // 2) fallback menos estricto (OR tokens) si hay 2+ tokens y dio 0
+    // 2) fallback OR por tokens (si hay 2+ tokens y total=0)
     const tokCount = tokenize(String(search || "")).length;
     if (result.total === 0 && tokCount >= 2) {
-      result = await runQuery("OR");
+      result = await run("OR");
     }
 
     const lim = Number(replBase.limit);
