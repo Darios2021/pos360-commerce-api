@@ -1,9 +1,9 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL
-// FIX: para que el Shop arme chips de subrubros (children) desde categories.parent_id
-// - /public/categories => devuelve TODAS (padres + hijos) e incluye parent_id
-// - /public/subcategories => (si lo usás) sigue devolviendo hijos por parent_id (compat)
-// - /public/catalog => include_children trae productos del rubro + de sus hijos
+// ✅ COPY-PASTE FINAL (igual que POS / Inventario)
+// REALIDAD de tu DB:
+// - Rubro/Subrubro salen de `categories` usando parent_id
+// - products.category_id guarda el "subrubro" (categoría hija)
+// - products.subcategory_id NO se está usando (tu join a subcategories da vacío)
 
 const { sequelize } = require("../models");
 
@@ -23,24 +23,21 @@ function toBoolLike(v, d = false) {
 
 module.exports = {
   // =====================
-  // ✅ Taxonomía
+  // ✅ Taxonomía (como POS)
   // =====================
 
-  // ✅ CLAVE: devolver TODAS (padres + hijos) + parent_id
+  // Rubros = categories parent_id IS NULL
   async listCategories() {
     const [rows] = await sequelize.query(`
-      SELECT id, name, parent_id
+      SELECT id, name
       FROM categories
-      WHERE is_active = 1
-      ORDER BY parent_id IS NOT NULL, parent_id, name
+      WHERE is_active = 1 AND parent_id IS NULL
+      ORDER BY name ASC
     `);
     return rows || [];
   },
 
-  /**
-   * ✅ Compat para tu endpoint /public/subcategories?category_id=ID
-   * En tu modelo real, "subcategories" == hijos en categories.parent_id
-   */
+  // Subrubros = categories donde parent_id = rubro
   async listSubcategories({ category_id }) {
     const [rows] = await sequelize.query(
       `
@@ -68,108 +65,105 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Catalog (include_children con categories.parent_id)
+  // ✅ Catalog (como POS)
   // =====================
-  // ✅ REEMPLAZAZAR SOLO listCatalog() EN src/services/public.service.js
-async listCatalog({
-  branch_id,
-  search,
-  category_id,       // rubro padre (AUDIO = 2)
-  subcategory_id,    // ⚠️ en tu frontend hoy viene acá el "subrubro", pero en tu DB es categories.id (hijo)
-  include_children,
-  in_stock,
-  page,
-  limit,
-}) {
-  const where = ["branch_id = :branch_id"];
-  const repl = {
+  async listCatalog({
     branch_id,
+    search,
+    category_id,      // rubro (padre)
+    subcategory_id,   // subrubro (chip) => OJO: es ID de categories hijo
+    include_children,
+    in_stock,
+    page,
     limit,
-    offset: (Math.max(1, Number(page || 1)) - 1) * Number(limit || 24),
-  };
+  }) {
+    const where = ["branch_id = :branch_id"];
+    const repl = {
+      branch_id,
+      limit: Math.min(100, Math.max(1, Number(limit || 24))),
+      offset: (Math.max(1, Number(page || 1)) - 1) * Math.min(100, Math.max(1, Number(limit || 24))),
+    };
 
-  const parentCid = Number(category_id || 0);
-  const childCid = Number(subcategory_id || 0); // ✅ TRATAR COMO category_id HIJO
-  const inc = toBoolLike(include_children, false);
+    const parentId = Number(category_id || 0);
+    const childId = Number(subcategory_id || 0);
+    const inc = toBoolLike(include_children, false);
 
-  // ✅ 1) Si viene "chip" (hijo) => filtrar por category_id del hijo
-  if (childCid) {
-    where.push("category_id = :child_category_id");
-    repl.child_category_id = childCid;
+    // ✅ 1) Si viene subrubro (chip) => en tu DB ES products.category_id
+    if (childId) {
+      where.push("category_id = :child_category_id");
+      repl.child_category_id = childId;
 
-    // 🔒 si además viene el padre, validamos pertenencia (evita mezclar rubros)
-    if (parentCid) {
-      where.push(`
-        EXISTS (
-          SELECT 1
-          FROM categories c
-          WHERE c.id = :child_category_id
-            AND c.parent_id = :parent_category_id
-            AND c.is_active = 1
-        )
-      `);
-      repl.parent_category_id = parentCid;
-    }
-  }
-  // ✅ 2) "Todos" dentro del rubro (padre)
-  else if (parentCid) {
-    repl.parent_category_id = parentCid;
-
-    if (inc) {
-      where.push(`
-        (
-          category_id = :parent_category_id
-          OR category_id IN (
-            SELECT id
-            FROM categories
-            WHERE parent_id = :parent_category_id AND is_active = 1
+      // Si además viene rubro, acota por consistencia (child debe pertenecer al parent)
+      if (parentId) {
+        where.push(`
+          category_id IN (
+            SELECT id FROM categories
+            WHERE (id = :child_category_id AND parent_id = :parent_id) OR id = :child_category_id
           )
-        )
-      `);
-    } else {
-      where.push("category_id = :parent_category_id");
+        `);
+        repl.parent_id = parentId;
+      }
     }
-  }
+    // ✅ 2) Si viene rubro (Todos dentro del rubro)
+    else if (parentId) {
+      repl.parent_id = parentId;
 
-  if (search) {
-    repl.q = `%${escLike(search)}%`;
-    where.push(`
-      (name LIKE :q ESCAPE '\\'
-      OR brand LIKE :q ESCAPE '\\'
-      OR model LIKE :q ESCAPE '\\'
-      OR sku LIKE :q ESCAPE '\\'
-      OR barcode LIKE :q ESCAPE '\\')
-    `);
-  }
+      // include_children=true => padre + hijos
+      if (inc) {
+        where.push(`
+          (
+            category_id = :parent_id
+            OR category_id IN (
+              SELECT id FROM categories
+              WHERE parent_id = :parent_id AND is_active = 1
+            )
+          )
+        `);
+      } else {
+        // clásico: solo padre (si existieran productos cargados directo al padre)
+        where.push("category_id = :parent_id");
+      }
+    }
 
-  if (in_stock) where.push("(track_stock = 0 OR stock_qty > 0)");
+    if (search) {
+      repl.q = `%${escLike(search)}%`;
+      where.push(`
+        (name LIKE :q ESCAPE '\\'
+        OR brand LIKE :q ESCAPE '\\'
+        OR model LIKE :q ESCAPE '\\'
+        OR sku LIKE :q ESCAPE '\\'
+        OR barcode LIKE :q ESCAPE '\\')
+      `);
+    }
 
-  const whereSql = `WHERE ${where.join(" AND ")}`;
+    if (toBoolLike(in_stock, true)) {
+      where.push("(track_stock = 0 OR stock_qty > 0)");
+    }
 
-  const [[countRow]] = await sequelize.query(
-    `SELECT COUNT(*) AS total FROM v_public_catalog ${whereSql}`,
-    { replacements: repl }
-  );
+    const whereSql = `WHERE ${where.join(" AND ")}`;
 
-  const [items] = await sequelize.query(
-    `SELECT * FROM v_public_catalog ${whereSql}
-     ORDER BY product_id DESC
-     LIMIT :limit OFFSET :offset`,
-    { replacements: repl }
-  );
+    const [[countRow]] = await sequelize.query(
+      `SELECT COUNT(*) AS total FROM v_public_catalog ${whereSql}`,
+      { replacements: repl }
+    );
 
-  const total = Number(countRow?.total || 0);
-  const lim = Number(limit || 24);
+    const [items] = await sequelize.query(
+      `SELECT * FROM v_public_catalog ${whereSql}
+       ORDER BY product_id DESC
+       LIMIT :limit OFFSET :offset`,
+      { replacements: repl }
+    );
 
-  return {
-    items: items || [],
-    page: Number(page || 1),
-    limit: lim,
-    total,
-    pages: total ? Math.ceil(total / lim) : 0,
-  };
-},
+    const total = Number(countRow?.total || 0);
 
+    return {
+      items: items || [],
+      page: Number(page || 1),
+      limit: repl.limit,
+      total,
+      pages: total ? Math.ceil(total / repl.limit) : 0,
+    };
+  },
 
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
