@@ -1,11 +1,8 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (taxonomy real por categories.parent_id)
-// - /public/categories => devuelve TODAS (padres + hijos) con parent_id
-// - /public/subcategories?category_id=PADRE => devuelve hijos (categories.parent_id = PADRE)
-// - /public/catalog:
-//    - chip subrubro (subcategory_id) => filtra por products.category_id = subcategory_id (hijo)
-//    - "Todos" => category_id=PADRE + include_children=true => padre + hijos
-// - in_stock opcional
+// ✅ COPY-PASTE FINAL (POS taxonomy real con categories.parent_id)
+// - Subrubros salen de categories (hijos por parent_id)
+// - Chip subrubro filtra por products.category_id = ID_HIJO (NO subcategory_id)
+// - "Todos" trae padre + hijos (include_children=1), siempre acotado al rubro
 
 const { sequelize } = require("../models");
 
@@ -27,9 +24,8 @@ module.exports = {
   // =====================
   // ✅ Taxonomía (REAL)
   // =====================
-
-  // ✅ TODAS las categorías (padres + hijos) con parent_id
   async listCategories() {
+    // devuelve TODO (padres + hijos)
     const [rows] = await sequelize.query(`
       SELECT id, name, parent_id
       FROM categories
@@ -39,8 +35,8 @@ module.exports = {
     return rows || [];
   },
 
-  // ✅ Hijos de un padre
   async listSubcategories({ category_id }) {
+    // hijos por parent_id
     const [rows] = await sequelize.query(
       `
       SELECT id, name, parent_id
@@ -67,21 +63,21 @@ module.exports = {
   },
 
   // =====================
-  // ✅ Catalog (como POS)
+  // ✅ Catalog
   // =====================
   async listCatalog({
     branch_id,
     search,
-    category_id,      // padre
-    subcategory_id,   // hijo (chip) => OJO: es ID de categories hijo
+    category_id,       // rubro padre
+    subcategory_id,    // subrubro = ID hijo (pero filtra por products.category_id)
     include_children,
     in_stock,
     page,
     limit,
   }) {
     const where = ["branch_id = :branch_id"];
-    const lim = Math.min(100, Math.max(1, Number(limit || 24)));
     const pg = Math.max(1, Number(page || 1));
+    const lim = Math.min(100, Math.max(1, Number(limit || 24)));
 
     const repl = {
       branch_id,
@@ -93,23 +89,24 @@ module.exports = {
     const childId = Number(subcategory_id || 0);
     const inc = toBoolLike(include_children, false);
 
-    // ✅ 1) Subrubro (chip): en tu DB ES products.category_id = hijo
+    // ✅ 1) CHIP subrubro: products.category_id = ID_HIJO
     if (childId) {
       where.push("category_id = :child_id");
       repl.child_id = childId;
 
-      // si además viene padre, validamos pertenencia
+      // (opcional pero recomendado) validar que ese hijo pertenezca al padre actual
       if (parentId) {
         where.push(`
-          :child_id IN (
-            SELECT id FROM categories
-            WHERE id = :child_id AND parent_id = :parent_id AND is_active = 1
+          EXISTS (
+            SELECT 1
+            FROM categories c
+            WHERE c.id = :child_id AND c.parent_id = :parent_id AND c.is_active = 1
           )
         `);
         repl.parent_id = parentId;
       }
     }
-    // ✅ 2) Rubro: "Todos" dentro del rubro
+    // ✅ 2) "Todos" dentro del rubro: padre + hijos
     else if (parentId) {
       repl.parent_id = parentId;
 
@@ -139,6 +136,7 @@ module.exports = {
       `);
     }
 
+    // stock opcional
     if (toBoolLike(in_stock, true)) {
       where.push("(track_stock = 0 OR stock_qty > 0)");
     }
