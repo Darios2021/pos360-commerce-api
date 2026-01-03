@@ -1,13 +1,17 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (Catalog + Suggestions) usando v_public_catalog (según tu DESCRIBE)
-// - Search “menos estricto”: name, description, brand, model, sku, barcode, code, category_name, subcategory_name
-// - Chips: por subcategory_id filtra directo en vc.subcategory_id (tu vista lo tiene)
-// - "Todos" (padre): vc.category_id = category_id (tu vista lo tiene normalizado)
+// ✅ COPY-PASTE FINAL (FIX 500 "unterminated string literal")
+// - NO usar ESCAPE '\' (rompe en MySQL)
+// - Usamos ESCAPE '!' + escLike para % _ !
+// - Search amplio: name, description, brand, model, sku, barcode, code, category_name, subcategory_name
+// - Suggestions con GROUP BY seguro (ONLY_FULL_GROUP_BY friendly)
 
 const { sequelize } = require("../models");
 
+const ESC = "!";
+
 function escLike(s) {
-  return String(s ?? "").replace(/[%_\\]/g, (m) => "\\" + m);
+  // escapamos el mismo char de ESC, y los comodines % _
+  return String(s ?? "").replace(/[!%_]/g, (m) => ESC + m);
 }
 
 function toBoolLike(v, d = false) {
@@ -20,13 +24,18 @@ function toBoolLike(v, d = false) {
   return d;
 }
 
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+
 module.exports = {
   // =====================
   // ✅ Taxonomía
   // =====================
   async listCategories() {
     const [rows] = await sequelize.query(`
-      SELECT id, name, parent_id, is_active
+      SELECT id, name, parent_id
       FROM categories
       WHERE is_active = 1
       ORDER BY
@@ -40,7 +49,7 @@ module.exports = {
   async listSubcategories({ category_id }) {
     const [rows] = await sequelize.query(
       `
-      SELECT id, name, parent_id, is_active
+      SELECT id, name, parent_id
       FROM categories
       WHERE is_active = 1 AND parent_id = :category_id
       ORDER BY name ASC
@@ -78,47 +87,61 @@ module.exports = {
   }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
     const repl = {
-      branch_id: Number(branch_id),
-      limit: Number(limit || 24),
-      offset: (Math.max(1, Number(page || 1)) - 1) * Number(limit || 24),
+      branch_id: toInt(branch_id),
+      limit: Math.min(100, Math.max(1, toInt(limit, 24))),
+      offset: (Math.max(1, toInt(page, 1)) - 1) * Math.min(100, Math.max(1, toInt(limit, 24))),
     };
 
-    const cid = category_id ? Number(category_id) : 0;
-    const sid = subcategory_id ? Number(subcategory_id) : 0;
-    void include_children; // compat
+    const cid = toInt(category_id, 0);
+    const sid = toInt(subcategory_id, 0);
+    const inc = toBoolLike(include_children, false);
 
-    // ✅ Padre
-    if (cid) {
-      where.push("vc.category_id = :category_id");
-      repl.category_id = cid;
-    }
-
-    // ✅ Chip: usa subcategory_id de la vista (tu DESCRIBE lo muestra)
+    // ✅ Filtro categoría/subcategoría (según tu contrato)
+    // - Chip (subcategory_id): filtrar por vc.subcategory_id
+    // - Todos (category_id): vc.category_id = padre
     if (sid) {
       where.push("vc.subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
+
+      // opcional: validar relación con parent
+      if (cid) {
+        where.push(`
+          :subcategory_id IN (
+            SELECT id FROM categories
+            WHERE parent_id = :category_id AND is_active = 1
+          )
+        `);
+        repl.category_id = cid;
+      }
+    } else if (cid) {
+      where.push("vc.category_id = :category_id");
+      repl.category_id = cid;
+
+      // si el frontend manda include_children=1, tu vista ya está “normalizada”
+      // (si NO lo estuviera, acá habría que expandir hijos, pero vos ya lo resolviste en la view)
+      void inc;
     }
 
-    // ✅ Search suave: incluye categoría/subcategoría/descripcion
-    const q = String(search || "").trim();
+    // ✅ Search (AMPLIO y tolerante)
+    const q = String(search || "").trim().toLowerCase();
     if (q.length) {
-      repl.q = `%${escLike(q.toLowerCase())}%`;
+      repl.q = `%${escLike(q)}%`;
       where.push(`
         (
-          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '\\'
+          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
         )
       `);
     }
 
-    // ✅ stock (tu vista tiene track_stock + stock_qty)
+    // ✅ stock filter (si tu view tiene track_stock y stock_qty, como en tu screenshot)
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
@@ -150,7 +173,7 @@ module.exports = {
 
     return {
       items: items || [],
-      page: Math.max(1, Number(page || 1)),
+      page: Math.max(1, toInt(page, 1)),
       limit: lim,
       total,
       pages: total ? Math.ceil(total / lim) : 0,
@@ -161,48 +184,52 @@ module.exports = {
   // ✅ Suggestions (autocomplete)
   // =====================
   async listSuggestions({ branch_id, q, limit }) {
-    const query = String(q || "").trim();
-    if (!query) return [];
-
+    const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
     const repl = {
-      branch_id: Number(branch_id),
-      limit: Math.min(20, Math.max(1, Number(limit || 8))),
-      q: `%${escLike(query.toLowerCase())}%`,
+      branch_id: toInt(branch_id),
+      limit: Math.min(15, Math.max(1, toInt(limit, 8))),
     };
 
-    // ✅ devolvemos items “listos para click”: product_id + name + brand/model + category/subcategory
+    const qq = String(q || "").trim().toLowerCase();
+    if (!qq.length) return [];
+
+    repl.q = `%${escLike(qq)}%`;
+    where.push(`
+      (
+        LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
+      )
+    `);
+
+    const whereSql = `WHERE ${where.join(" AND ")}`;
+
     const [rows] = await sequelize.query(
       `
       SELECT
         vc.product_id,
-        vc.name,
-        vc.brand,
-        vc.model,
-        vc.category_id,
-        vc.category_name,
-        vc.subcategory_id,
-        vc.subcategory_name,
-        vc.image_url
+        MAX(vc.name) AS name,
+        MAX(vc.brand) AS brand,
+        MAX(vc.model) AS model,
+        MAX(vc.category_id) AS category_id,
+        MAX(vc.category_name) AS category_name,
+        MAX(vc.subcategory_id) AS subcategory_id,
+        MAX(vc.subcategory_name) AS subcategory_name,
+        MIN(vc.image_url) AS image_url
       FROM v_public_catalog vc
-      WHERE vc.branch_id = :branch_id
-        AND vc.is_active = 1
-        AND (
-          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '\\'
-          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '\\'
-        )
+      ${whereSql}
       GROUP BY vc.product_id
       ORDER BY
         CASE
-          WHEN LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '\\' THEN 0
-          WHEN LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '\\' THEN 1
-          WHEN LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '\\' THEN 2
+          WHEN LOWER(MAX(COALESCE(vc.name,''))) LIKE :q ESCAPE '${ESC}' THEN 0
+          WHEN LOWER(MAX(COALESCE(vc.brand,''))) LIKE :q ESCAPE '${ESC}' THEN 1
+          WHEN LOWER(MAX(COALESCE(vc.model,''))) LIKE :q ESCAPE '${ESC}' THEN 2
           ELSE 3
         END,
         vc.product_id DESC
@@ -214,16 +241,18 @@ module.exports = {
     return rows || [];
   },
 
+  // =====================
+  // ✅ Product detail
+  // =====================
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
       `
       SELECT *
       FROM v_public_catalog
-      WHERE branch_id = :branch_id
-        AND product_id = :product_id
+      WHERE branch_id = :branch_id AND product_id = :product_id
       LIMIT 1
       `,
-      { replacements: { branch_id, product_id } }
+      { replacements: { branch_id: toInt(branch_id), product_id: toInt(product_id) } }
     );
     return rows?.[0] || null;
   },
