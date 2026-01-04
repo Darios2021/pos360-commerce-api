@@ -1,7 +1,5 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL (Catalog + Suggestions)
-// - /public/catalog usa query: branch_id, search, category_id, subcategory_id, in_stock, page, limit
-// - /public/suggestions usa query: branch_id, q, limit
+// ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms)
 
 const PublicService = require("../services/public.service");
 
@@ -24,9 +22,6 @@ function toBoolLike(v, d = false) {
 }
 
 module.exports = {
-  // =====================
-  // ✅ Taxonomía
-  // =====================
   async listCategories(req, res) {
     try {
       const items = await PublicService.listCategories();
@@ -64,9 +59,6 @@ module.exports = {
     }
   },
 
-  // =====================
-  // ✅ Branches
-  // =====================
   async listBranches(req, res) {
     try {
       const items = await PublicService.listBranches();
@@ -81,9 +73,6 @@ module.exports = {
     }
   },
 
-  // =====================
-  // ✅ Catalog
-  // =====================
   async listCatalog(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
@@ -100,11 +89,14 @@ module.exports = {
         search: toStr(req.query.search),
         category_id: toInt(req.query.category_id) || null,
         subcategory_id: toInt(req.query.subcategory_id) || null,
-        // include_children lo mantenemos por compatibilidad (aunque tu vista ya viene normalizada)
         include_children: toBoolLike(req.query.include_children, false),
-        in_stock: toBoolLike(req.query.in_stock, false), // default: NO filtrar stock en tienda
+        in_stock: toBoolLike(req.query.in_stock, false),
         page: Math.max(1, toInt(req.query.page, 1)),
         limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
+
+        // ✅ NUEVO
+        strict_search: toBoolLike(req.query.strict_search, false),
+        exclude_terms: toStr(req.query.exclude_terms), // "cargador,cable,energia,usb"
       });
 
       return res.json({ ok: true, ...result });
@@ -118,9 +110,6 @@ module.exports = {
     }
   },
 
-  // =====================
-  // ✅ Suggestions (autocomplete)
-  // =====================
   async listSuggestions(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
@@ -147,9 +136,6 @@ module.exports = {
     }
   },
 
-  // =====================
-  // ✅ Producto
-  // =====================
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);

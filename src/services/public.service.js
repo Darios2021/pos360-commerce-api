@@ -1,16 +1,12 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (FIX 500 "unterminated string literal")
-// - NO usar ESCAPE '\' (rompe en MySQL)
-// - Usamos ESCAPE '!' + escLike para % _ !
-// - Search amplio: name, description, brand, model, sku, barcode, code, category_name, subcategory_name
-// - Suggestions con GROUP BY seguro (ONLY_FULL_GROUP_BY friendly)
+// ✅ COPY-PASTE FINAL (agrega strict_search + exclude_terms)
+// - strict_search=1 => NO busca en description (evita “cargadores para auriculares”)
+// - exclude_terms => excluye palabras (ej: cargador,cable,energia,usb)
 
 const { sequelize } = require("../models");
 
 const ESC = "!";
-
 function escLike(s) {
-  // escapamos el mismo char de ESC, y los comodines % _
   return String(s ?? "").replace(/[!%_]/g, (m) => ESC + m);
 }
 
@@ -29,10 +25,12 @@ function toInt(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+function toStr(v) {
+  const s = String(v ?? "").trim();
+  return s.length ? s : "";
+}
+
 module.exports = {
-  // =====================
-  // ✅ Taxonomía
-  // =====================
   async listCategories() {
     const [rows] = await sequelize.query(`
       SELECT id, name, parent_id
@@ -59,9 +57,6 @@ module.exports = {
     return rows || [];
   },
 
-  // =====================
-  // ✅ Branches
-  // =====================
   async listBranches() {
     const [rows] = await sequelize.query(`
       SELECT id, name, code, address, city
@@ -72,9 +67,6 @@ module.exports = {
     return rows || [];
   },
 
-  // =====================
-  // ✅ Catalog
-  // =====================
   async listCatalog({
     branch_id,
     search,
@@ -84,26 +76,30 @@ module.exports = {
     in_stock,
     page,
     limit,
+
+    // ✅ NUEVO
+    strict_search,
+    exclude_terms,
   }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
+    const lim = Math.min(100, Math.max(1, toInt(limit, 24)));
+    const pg = Math.max(1, toInt(page, 1));
+
     const repl = {
       branch_id: toInt(branch_id),
-      limit: Math.min(100, Math.max(1, toInt(limit, 24))),
-      offset: (Math.max(1, toInt(page, 1)) - 1) * Math.min(100, Math.max(1, toInt(limit, 24))),
+      limit: lim,
+      offset: (pg - 1) * lim,
     };
 
     const cid = toInt(category_id, 0);
     const sid = toInt(subcategory_id, 0);
     const inc = toBoolLike(include_children, false);
+    void inc;
 
-    // ✅ Filtro categoría/subcategoría (según tu contrato)
-    // - Chip (subcategory_id): filtrar por vc.subcategory_id
-    // - Todos (category_id): vc.category_id = padre
     if (sid) {
       where.push("vc.subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
 
-      // opcional: validar relación con parent
       if (cid) {
         where.push(`
           :subcategory_id IN (
@@ -116,20 +112,48 @@ module.exports = {
     } else if (cid) {
       where.push("vc.category_id = :category_id");
       repl.category_id = cid;
-
-      // si el frontend manda include_children=1, tu vista ya está “normalizada”
-      // (si NO lo estuviera, acá habría que expandir hijos, pero vos ya lo resolviste en la view)
-      void inc;
     }
 
-    // ✅ Search (AMPLIO y tolerante)
-    const q = String(search || "").trim().toLowerCase();
+    // ✅ stock filter
+    if (toBoolLike(in_stock, false)) {
+      where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+    }
+
+    // ✅ NUEVO: exclude_terms (coma separada)
+    const ex = toStr(exclude_terms)
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    for (let i = 0; i < ex.length; i++) {
+      const term = ex[i].toLowerCase();
+      const key = `ex${i}`;
+      repl[key] = `%${escLike(term)}%`;
+
+      // excluimos contra name + category/subcategory + brand/model
+      where.push(`
+        NOT (
+          LOWER(COALESCE(vc.name,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.brand,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.model,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.category_name,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${key} ESCAPE '${ESC}'
+        )
+      `);
+    }
+
+    // ✅ Search
+    const q = toStr(search).toLowerCase();
+    const strict = toBoolLike(strict_search, false);
+
     if (q.length) {
       repl.q = `%${escLike(q)}%`;
+
+      // strict_search=1 => NO incluye description (clave para evitar energía/cargadores)
       where.push(`
         (
           LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'
+          ${strict ? "" : `OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'`}
           OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
           OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
           OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
@@ -139,11 +163,6 @@ module.exports = {
           OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
         )
       `);
-    }
-
-    // ✅ stock filter (si tu view tiene track_stock y stock_qty, como en tu screenshot)
-    if (toBoolLike(in_stock, false)) {
-      where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
@@ -169,20 +188,16 @@ module.exports = {
     );
 
     const total = Number(countRow?.total || 0);
-    const lim = Number(repl.limit);
 
     return {
       items: items || [],
-      page: Math.max(1, toInt(page, 1)),
+      page: pg,
       limit: lim,
       total,
       pages: total ? Math.ceil(total / lim) : 0,
     };
   },
 
-  // =====================
-  // ✅ Suggestions (autocomplete)
-  // =====================
   async listSuggestions({ branch_id, q, limit }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
     const repl = {
@@ -241,9 +256,6 @@ module.exports = {
     return rows || [];
   },
 
-  // =====================
-  // ✅ Product detail
-  // =====================
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
       `
