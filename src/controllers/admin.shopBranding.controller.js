@@ -1,43 +1,42 @@
 // src/controllers/admin.shopBranding.controller.js
-// ✅ COPY-PASTE FINAL
-const AdminShopBrandingService = require("../services/admin.shopBranding.service");
+// ✅ COPY-PASTE FINAL COMPLETO
 
-function toStr(v) {
-  const s = String(v ?? "").trim();
-  return s.length ? s : "";
-}
+const shopBrandingService = require("../services/admin.shopBranding.service");
 
 module.exports = {
-  async get(req, res) {
+  async getBranding(req, res, next) {
     try {
-      const item = await AdminShopBrandingService.get();
+      const item = await shopBrandingService.getShopBranding();
       return res.json({ ok: true, item });
-    } catch (err) {
-      console.error("ADMIN_SHOP_BRANDING_GET_ERROR", err);
-      return res.status(500).json({
-        ok: false,
-        code: "ADMIN_SHOP_BRANDING_GET_ERROR",
-        message: err?.message || "Error trayendo branding",
-      });
+    } catch (e) {
+      next(e);
     }
   },
 
-  async update(req, res) {
+  async updateBranding(req, res, next) {
     try {
-      const item = await AdminShopBrandingService.update({
-        name: toStr(req.body?.name),
-        logo_url: req.body?.logo_url ?? "",
-        favicon_url: req.body?.favicon_url ?? "",
-      });
-
+      const item = await shopBrandingService.updateShopBranding(req.body || {});
       return res.json({ ok: true, item });
-    } catch (err) {
-      console.error("ADMIN_SHOP_BRANDING_UPDATE_ERROR", err);
-      return res.status(500).json({
-        ok: false,
-        code: "ADMIN_SHOP_BRANDING_UPDATE_ERROR",
-        message: err?.message || "Error actualizando branding",
-      });
+    } catch (e) {
+      next(e);
+    }
+  },
+
+  async uploadLogo(req, res, next) {
+    try {
+      const item = await shopBrandingService.uploadShopLogo(req);
+      return res.json({ ok: true, item });
+    } catch (e) {
+      next(e);
+    }
+  },
+
+  async uploadFavicon(req, res, next) {
+    try {
+      const item = await shopBrandingService.uploadShopFavicon(req);
+      return res.json({ ok: true, item });
+    } catch (e) {
+      next(e);
     }
   },
 };

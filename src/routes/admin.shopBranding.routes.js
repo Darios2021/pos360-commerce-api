@@ -1,14 +1,20 @@
 // src/routes/admin.shopBranding.routes.js
-// ✅ COPY-PASTE FINAL
-// Admin Branding (protegido por requireAuth desde v1.routes.js)
-
+// ✅ COPY-PASTE FINAL COMPLETO
 const router = require("express").Router();
-const AdminShopBrandingController = require("../controllers/admin.shopBranding.controller");
 
-// GET branding actual
-router.get("/branding", AdminShopBrandingController.get);
+const controller = require("../controllers/admin.shopBranding.controller");
+const service = require("../services/admin.shopBranding.service");
 
-// PUT branding (json)
-router.put("/branding", AdminShopBrandingController.update);
+// GET /api/v1/admin/shop/branding
+router.get("/branding", controller.getBranding);
+
+// PUT /api/v1/admin/shop/branding
+router.put("/branding", controller.updateBranding);
+
+// POST /api/v1/admin/shop/branding/logo
+router.post("/branding/logo", service.uploadLogoMiddleware, controller.uploadLogo);
+
+// POST /api/v1/admin/shop/branding/favicon
+router.post("/branding/favicon", service.uploadFaviconMiddleware, controller.uploadFavicon);
 
 module.exports = router;
