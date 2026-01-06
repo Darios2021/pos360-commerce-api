@@ -1,22 +1,14 @@
 // src/routes/admin.shopBranding.routes.js
 // ✅ COPY-PASTE FINAL
+// Admin Branding (protegido por requireAuth desde v1.routes.js)
 
-const express = require("express");
-const router = express.Router();
-
+const router = require("express").Router();
 const AdminShopBrandingController = require("../controllers/admin.shopBranding.controller");
 
-const multer = require("multer");
-const upload = multer({ storage: multer.memoryStorage() });
+// GET branding actual
+router.get("/branding", AdminShopBrandingController.get);
 
-// ⚠️ Si ya tenés auth/admin middleware, ponelo acá:
-// const { requireAuth, requireAdmin } = require("../middlewares/auth");
-// router.use(requireAuth, requireAdmin);
-
-router.get("/shop/branding", AdminShopBrandingController.get);
-router.put("/shop/branding", AdminShopBrandingController.update);
-
-router.post("/shop/branding/logo", upload.single("file"), AdminShopBrandingController.uploadLogo);
-router.post("/shop/branding/favicon", upload.single("file"), AdminShopBrandingController.uploadFavicon);
+// PUT branding (json)
+router.put("/branding", AdminShopBrandingController.update);
 
 module.exports = router;
