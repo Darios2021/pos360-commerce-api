@@ -32,6 +32,9 @@ const meRoutes = require("./me.routes");
 // ✅ ADMIN USERS
 const adminUsersRoutes = require("./adminUsers.routes");
 
+// ✅ ADMIN SHOP BRANDING (NUEVO)
+const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
+
 function safeUse(path, ...mws) {
   for (const mw of mws) {
     if (typeof mw !== "function") {
@@ -72,5 +75,9 @@ safeUse("/me", requireAuth, meRoutes);
 
 // ✅ Admin Users
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
+
+// ✅ Admin Shop Branding (NUEVO)
+// Queda así: /api/v1/admin/shop/branding ...
+safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes);
 
 module.exports = router;
