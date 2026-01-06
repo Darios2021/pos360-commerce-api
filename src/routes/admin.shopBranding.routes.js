@@ -1,20 +1,13 @@
-// src/routes/admin.shopBranding.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO
 const router = require("express").Router();
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage() });
 
-const controller = require("../controllers/admin.shopBranding.controller");
-const service = require("../services/admin.shopBranding.service");
+const ctrl = require("../controllers/admin.shopBranding.controller");
 
-// GET /api/v1/admin/shop/branding
-router.get("/branding", controller.getBranding);
+router.get("/branding", ctrl.get);
+router.put("/branding", ctrl.update);
 
-// PUT /api/v1/admin/shop/branding
-router.put("/branding", controller.updateBranding);
-
-// POST /api/v1/admin/shop/branding/logo
-router.post("/branding/logo", service.uploadLogoMiddleware, controller.uploadLogo);
-
-// POST /api/v1/admin/shop/branding/favicon
-router.post("/branding/favicon", service.uploadFaviconMiddleware, controller.uploadFavicon);
+router.post("/branding/logo", upload.single("file"), ctrl.uploadLogo);
+router.post("/branding/favicon", upload.single("file"), ctrl.uploadFavicon);
 
 module.exports = router;

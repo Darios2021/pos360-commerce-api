@@ -1,29 +1,16 @@
 // src/services/admin.shopBranding.service.js
-// ✅ COPY-PASTE FINAL COMPLETO (CommonJS)
+// ✅ COPY-PASTE FINAL (backend CommonJS)
+// Branding admin: name, logo_url, favicon_url
+// - Upload a MinIO/S3 (NO filesystem /uploads)
+// - Guarda URL pública en DB
 
-const path = require("path");
-const fs = require("fs");
-const multer = require("multer");
 const { sequelize } = require("../models");
+const { uploadBuffer } = require("./s3Upload.service");
 
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+function toStr(v, d = "") {
+  const s = String(v ?? "").trim();
+  return s.length ? s : d;
 }
-
-const UPLOAD_DIR = path.join(process.cwd(), "uploads", "shop");
-ensureDir(UPLOAD_DIR);
-
-// Multer storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "").toLowerCase() || ".png";
-    const safe = file.fieldname === "favicon" ? "favicon" : "logo";
-    cb(null, `${safe}-${Date.now()}${ext}`);
-  },
-});
-
-const upload = multer({ storage });
 
 async function getRow() {
   const [rows] = await sequelize.query(`
@@ -32,86 +19,96 @@ async function getRow() {
     WHERE id = 1
     LIMIT 1
   `);
+  return rows?.[0] || null;
+}
 
-  const r = rows?.[0] || null;
-  if (!r) {
-    return {
-      name: "San Juan Tecnología",
-      logo_url: "",
-      favicon_url: "",
-      updated_at: new Date().toISOString(),
-    };
-  }
-  return {
-    name: r.name || "San Juan Tecnología",
-    logo_url: r.logo_url || "",
-    favicon_url: r.favicon_url || "",
-    updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
-  };
+async function ensureRowExists() {
+  await sequelize.query(`
+    INSERT INTO shop_branding (id, name, logo_url, favicon_url, updated_at)
+    VALUES (1, 'San Juan Tecnología', '', '', NOW())
+    ON DUPLICATE KEY UPDATE id = id
+  `);
 }
 
 module.exports = {
-  async getShopBranding() {
-    return await getRow();
+  async get() {
+    const r = await getRow();
+    if (!r) {
+      return {
+        name: "San Juan Tecnología",
+        logo_url: "",
+        favicon_url: "",
+        updated_at: new Date().toISOString(),
+      };
+    }
+    return {
+      name: r.name || "San Juan Tecnología",
+      logo_url: r.logo_url || "",
+      favicon_url: r.favicon_url || "",
+      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+    };
   },
 
-  async updateShopBranding({ name }) {
-    const n = String(name || "").trim();
+  async updateName({ name }) {
+    await ensureRowExists();
+
+    const nm = toStr(name, "San Juan Tecnología");
 
     await sequelize.query(
       `
-      INSERT INTO shop_branding (id, name, logo_url, favicon_url, updated_at)
-      VALUES (1, :name, '', '', NOW())
-      ON DUPLICATE KEY UPDATE
-        name = :name,
-        updated_at = NOW()
+      UPDATE shop_branding
+      SET name = :name, updated_at = NOW()
+      WHERE id = 1
       `,
-      { replacements: { name: n || "San Juan Tecnología" } }
+      { replacements: { name: nm } }
     );
 
-    return await getRow();
+    return this.get();
   },
 
-  // middleware multer para controller
-  uploadLogoMiddleware: upload.single("file"),
-  uploadFaviconMiddleware: upload.single("file"),
+  async uploadLogo({ file }) {
+    await ensureRowExists();
+    if (!file?.buffer) throw new Error("FILE_REQUIRED");
 
-  async uploadShopLogo(req) {
-    // req.file lo pone multer
-    if (!req.file) throw new Error("NO_FILE");
-
-    const rel = `/uploads/shop/${req.file.filename}`;
+    const up = await uploadBuffer({
+      keyPrefix: "pos360/shop",
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+      filename: file.originalname,
+    });
 
     await sequelize.query(
       `
-      INSERT INTO shop_branding (id, name, logo_url, favicon_url, updated_at)
-      VALUES (1, 'San Juan Tecnología', :logo_url, '', NOW())
-      ON DUPLICATE KEY UPDATE
-        logo_url = :logo_url,
-        updated_at = NOW()
+      UPDATE shop_branding
+      SET logo_url = :logo_url, updated_at = NOW()
+      WHERE id = 1
       `,
-      { replacements: { logo_url: rel } }
+      { replacements: { logo_url: up.url } }
     );
 
-    return await getRow();
+    return this.get();
   },
 
-  async uploadShopFavicon(req) {
-    if (!req.file) throw new Error("NO_FILE");
+  async uploadFavicon({ file }) {
+    await ensureRowExists();
+    if (!file?.buffer) throw new Error("FILE_REQUIRED");
 
-    const rel = `/uploads/shop/${req.file.filename}`;
+    const up = await uploadBuffer({
+      keyPrefix: "pos360/shop",
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+      filename: file.originalname,
+    });
 
     await sequelize.query(
       `
-      INSERT INTO shop_branding (id, name, logo_url, favicon_url, updated_at)
-      VALUES (1, 'San Juan Tecnología', '', :favicon_url, NOW())
-      ON DUPLICATE KEY UPDATE
-        favicon_url = :favicon_url,
-        updated_at = NOW()
+      UPDATE shop_branding
+      SET favicon_url = :favicon_url, updated_at = NOW()
+      WHERE id = 1
       `,
-      { replacements: { favicon_url: rel } }
+      { replacements: { favicon_url: up.url } }
     );
 
-    return await getRow();
+    return this.get();
   },
 };
