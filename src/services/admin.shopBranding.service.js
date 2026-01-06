@@ -1,114 +1,83 @@
 // src/services/admin.shopBranding.service.js
-// ✅ COPY-PASTE FINAL (backend CommonJS)
-// Branding admin: name, logo_url, favicon_url
-// - Upload a MinIO/S3 (NO filesystem /uploads)
-// - Guarda URL pública en DB
+// ✅ COPY-PASTE FINAL COMPLETO
+// - CommonJS (NO import)
+// - Sube a MinIO/S3 usando @aws-sdk/client-s3
+// - Devuelve URL pública usando S3_PUBLIC_BASE_URL (como products)
 
-const { sequelize } = require("../models");
-const { uploadBuffer } = require("./s3Upload.service");
+const path = require("path");
+const crypto = require("crypto");
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
 
-function toStr(v, d = "") {
-  const s = String(v ?? "").trim();
-  return s.length ? s : d;
+const { s3, s3Config } = require("../config/s3");
+
+function cleanSlash(s) {
+  return String(s || "").replace(/\/+$/, "");
 }
 
-async function getRow() {
-  const [rows] = await sequelize.query(`
-    SELECT id, name, logo_url, favicon_url, updated_at
-    FROM shop_branding
-    WHERE id = 1
-    LIMIT 1
-  `);
-  return rows?.[0] || null;
+function getPublicBase() {
+  // Preferimos base pública explícita (tu caso: https://storage-files.cingulado.org)
+  const pub = cleanSlash(process.env.S3_PUBLIC_BASE_URL || "");
+  if (pub) return pub;
+
+  // fallback: endpoint (puede no servir si es interno)
+  return cleanSlash(s3Config.endpoint || "");
 }
 
-async function ensureRowExists() {
-  await sequelize.query(`
-    INSERT INTO shop_branding (id, name, logo_url, favicon_url, updated_at)
-    VALUES (1, 'San Juan Tecnología', '', '', NOW())
-    ON DUPLICATE KEY UPDATE id = id
-  `);
+function guessExt(mime, originalName) {
+  const name = String(originalName || "").toLowerCase();
+  const byName = path.extname(name);
+  if (byName && byName.length <= 6) return byName;
+
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("png")) return ".png";
+  if (m.includes("jpeg") || m.includes("jpg")) return ".jpg";
+  if (m.includes("webp")) return ".webp";
+  if (m.includes("svg")) return ".svg";
+  if (m.includes("x-icon") || m.includes("ico")) return ".ico";
+  return ".png";
+}
+
+function buildKey(prefix, ext) {
+  const ts = Date.now();
+  const rnd = crypto.randomBytes(16).toString("hex");
+  const p = String(prefix || "shop").replace(/^\/+|\/+$/g, "");
+  return `${p}/${ts}-${rnd}${ext}`;
+}
+
+async function uploadBufferToS3({ buffer, contentType, key }) {
+  const Bucket = s3Config.bucket;
+  if (!Bucket) throw new Error("S3_BUCKET missing");
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType || "application/octet-stream",
+      ACL: "public-read", // ⚠️ si tu MinIO no permite ACL, avisame y lo dejamos sin ACL + policy pública.
+    })
+  );
+
+  const base = getPublicBase();
+  // Resultado como tus productos: https://storage-files.cingulado.org/pos360/<key>
+  return `${base}/${Bucket}/${key}`;
+}
+
+async function uploadShopAsset({ file, kind }) {
+  if (!file || !file.buffer) throw new Error("FILE_REQUIRED");
+
+  const ext = guessExt(file.mimetype, file.originalname);
+  const key = buildKey("shop", ext);
+
+  const url = await uploadBufferToS3({
+    buffer: file.buffer,
+    contentType: file.mimetype,
+    key,
+  });
+
+  return { url, key, kind };
 }
 
 module.exports = {
-  async get() {
-    const r = await getRow();
-    if (!r) {
-      return {
-        name: "San Juan Tecnología",
-        logo_url: "",
-        favicon_url: "",
-        updated_at: new Date().toISOString(),
-      };
-    }
-    return {
-      name: r.name || "San Juan Tecnología",
-      logo_url: r.logo_url || "",
-      favicon_url: r.favicon_url || "",
-      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
-    };
-  },
-
-  async updateName({ name }) {
-    await ensureRowExists();
-
-    const nm = toStr(name, "San Juan Tecnología");
-
-    await sequelize.query(
-      `
-      UPDATE shop_branding
-      SET name = :name, updated_at = NOW()
-      WHERE id = 1
-      `,
-      { replacements: { name: nm } }
-    );
-
-    return this.get();
-  },
-
-  async uploadLogo({ file }) {
-    await ensureRowExists();
-    if (!file?.buffer) throw new Error("FILE_REQUIRED");
-
-    const up = await uploadBuffer({
-      keyPrefix: "pos360/shop",
-      buffer: file.buffer,
-      mimeType: file.mimetype,
-      filename: file.originalname,
-    });
-
-    await sequelize.query(
-      `
-      UPDATE shop_branding
-      SET logo_url = :logo_url, updated_at = NOW()
-      WHERE id = 1
-      `,
-      { replacements: { logo_url: up.url } }
-    );
-
-    return this.get();
-  },
-
-  async uploadFavicon({ file }) {
-    await ensureRowExists();
-    if (!file?.buffer) throw new Error("FILE_REQUIRED");
-
-    const up = await uploadBuffer({
-      keyPrefix: "pos360/shop",
-      buffer: file.buffer,
-      mimeType: file.mimetype,
-      filename: file.originalname,
-    });
-
-    await sequelize.query(
-      `
-      UPDATE shop_branding
-      SET favicon_url = :favicon_url, updated_at = NOW()
-      WHERE id = 1
-      `,
-      { replacements: { favicon_url: up.url } }
-    );
-
-    return this.get();
-  },
+  uploadShopAsset,
 };
