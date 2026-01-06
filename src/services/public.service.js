@@ -1,5 +1,5 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (agrega strict_search + exclude_terms)
+// ✅ COPY-PASTE FINAL (agrega strict_search + exclude_terms + SHOP BRANDING)
 // - strict_search=1 => NO busca en description (evita “cargadores para auriculares”)
 // - exclude_terms => excluye palabras (ej: cargador,cable,energia,usb)
 
@@ -267,5 +267,33 @@ module.exports = {
       { replacements: { branch_id: toInt(branch_id), product_id: toInt(product_id) } }
     );
     return rows?.[0] || null;
+  },
+
+  // ✅ NUEVO: Branding público para ShopHeader + favicon
+  async getShopBranding() {
+    const [rows] = await sequelize.query(`
+      SELECT id, name, logo_url, favicon_url, updated_at
+      FROM shop_branding
+      WHERE id = 1
+      LIMIT 1
+    `);
+
+    const r = rows?.[0] || null;
+
+    if (!r) {
+      return {
+        name: "San Juan Tecnología",
+        logo_url: "",
+        favicon_url: "",
+        updated_at: new Date().toISOString(),
+      };
+    }
+
+    return {
+      name: r.name || "San Juan Tecnología",
+      logo_url: r.logo_url || "",
+      favicon_url: r.favicon_url || "",
+      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+    };
   },
 };

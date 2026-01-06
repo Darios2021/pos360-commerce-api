@@ -1,5 +1,5 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms)
+// ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms + SHOP BRANDING)
 
 const PublicService = require("../services/public.service");
 
@@ -165,6 +165,21 @@ module.exports = {
         ok: false,
         code: "PUBLIC_PRODUCT_ERROR",
         message: err?.message || "Error trayendo producto",
+      });
+    }
+  },
+
+  // ✅ NUEVO: GET /public/shop/branding
+  async getShopBranding(req, res) {
+    try {
+      const item = await PublicService.getShopBranding();
+      return res.json({ ok: true, item });
+    } catch (err) {
+      console.error("PUBLIC_SHOP_BRANDING_ERROR", err);
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_SHOP_BRANDING_ERROR",
+        message: err?.message || "Error trayendo branding",
       });
     }
   },

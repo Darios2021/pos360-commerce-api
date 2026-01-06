@@ -1,6 +1,6 @@
 // src/routes/public.routes.js
 // ✅ COPY-PASTE FINAL
-// Rutas públicas Ecommerce (taxonomía + catálogo + sugerencias + producto)
+// Rutas públicas Ecommerce (taxonomía + catálogo + sugerencias + producto + branding)
 
 const express = require("express");
 const router = express.Router();
@@ -22,6 +22,9 @@ router.get("/catalog", PublicController.listCatalog);
 
 // ✅ Sugerencias (autocomplete tipo ML)
 router.get("/suggestions", PublicController.listSuggestions);
+
+// ✅ Branding (logo + favicon + nombre tienda)
+router.get("/shop/branding", PublicController.getShopBranding);
 
 // Producto
 router.get("/products/:id", PublicController.getProductById);
