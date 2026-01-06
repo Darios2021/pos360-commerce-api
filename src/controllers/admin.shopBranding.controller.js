@@ -1,42 +1,63 @@
 // src/controllers/admin.shopBranding.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (CommonJS)
+// Depende de: src/services/admin.shopBranding.service.js
 
-const shopBrandingService = require("../services/admin.shopBranding.service");
+const svc = require("../services/admin.shopBranding.service");
+
+function ok(res, item) {
+  return res.json({ ok: true, item });
+}
+
+function fail(res, err, status = 500) {
+  const msg = err?.friendlyMessage || err?.message || "Error";
+  return res.status(status).json({ ok: false, code: err?.code || "ERROR", message: msg });
+}
 
 module.exports = {
-  async getBranding(req, res, next) {
+  // GET /api/v1/admin/shop/branding
+  async get(req, res) {
     try {
-      const item = await shopBrandingService.getShopBranding();
-      return res.json({ ok: true, item });
+      const item = await svc.get();
+      return ok(res, item);
     } catch (e) {
-      next(e);
+      return fail(res, e);
     }
   },
 
-  async updateBranding(req, res, next) {
+  // PUT /api/v1/admin/shop/branding  { name }
+  async update(req, res) {
     try {
-      const item = await shopBrandingService.updateShopBranding(req.body || {});
-      return res.json({ ok: true, item });
+      const name = req?.body?.name;
+      const item = await svc.updateName({ name });
+      return ok(res, item);
     } catch (e) {
-      next(e);
+      return fail(res, e);
     }
   },
 
-  async uploadLogo(req, res, next) {
+  // POST /api/v1/admin/shop/branding/logo (multipart: file)
+  async uploadLogo(req, res) {
     try {
-      const item = await shopBrandingService.uploadShopLogo(req);
-      return res.json({ ok: true, item });
+      const file = req?.file || null;
+      if (!file) return fail(res, new Error("FILE_REQUIRED"), 400);
+
+      const item = await svc.uploadLogo({ file });
+      return ok(res, item);
     } catch (e) {
-      next(e);
+      return fail(res, e);
     }
   },
 
-  async uploadFavicon(req, res, next) {
+  // POST /api/v1/admin/shop/branding/favicon (multipart: file)
+  async uploadFavicon(req, res) {
     try {
-      const item = await shopBrandingService.uploadShopFavicon(req);
-      return res.json({ ok: true, item });
+      const file = req?.file || null;
+      if (!file) return fail(res, new Error("FILE_REQUIRED"), 400);
+
+      const item = await svc.uploadFavicon({ file });
+      return ok(res, item);
     } catch (e) {
-      next(e);
+      return fail(res, e);
     }
   },
 };
