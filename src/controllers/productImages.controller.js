@@ -1,7 +1,6 @@
 // src/controllers/productImages.controller.js
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
-const { fileTypeFromBuffer } = require("file-type");
 const sharp = require("sharp");
 const { ProductImage } = require("../models");
 
@@ -43,7 +42,7 @@ function keyFromPublicUrl(url) {
 
   try {
     const u = new URL(url);
-    const p = u.pathname.replace(/^\/+/, ""); // sin leading slash
+    const p = u.pathname.replace(/^\/+/, "");
     const idx = p.indexOf(`${bucket}/`);
     if (idx === -1) return null;
     return p.substring(idx + `${bucket}/`.length);
@@ -60,7 +59,7 @@ function keyFromPublicUrl(url) {
  * =========================
  * NORMALIZACIÓN DE IMÁGENES
  * =========================
- * Acepta entrada: JPG/PNG/WebP
+ * Entrada permitida (detectada por sharp): jpeg/png/webp
  * Guarda SIEMPRE: WebP
  *
  * Env opcionales:
@@ -72,13 +71,38 @@ const IMG_MAX_UPLOAD_BYTES = Number(process.env.IMG_MAX_UPLOAD_BYTES || 6 * 1024
 const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 1200);
 const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 75);
 
-const ALLOWED_INPUT_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
+const ALLOWED_FORMATS = new Set(["jpeg", "png", "webp"]);
+
+function httpError(statusCode, message) {
+  const e = new Error(message);
+  e.statusCode = statusCode;
+  return e;
+}
+
+async function detectFormatOrThrow(buffer) {
+  let meta;
+  try {
+    meta = await sharp(buffer).metadata();
+  } catch {
+    throw httpError(415, "INVALID_IMAGE_FILE");
+  }
+
+  const fmt = String(meta?.format || "").toLowerCase();
+  if (!ALLOWED_FORMATS.has(fmt)) {
+    throw httpError(415, `IMG_FORMAT_NOT_ALLOWED_${fmt || "unknown"}`);
+  }
+
+  return fmt;
+}
 
 async function normalizeToWebp(buffer) {
-  // rotate() respeta orientación EXIF
   return sharp(buffer)
     .rotate()
-    .resize({ width: IMG_MAX_WIDTH, withoutEnlargement: true })
+    .resize({
+      width: IMG_MAX_WIDTH,
+      withoutEnlargement: true,
+      fit: "inside",
+    })
     .webp({ quality: IMG_WEBP_QUALITY })
     .toBuffer();
 }
@@ -94,7 +118,6 @@ async function upload(req, res) {
       });
     }
 
-    // multer.any() => req.files array
     let files = [];
     if (req.files) {
       files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
@@ -123,7 +146,6 @@ async function upload(req, res) {
         });
       }
 
-      // ✅ límite de tamaño
       if (file.buffer.length > IMG_MAX_UPLOAD_BYTES) {
         return res.status(413).json({
           ok: false,
@@ -132,22 +154,10 @@ async function upload(req, res) {
         });
       }
 
-      // ✅ detectar mime real por bytes (no confiar en extension/mimetype)
-      const ft = await fileTypeFromBuffer(file.buffer);
-      const realMime = ft?.mime || "";
+      await detectFormatOrThrow(file.buffer);
 
-      if (!ALLOWED_INPUT_MIME.has(realMime)) {
-        return res.status(415).json({
-          ok: false,
-          code: "IMG_FORMAT_NOT_ALLOWED",
-          message: `Formato no permitido (${realMime || "unknown"}). Usá JPG/PNG/WebP.`,
-        });
-      }
-
-      // ✅ convertir SIEMPRE a webp
       const webpBuffer = await normalizeToWebp(file.buffer);
 
-      // ✅ key SIEMPRE .webp
       const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}.webp`;
 
       await s3
@@ -156,6 +166,7 @@ async function upload(req, res) {
           Key: key,
           Body: webpBuffer,
           ContentType: "image/webp",
+          // Si tu MinIO/policy ya es pública y te llega a fallar, borrá la línea ACL.
           ACL: "public-read",
           CacheControl: "public, max-age=31536000, immutable",
         })
@@ -177,9 +188,10 @@ async function upload(req, res) {
     });
   } catch (e) {
     console.error("❌ [productImages.upload] ERROR:", e);
-    return res.status(500).json({
+    const status = e.statusCode || 500;
+    return res.status(status).json({
       ok: false,
-      code: "UPLOAD_ERROR",
+      code: status === 415 ? "INVALID_IMAGE" : status === 413 ? "IMG_TOO_LARGE" : "UPLOAD_ERROR",
       message: e.message,
     });
   }
@@ -207,9 +219,6 @@ async function listByProduct(req, res, next) {
   }
 }
 
-// ✅ DELETE /products/:id/images/:imageId
-// - borra DB
-// - opcional: borra también en MinIO si S3_DELETE_ON_REMOVE=true
 async function remove(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
