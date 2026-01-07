@@ -1,7 +1,8 @@
 // src/controllers/productImages.controller.js
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
-const path = require("path");
+const { fileTypeFromBuffer } = require("file-type");
+const sharp = require("sharp");
 const { ProductImage } = require("../models");
 
 function mustEnv(name) {
@@ -55,6 +56,33 @@ function keyFromPublicUrl(url) {
   }
 }
 
+/**
+ * =========================
+ * NORMALIZACIÓN DE IMÁGENES
+ * =========================
+ * Acepta entrada: JPG/PNG/WebP
+ * Guarda SIEMPRE: WebP
+ *
+ * Env opcionales:
+ * - IMG_MAX_UPLOAD_BYTES (default 6MB)
+ * - IMG_MAX_WIDTH (default 1200)
+ * - IMG_WEBP_QUALITY (default 75)
+ */
+const IMG_MAX_UPLOAD_BYTES = Number(process.env.IMG_MAX_UPLOAD_BYTES || 6 * 1024 * 1024);
+const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 1200);
+const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 75);
+
+const ALLOWED_INPUT_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+async function normalizeToWebp(buffer) {
+  // rotate() respeta orientación EXIF
+  return sharp(buffer)
+    .rotate()
+    .resize({ width: IMG_MAX_WIDTH, withoutEnlargement: true })
+    .webp({ quality: IMG_WEBP_QUALITY })
+    .toBuffer();
+}
+
 async function upload(req, res) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -83,19 +111,53 @@ async function upload(req, res) {
     }
 
     const s3 = s3Client();
+    const bucket = mustEnv("S3_BUCKET");
     const results = [];
 
     for (const file of files) {
-      const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
-      const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
+      if (!file?.buffer || !Buffer.isBuffer(file.buffer)) {
+        return res.status(400).json({
+          ok: false,
+          code: "BAD_FILE",
+          message: "Archivo inválido (sin buffer). Revisá multer memoryStorage().",
+        });
+      }
+
+      // ✅ límite de tamaño
+      if (file.buffer.length > IMG_MAX_UPLOAD_BYTES) {
+        return res.status(413).json({
+          ok: false,
+          code: "IMG_TOO_LARGE",
+          message: `Imagen demasiado grande. Máximo ${IMG_MAX_UPLOAD_BYTES} bytes.`,
+        });
+      }
+
+      // ✅ detectar mime real por bytes (no confiar en extension/mimetype)
+      const ft = await fileTypeFromBuffer(file.buffer);
+      const realMime = ft?.mime || "";
+
+      if (!ALLOWED_INPUT_MIME.has(realMime)) {
+        return res.status(415).json({
+          ok: false,
+          code: "IMG_FORMAT_NOT_ALLOWED",
+          message: `Formato no permitido (${realMime || "unknown"}). Usá JPG/PNG/WebP.`,
+        });
+      }
+
+      // ✅ convertir SIEMPRE a webp
+      const webpBuffer = await normalizeToWebp(file.buffer);
+
+      // ✅ key SIEMPRE .webp
+      const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}.webp`;
 
       await s3
         .putObject({
-          Bucket: mustEnv("S3_BUCKET"),
+          Bucket: bucket,
           Key: key,
-          Body: file.buffer,
-          ContentType: file.mimetype,
+          Body: webpBuffer,
+          ContentType: "image/webp",
           ACL: "public-read",
+          CacheControl: "public, max-age=31536000, immutable",
         })
         .promise();
 
