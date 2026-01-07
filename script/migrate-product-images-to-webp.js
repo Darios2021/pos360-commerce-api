@@ -18,10 +18,10 @@
 */
 
 const sharp = require("sharp");
-const { fileTypeFromBuffer } = require("file-type");
 const { GetObjectCommand, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const { s3, s3Config } = require("../src/config/s3");
-const { ProductImage, sequelize } = require("../src/models");
+const { ProductImage } = require("../src/models");
+const { Op } = require("sequelize");
 
 const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 1200);
 const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 75);
@@ -65,8 +65,8 @@ function publicUrlForKey(key) {
 }
 
 function toWebpKey(originalKey) {
-  // cambia extensión a .webp, mantiene path/nombre
   if (!originalKey) return null;
+  // cambia extensión a .webp, mantiene path/nombre
   return originalKey.replace(/\.(jpe?g|png|webp)$/i, ".webp");
 }
 
@@ -82,7 +82,6 @@ async function streamToBuffer(stream) {
 async function downloadObjectToBuffer(bucket, key) {
   const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   if (!out || !out.Body) throw new Error("S3_GET_EMPTY_BODY");
-  // Body es stream en Node
   return streamToBuffer(out.Body);
 }
 
@@ -104,13 +103,21 @@ async function deleteObject(bucket, key) {
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
 
+async function detectFormat(buffer) {
+  try {
+    const meta = await sharp(buffer).metadata();
+    return String(meta?.format || "").toLowerCase(); // jpeg/png/webp/...
+  } catch {
+    return "";
+  }
+}
+
 async function normalizeToWebp(buffer) {
-  // Validación real del input por magic bytes
-  const ft = await fileTypeFromBuffer(buffer);
-  const mime = ft?.mime || "";
-  const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
-  if (!allowed.has(mime)) {
-    const err = new Error(`INPUT_NOT_ALLOWED_${mime || "unknown"}`);
+  // Validación real (sin file-type) usando sharp.metadata()
+  const fmt = await detectFormat(buffer);
+  const allowed = new Set(["jpeg", "png", "webp"]);
+  if (!allowed.has(fmt)) {
+    const err = new Error(`INPUT_NOT_ALLOWED_${fmt || "unknown"}`);
     err.statusCode = 415;
     throw err;
   }
@@ -129,21 +136,13 @@ async function main() {
   log("IMG_MAX_WIDTH:", IMG_MAX_WIDTH, "| IMG_WEBP_QUALITY:", IMG_WEBP_QUALITY);
   if (MIGRATE_LIMIT > 0) log("MIGRATE_LIMIT:", MIGRATE_LIMIT);
 
-  // Trae imágenes no-webp
-  const where = sequelize.where(
-    sequelize.fn("LOWER", sequelize.col("url")),
-    { [sequelize.Op.notLike]: "%\.webp" }
-  );
-
-  // Si tu Sequelize no expone Op así, usamos fallback:
-  const Op = sequelize.Sequelize?.Op || require("sequelize").Op;
-
+  // Trae imágenes no-webp (por URL)
   const items = await ProductImage.findAll({
     where: {
       [Op.and]: [
-        sequelize.where(sequelize.fn("LOWER", sequelize.col("url")), {
-          [Op.notLike]: "%.webp",
-        }),
+        // url NOT LIKE '%.webp' (case-insensitive approximado)
+        // Nota: MySQL suele ser case-insensitive por collation, esto alcanza.
+        { url: { [Op.notLike]: "%.webp" } },
       ],
     },
     order: [["id", "ASC"]],
@@ -152,7 +151,9 @@ async function main() {
 
   log("Encontradas para migrar:", items.length);
 
-  const bucket = s3Config.bucket;
+  const bucket = s3Config.bucket || process.env.S3_BUCKET;
+  if (!bucket) throw new Error("Missing bucket (s3Config.bucket / S3_BUCKET)");
+
   let ok = 0;
   let skipped = 0;
   let failed = 0;
@@ -169,7 +170,6 @@ async function main() {
         continue;
       }
 
-      // Si ya termina en webp, saltar
       if (/\.webp$/i.test(key) || /\.webp$/i.test(url)) {
         skipped++;
         log(`[SKIP] id=${id} ya es webp`);
