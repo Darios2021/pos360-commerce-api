@@ -215,7 +215,6 @@ function pickUserAttributes() {
   if (has("first_name")) attrs.push("first_name");
   if (has("last_name")) attrs.push("last_name");
 
-  // si solo quedó id, igual sirve (no rompe)
   return Array.from(new Set(attrs));
 }
 
@@ -233,8 +232,8 @@ function pickBranchAttributes() {
 }
 
 /**
- * ✅ (NUEVO) Construye "where" EXACTAMENTE con la misma lógica que listSales
- * para reutilizarlo en /stats sin tocar lo que ya funciona.
+ * ✅ (NUEVO) Construye "where" base con la misma lógica del listado original
+ * (se usa como parte de buildQueryFilters)
  */
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
@@ -286,82 +285,242 @@ function buildWhereFromQuery(req) {
   return { ok: true, where };
 }
 
+/**
+ * ✅ (UPGRADE) Build where + include para filtros reales:
+ * - seller_id (vendedor)
+ * - customer (texto)
+ * - pay_method (Payment.method)
+ * - product (SaleItem snapshots / product_id)
+ */
+function buildQueryFilters(req) {
+  const base = buildWhereFromQuery(req);
+  if (!base.ok) return base;
+
+  const where = base.where;
+
+  const customer = String(req.query.customer || "").trim();
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId, 0);
+  const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
+  const product = String(req.query.product || "").trim();
+
+  if (seller_id > 0) where.user_id = seller_id;
+
+  if (customer) {
+    where[Op.and] = (where[Op.and] || []).concat([
+      {
+        [Op.or]: [
+          { customer_name: { [Op.like]: `%${customer}%` } },
+          { customer_doc: { [Op.like]: `%${customer}%` } },
+          { customer_phone: { [Op.like]: `%${customer}%` } },
+        ],
+      },
+    ]);
+  }
+
+  const include = [];
+
+  // payments: required solo si filtras pay_method
+  if (pay_method) {
+    include.push({
+      model: Payment,
+      as: "payments",
+      required: true,
+      where: { method: pay_method },
+      attributes: [],
+    });
+  } else {
+    include.push({ model: Payment, as: "payments", required: false });
+  }
+
+  // product: required si filtras producto
+  if (product) {
+    const pNum = toInt(product, 0);
+    const itemWhere = {};
+
+    if (pNum > 0) {
+      itemWhere.product_id = pNum;
+    } else {
+      itemWhere[Op.or] = [
+        { product_name_snapshot: { [Op.like]: `%${product}%` } },
+        { product_sku_snapshot: { [Op.like]: `%${product}%` } },
+        { product_barcode_snapshot: { [Op.like]: `%${product}%` } },
+      ];
+    }
+
+    include.push({
+      model: SaleItem,
+      as: "items",
+      required: true,
+      where: itemWhere,
+      attributes: [],
+    });
+  }
+
+  // branch/user info (para UI)
+  if (Branch) include.push({ model: Branch, as: "branch", required: false, attributes: pickBranchAttributes() });
+  if (User) include.push({ model: User, as: "user", required: false, attributes: pickUserAttributes() });
+
+  return { ok: true, where, include };
+}
+
+/**
+ * ✅ Helper SQL para stats precisos sin duplicar sumas por joins
+ */
+function buildStatsSql(req) {
+  const base = buildWhereFromQuery(req);
+  if (!base.ok) return base;
+
+  const where = base.where;
+
+  const customer = String(req.query.customer || "").trim();
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId, 0);
+  const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
+  const product = String(req.query.product || "").trim();
+
+  const joins = [];
+  const conds = [];
+  const repl = {};
+
+  // branch (puede ser number)
+  if (where.branch_id) {
+    conds.push("s.branch_id = :branch_id");
+    repl.branch_id = where.branch_id;
+  }
+
+  if (where.status) {
+    conds.push("s.status = :status");
+    repl.status = where.status;
+  }
+
+  // dates
+  if (where.sold_at?.[Op.between]) {
+    conds.push("s.sold_at BETWEEN :from AND :to");
+    repl.from = where.sold_at[Op.between][0];
+    repl.to = where.sold_at[Op.between][1];
+  } else if (where.sold_at?.[Op.gte]) {
+    conds.push("s.sold_at >= :from");
+    repl.from = where.sold_at[Op.gte];
+  } else if (where.sold_at?.[Op.lte]) {
+    conds.push("s.sold_at <= :to");
+    repl.to = where.sold_at[Op.lte];
+  }
+
+  // q (de buildWhereFromQuery)
+  const q = String(req.query.q || "").trim();
+  if (q) {
+    // replicamos la lógica general de q
+    const qNum = toFloat(q, NaN);
+    conds.push(
+      "(" +
+        [
+          "s.customer_name LIKE :qLike",
+          "s.sale_number LIKE :qLike",
+          "s.customer_phone LIKE :qLike",
+          "s.customer_doc LIKE :qLike",
+          Number.isFinite(qNum) ? "s.id = :qId" : null,
+          Number.isFinite(qNum) ? "s.total = :qTotal" : null,
+          Number.isFinite(qNum) ? "s.paid_total = :qPaid" : null,
+        ]
+          .filter(Boolean)
+          .join(" OR ") +
+        ")"
+    );
+    repl.qLike = `%${q}%`;
+    if (Number.isFinite(qNum)) {
+      repl.qId = toInt(qNum, 0);
+      repl.qTotal = qNum;
+      repl.qPaid = qNum;
+    }
+  }
+
+  if (customer) {
+    conds.push(
+      "(" +
+        [
+          "s.customer_name LIKE :cLike",
+          "s.customer_doc LIKE :cLike",
+          "s.customer_phone LIKE :cLike",
+        ].join(" OR ") +
+        ")"
+    );
+    repl.cLike = `%${customer}%`;
+  }
+
+  if (seller_id > 0) {
+    conds.push("s.user_id = :seller_id");
+    repl.seller_id = seller_id;
+  }
+
+  if (pay_method) {
+    joins.push("INNER JOIN payments p ON p.sale_id = s.id");
+    conds.push("p.method = :pay_method");
+    repl.pay_method = pay_method;
+  }
+
+  if (product) {
+    joins.push("INNER JOIN sale_items si ON si.sale_id = s.id");
+    const pNum = toInt(product, 0);
+    if (pNum > 0) {
+      conds.push("si.product_id = :product_id");
+      repl.product_id = pNum;
+    } else {
+      conds.push(
+        "(" +
+          [
+            "si.product_name_snapshot LIKE :pLike",
+            "si.product_sku_snapshot LIKE :pLike",
+            "si.product_barcode_snapshot LIKE :pLike",
+          ].join(" OR ") +
+          ")"
+      );
+      repl.pLike = `%${product}%`;
+    }
+  }
+
+  const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+  // subquery DISTINCT para NO duplicar SUM por joins
+  const sql = `
+    SELECT
+      COUNT(*) AS sales_count,
+      COALESCE(SUM(t.paid_total),0) AS paid_sum,
+      COALESCE(SUM(t.total),0) AS total_sum
+    FROM (
+      SELECT DISTINCT s.id, s.paid_total, s.total
+      FROM sales s
+      ${joins.join("\n")}
+      ${whereSql}
+    ) t
+  `;
+
+  return { ok: true, sql, replacements: repl };
+}
+
 // ============================
 // GET /api/v1/pos/sales
 // ============================
 async function listSales(req, res, next) {
   try {
-    const admin = isAdminReq(req);
-
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
     const offset = (page - 1) * limit;
 
-    const q = String(req.query.q || "").trim();
-    const status = String(req.query.status || "").trim().toUpperCase();
-
-    const from = parseDateTime(req.query.from);
-    const to = parseDateTime(req.query.to);
-
-    // ✅ Branch filter:
-    // - admin: si manda branch_id => filtra, si no => trae todas
-    // - no-admin: siempre su branch del contexto
-    const where = {};
-
-    if (admin) {
-      const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
-      if (requested > 0) where.branch_id = requested;
-    } else {
-      const branch_id = getAuthBranchId(req);
-      if (!branch_id) {
-        return res.status(400).json({
-          ok: false,
-          code: "BRANCH_REQUIRED",
-          message: "No se pudo determinar la sucursal del usuario (branch_id).",
-        });
-      }
-      where.branch_id = branch_id;
+    const built = buildQueryFilters(req);
+    if (!built.ok) {
+      return res.status(400).json({ ok: false, code: built.code, message: built.message });
     }
+    const { where, include } = built;
 
-    if (status) where.status = status;
-
-    if (from && to) where.sold_at = { [Op.between]: [from, to] };
-    else if (from) where.sold_at = { [Op.gte]: from };
-    else if (to) where.sold_at = { [Op.lte]: to };
-
-    if (q) {
-      const qNum = toFloat(q, NaN);
-      where[Op.or] = [
-        { customer_name: { [Op.like]: `%${q}%` } },
-        { sale_number: { [Op.like]: `%${q}%` } },
-        { customer_phone: { [Op.like]: `%${q}%` } },
-        { customer_doc: { [Op.like]: `%${q}%` } },
-      ];
-
-      if (Number.isFinite(qNum)) {
-        where[Op.or].push({ id: toInt(qNum, 0) });
-        where[Op.or].push({ total: qNum });
-      }
-    }
+    const useDistinct = (include || []).some((x) => x?.as === "items" || (x?.as === "payments" && x?.required === true));
 
     const { count, rows } = await Sale.findAndCountAll({
       where,
       order: [["id", "DESC"]],
       limit,
       offset,
-      include: [
-        { model: Payment, as: "payments", required: false },
-
-        // ✅ Sucursal (para mostrar nombre)
-        Branch
-          ? { model: Branch, as: "branch", required: false, attributes: pickBranchAttributes() }
-          : null,
-
-        // ✅ Usuario (para mostrar nombre/email)
-        User
-          ? { model: User, as: "user", required: false, attributes: pickUserAttributes() }
-          : null,
-      ].filter(Boolean),
+      include,
+      distinct: useDistinct,
+      col: "Sale.id",
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
@@ -377,44 +536,169 @@ async function listSales(req, res, next) {
 }
 
 // ============================
-// ✅ (NUEVO) GET /api/v1/pos/sales/stats
-// - Count total con filtros
-// - Suma total con filtros
-// - Método principal (por monto)
-// NO afecta listSales, solo agrega endpoint.
+// GET /api/v1/pos/sales/stats
+// ✅ Count + SUM(paid_total) + SUM(total) (preciso, sin duplicar)
 // ============================
 async function statsSales(req, res, next) {
   try {
-    const built = buildWhereFromQuery(req);
+    const built = buildStatsSql(req);
     if (!built.ok) {
       return res.status(400).json({ ok: false, code: built.code, message: built.message });
     }
-    const { where } = built;
 
-    // 1) Count + Sum
-    const agg = await Sale.findOne({
+    const [rows] = await sequelize.query(built.sql, { replacements: built.replacements });
+    const r = rows?.[0] || {};
+
+    return res.json({
+      ok: true,
+      data: {
+        sales_count: toInt(r.sales_count, 0),
+        paid_sum: Number(r.paid_sum || 0),
+        total_sum: Number(r.total_sum || 0),
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// ============================
+// ✅ OPTIONS para desplegables reales
+// ============================
+
+// GET /api/v1/pos/sales/options/sellers?q=...
+async function optionsSellers(req, res, next) {
+  try {
+    const base = buildWhereFromQuery(req);
+    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
+
+    const where = base.where;
+
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
+
+    // vendedores que efectivamente tienen ventas en el scope
+    const rows = await Sale.findAll({
       where,
-      attributes: [
-        [fn("COUNT", col("Sale.id")), "sales_count"],
-        [fn("COALESCE", fn("SUM", col("Sale.total")), 0), "total_sum"],
-      ],
+      attributes: [[fn("DISTINCT", col("Sale.user_id")), "user_id"]],
+      raw: true,
+      limit: 2000,
+    });
+
+    const ids = rows.map((r) => toInt(r.user_id, 0)).filter((n) => n > 0);
+    if (!ids.length) return res.json({ ok: true, data: [] });
+
+    const attrs = pickUserAttributes();
+    const userWhere = { id: ids };
+
+    if (q) {
+      const ors = [];
+      for (const k of ["name", "full_name", "username", "email", "identifier", "first_name", "last_name"]) {
+        if (attrs.includes(k)) ors.push({ [k]: { [Op.like]: `%${q}%` } });
+      }
+      if (ors.length) userWhere[Op.and] = [{ [Op.or]: ors }];
+    }
+
+    const users = await User.findAll({
+      where: userWhere,
+      attributes: attrs,
+      limit,
+      order: [["id", "ASC"]],
       raw: true,
     });
 
-    const sales_count = toInt(agg?.sales_count, 0);
-    const total_sum = Number(agg?.total_sum || 0);
+    const label = (u) =>
+      u.name ||
+      u.full_name ||
+      (u.first_name || u.last_name ? `${u.first_name || ""} ${u.last_name || ""}`.trim() : "") ||
+      u.username ||
+      u.email ||
+      u.identifier ||
+      `#${u.id}`;
 
-    // 2) Método principal (por suma de pagos)
-    // ⚠️ Usamos "include Sale as 'sale'" SOLO si existe la asociación.
-    const payAssocOk = !!Payment?.associations?.sale;
+    return res.json({ ok: true, data: users.map((u) => ({ value: u.id, title: label(u) })) });
+  } catch (e) {
+    next(e);
+  }
+}
 
-    let main_method = null;
+// GET /api/v1/pos/sales/options/customers?q=...
+async function optionsCustomers(req, res, next) {
+  try {
+    const base = buildWhereFromQuery(req);
+    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
 
-    if (payAssocOk) {
-      const rows = await Payment.findAll({
+    const where = { ...base.where };
+
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
+
+    // excluimos nulls
+    where.customer_name = { [Op.ne]: null };
+
+    if (q) {
+      where[Op.and] = (where[Op.and] || []).concat([
+        {
+          [Op.or]: [
+            { customer_name: { [Op.like]: `%${q}%` } },
+            { customer_doc: { [Op.like]: `%${q}%` } },
+            { customer_phone: { [Op.like]: `%${q}%` } },
+          ],
+        },
+      ]);
+    }
+
+    const rows = await Sale.findAll({
+      where,
+      attributes: ["customer_name", "customer_doc", "customer_phone"],
+      group: ["customer_name", "customer_doc", "customer_phone"],
+      order: [[literal("customer_name"), "ASC"]],
+      limit,
+      raw: true,
+    });
+
+    const title = (c) => {
+      const name = c.customer_name || "Consumidor Final";
+      const doc = c.customer_doc ? ` · ${c.customer_doc}` : "";
+      const phone = c.customer_phone ? ` · ${c.customer_phone}` : "";
+      return `${name}${doc}${phone}`;
+    };
+
+    return res.json({
+      ok: true,
+      data: rows.map((c) => ({
+        value: String(c.customer_doc || c.customer_phone || c.customer_name || "").trim() || (c.customer_name || ""),
+        title: title(c),
+        raw: c,
+      })),
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// GET /api/v1/pos/sales/options/products?q=...
+async function optionsProducts(req, res, next) {
+  try {
+    const base = buildWhereFromQuery(req);
+    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
+    const where = base.where;
+
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
+
+    // Si existe asociación SaleItem -> Sale como "sale", usamos ORM. Si no, fallback SQL.
+    const hasAssoc = !!SaleItem?.associations?.sale;
+
+    let rows = [];
+
+    if (hasAssoc) {
+      rows = await SaleItem.findAll({
         attributes: [
-          "method",
-          [fn("COALESCE", fn("SUM", col("Payment.amount")), 0), "amount_sum"],
+          "product_id",
+          [fn("MAX", col("SaleItem.product_name_snapshot")), "name"],
+          [fn("MAX", col("SaleItem.product_sku_snapshot")), "sku"],
+          [fn("MAX", col("SaleItem.product_barcode_snapshot")), "barcode"],
         ],
         include: [
           {
@@ -425,49 +709,72 @@ async function statsSales(req, res, next) {
             where,
           },
         ],
-        group: ["Payment.method"],
-        order: [[literal("amount_sum"), "DESC"]],
+        group: ["SaleItem.product_id"],
+        order: [[literal("name"), "ASC"]],
+        limit: 500,
         raw: true,
       });
-
-      main_method = rows?.[0]?.method || null;
     } else {
-      // Fallback sin asociaciones (join manual)
-      const [rows] = await sequelize.query(
-        `
-          SELECT p.method, COALESCE(SUM(p.amount),0) AS amount_sum
-          FROM payments p
-          INNER JOIN sales s ON s.id = p.sale_id
-          WHERE 1=1
-            ${where.branch_id ? "AND s.branch_id = :branch_id" : ""}
-            ${where.status ? "AND s.status = :status" : ""}
-            ${where.sold_at?.[Op.between] ? "AND s.sold_at BETWEEN :from AND :to" : ""}
-            ${where.sold_at?.[Op.gte] ? "AND s.sold_at >= :from" : ""}
-            ${where.sold_at?.[Op.lte] ? "AND s.sold_at <= :to" : ""}
-          GROUP BY p.method
-          ORDER BY amount_sum DESC
-          LIMIT 1
-        `,
-        {
-          replacements: {
-            branch_id: where.branch_id ?? null,
-            status: where.status ?? null,
-            from: where.sold_at?.[Op.between]?.[0] ?? where.sold_at?.[Op.gte] ?? null,
-            to: where.sold_at?.[Op.between]?.[1] ?? where.sold_at?.[Op.lte] ?? null,
-          },
-        }
-      );
+      // fallback SQL (por si no existe SaleItem.as('sale'))
+      const conds = [];
+      const repl = {};
 
-      main_method = rows?.[0]?.method || null;
+      if (where.branch_id) { conds.push("s.branch_id = :branch_id"); repl.branch_id = where.branch_id; }
+      if (where.status) { conds.push("s.status = :status"); repl.status = where.status; }
+      if (where.sold_at?.[Op.between]) { conds.push("s.sold_at BETWEEN :from AND :to"); repl.from = where.sold_at[Op.between][0]; repl.to = where.sold_at[Op.between][1]; }
+      else if (where.sold_at?.[Op.gte]) { conds.push("s.sold_at >= :from"); repl.from = where.sold_at[Op.gte]; }
+      else if (where.sold_at?.[Op.lte]) { conds.push("s.sold_at <= :to"); repl.to = where.sold_at[Op.lte]; }
+
+      const qBase = String(req.query.q || "").trim();
+      if (qBase) {
+        conds.push("(s.customer_name LIKE :qLike OR s.sale_number LIKE :qLike OR s.customer_phone LIKE :qLike OR s.customer_doc LIKE :qLike)");
+        repl.qLike = `%${qBase}%`;
+      }
+
+      const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+      const sql = `
+        SELECT
+          si.product_id,
+          MAX(si.product_name_snapshot) AS name,
+          MAX(si.product_sku_snapshot) AS sku,
+          MAX(si.product_barcode_snapshot) AS barcode
+        FROM sale_items si
+        INNER JOIN sales s ON s.id = si.sale_id
+        ${whereSql}
+        GROUP BY si.product_id
+        ORDER BY name ASC
+        LIMIT 500
+      `;
+      const [r] = await sequelize.query(sql, { replacements: repl });
+      rows = r || [];
     }
+
+    let out = (rows || []).map((r) => ({
+      id: toInt(r.product_id, 0),
+      name: r.name || `Producto #${r.product_id}`,
+      sku: r.sku || "",
+      barcode: r.barcode || "",
+    }));
+
+    if (q) {
+      const qq = q.toLowerCase();
+      out = out.filter((p) =>
+        String(p.id).includes(qq) ||
+        String(p.name).toLowerCase().includes(qq) ||
+        String(p.sku).toLowerCase().includes(qq) ||
+        String(p.barcode).toLowerCase().includes(qq)
+      );
+    }
+
+    out = out.slice(0, limit);
 
     return res.json({
       ok: true,
-      data: {
-        sales_count,
-        total_sum,
-        main_method,
-      },
+      data: out.map((p) => ({
+        value: String(p.id),
+        title: `${p.name}${p.sku ? ` · SKU: ${p.sku}` : ""}${p.barcode ? ` · ${p.barcode}` : ""}`,
+      })),
     });
   } catch (e) {
     next(e);
@@ -519,6 +826,10 @@ async function getSaleById(req, res, next) {
           ],
         },
       ].filter(Boolean),
+      order: [
+        [{ model: Payment, as: "payments" }, "id", "ASC"],
+        [{ model: SaleItem, as: "items" }, "id", "ASC"],
+      ],
     });
 
     if (!sale) return res.status(404).json({ ok: false, message: "Venta no encontrada" });
@@ -795,7 +1106,10 @@ async function deleteSale(req, res, next) {
 
 module.exports = {
   listSales,
-  statsSales, // ✅ NUEVO (no afecta lo demás)
+  statsSales,
+  optionsSellers,
+  optionsCustomers,
+  optionsProducts,
   getSaleById,
   createSale,
   deleteSale,
