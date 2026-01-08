@@ -11,35 +11,37 @@ const {
   Warehouse,
   Branch,
   User,
+  UserBranch,
 } = require("../models");
 
-// ======================
-// Helpers
-// ======================
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
+
 function toFloat(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
+
 function parseDateTime(v) {
   if (!v) return null;
   const s = String(v).trim();
   const d = new Date(s.replace(" ", "T"));
   return isNaN(d.getTime()) ? null : d;
 }
+
 function nowDate() {
   return new Date();
 }
+
 function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
 /**
- * 🔐 user_id desde middleware o JWT (fallback)
- * NO valida token (eso lo hace requireAuth)
+ * 🔐 Obtiene user_id desde middleware o JWT (fallback)
+ * NO valida token (eso ya lo hace requireAuth)
  */
 function getAuthUserId(req) {
   const candidates = [
@@ -135,9 +137,7 @@ function isAdminReq(req) {
   }
 
   const norm = (s) => String(s || "").trim().toLowerCase();
-  return roleNames.map(norm).some((x) =>
-    ["admin", "super_admin", "superadmin", "root", "owner"].includes(x)
-  );
+  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
 }
 
 /**
@@ -180,8 +180,23 @@ function pickBranchAttributes() {
   return Array.from(new Set(attrs));
 }
 
+function getTableName(model, fallback) {
+  try {
+    const t = model?.getTableName?.();
+    if (!t) return fallback;
+    if (typeof t === "string") return t;
+    if (typeof t?.tableName === "string") return t.tableName;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 /**
- * ✅ Base where: branch/estado/fechas/busqueda
+ * ✅ Base where: branch/status/from/to/q
+ * branch:
+ *  - admin: permite branch_id query
+ *  - no admin: branch_id desde token/contexto
  */
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
@@ -235,8 +250,8 @@ function buildWhereFromQuery(req) {
 }
 
 /**
- * ✅ Filtros reales + include robusto
- * - seller_id (id)
+ * ✅ Filtros reales + include robusto según asociaciones existentes
+ * - seller_id / seller (id)
  * - customer (texto)
  * - pay_method (Payment.method)
  * - product (SaleItem snapshots / product_id)
@@ -248,10 +263,7 @@ function buildQueryFilters(req) {
   const where = base.where;
 
   const customer = String(req.query.customer || "").trim();
-
-  const seller_id =
-    toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
-
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
   const product = String(req.query.product || "").trim();
 
@@ -271,12 +283,13 @@ function buildQueryFilters(req) {
 
   const include = [];
 
+  // Alias reales
   const salePaymentsAs = findAssocAlias(Sale, Payment); // "payments"
   const saleItemsAs = findAssocAlias(Sale, SaleItem);   // "items"
   const saleBranchAs = findAssocAlias(Sale, Branch);    // "branch"
   const saleUserAs = findAssocAlias(Sale, User);        // "user"
 
-  // payments: required SOLO si filtras pay_method
+  // payments: required solo si filtras pay_method
   if (Payment && salePaymentsAs) {
     if (pay_method) {
       include.push({
@@ -287,7 +300,6 @@ function buildQueryFilters(req) {
         attributes: [],
       });
     } else {
-      // para la UI (ver pagos)
       include.push({ model: Payment, as: salePaymentsAs, required: false });
     }
   }
@@ -313,48 +325,34 @@ function buildQueryFilters(req) {
       where: itemWhere,
       attributes: [],
     });
-  } else {
-    // para la UI (ver items) -> no requerido
-    if (SaleItem && saleItemsAs) include.push({ model: SaleItem, as: saleItemsAs, required: false });
   }
 
   // branch/user info para UI
   if (Branch && saleBranchAs) {
-    include.push({
-      model: Branch,
-      as: saleBranchAs,
-      required: false,
-      attributes: pickBranchAttributes(),
-    });
+    include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
   }
   if (User && saleUserAs) {
-    include.push({
-      model: User,
-      as: saleUserAs,
-      required: false,
-      attributes: pickUserAttributes(),
-    });
+    include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
   }
 
   return { ok: true, where, include, salePaymentsAs, saleItemsAs, saleBranchAs, saleUserAs };
 }
 
-// ======================
-// Stats SQL builders (robustos)
-// ======================
-function buildStatsSql(req) {
+/**
+ * ✅ Construye condiciones SQL (SIN duplicar por joins)
+ * Usamos EXISTS para pay_method y product, así NO se multiplican filas.
+ */
+function buildStatsFiltersSql(req) {
   const base = buildWhereFromQuery(req);
   if (!base.ok) return base;
 
   const where = base.where;
 
   const customer = String(req.query.customer || "").trim();
-  const seller_id =
-    toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
   const product = String(req.query.product || "").trim();
 
-  const joins = [];
   const conds = [];
   const repl = {};
 
@@ -379,6 +377,7 @@ function buildStatsSql(req) {
     repl.to = where.sold_at[Op.lte];
   }
 
+  // q del buscador principal
   const q = String(req.query.q || "").trim();
   if (q) {
     const qNum = toFloat(q, NaN);
@@ -391,15 +390,12 @@ function buildStatsSql(req) {
     repl.qLike = `%${q}%`;
     if (Number.isFinite(qNum)) {
       parts.push("s.id = :qId");
-      parts.push("s.total = :qTotal");
-      parts.push("s.paid_total = :qPaid");
       repl.qId = toInt(qNum, 0);
-      repl.qTotal = qNum;
-      repl.qPaid = qNum;
     }
     conds.push(`(${parts.join(" OR ")})`);
   }
 
+  // customer filtro dedicado
   if (customer) {
     conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
     repl.cLike = `%${customer}%`;
@@ -410,118 +406,149 @@ function buildStatsSql(req) {
     repl.seller_id = seller_id;
   }
 
+  const salesTable = getTableName(Sale, "sales");
+  const payTable = getTableName(Payment, "payments");
+  const itemsTable = getTableName(SaleItem, "sale_items");
+
+  // pay_method -> EXISTS en payments
   if (pay_method) {
-    joins.push("INNER JOIN payments p ON p.sale_id = s.id");
-    conds.push("UPPER(p.method) = :pay_method");
+    conds.push(`EXISTS (
+      SELECT 1 FROM ${payTable} p
+      WHERE p.sale_id = s.id AND p.method = :pay_method
+    )`);
     repl.pay_method = pay_method;
   }
 
+  // product -> EXISTS en sale_items (por id o snapshots)
   if (product) {
-    joins.push("INNER JOIN sale_items si ON si.sale_id = s.id");
     const pNum = toInt(product, 0);
     if (pNum > 0) {
-      conds.push("si.product_id = :product_id");
+      conds.push(`EXISTS (
+        SELECT 1 FROM ${itemsTable} si
+        WHERE si.sale_id = s.id AND si.product_id = :product_id
+      )`);
       repl.product_id = pNum;
     } else {
-      conds.push("(si.product_name_snapshot LIKE :pLike OR si.product_sku_snapshot LIKE :pLike OR si.product_barcode_snapshot LIKE :pLike)");
+      conds.push(`EXISTS (
+        SELECT 1 FROM ${itemsTable} si
+        WHERE si.sale_id = s.id AND (
+          si.product_name_snapshot LIKE :pLike OR
+          si.product_sku_snapshot LIKE :pLike OR
+          si.product_barcode_snapshot LIKE :pLike
+        )
+      )`);
       repl.pLike = `%${product}%`;
     }
   }
 
   const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
-  const sql = `
-    SELECT
-      COUNT(*) AS sales_count,
-      COALESCE(SUM(t.paid_total),0) AS paid_sum,
-      COALESCE(SUM(t.total),0) AS total_sum
-    FROM (
-      SELECT DISTINCT s.id, s.paid_total, s.total
-      FROM sales s
-      ${joins.join("\n")}
-      ${whereSql}
-    ) t
-  `;
-
-  return { ok: true, sql, whereSql, joins, replacements: repl };
+  return {
+    ok: true,
+    whereSql,
+    replacements: repl,
+    tables: { salesTable, payTable, itemsTable },
+  };
 }
 
 /**
- * 🧾 SQL para breakdown por método
- * (mismo scope y filtros; si hay product filter, join sale_items; si hay pay_method, filtra a ese método)
+ * ✅ Stats:
+ * - total ventas (count)
+ * - total vendido (SUM(s.total))
+ * - total cobrado (SUM(s.paid_total))
+ * - breakdown por método (SUM(payments.amount) group by method)
  */
-function buildPaymentBreakdownSql(statsBuilt) {
-  const joins = [];
-  const baseJoins = statsBuilt.joins || [];
-  const whereSql = statsBuilt.whereSql || "";
-  const repl = statsBuilt.replacements || {};
-
-  // Reutilizamos joins de stats (puede incluir payments / sale_items)
-  // pero para breakdown SIEMPRE necesitamos payments
-  const hasPaymentsJoin = baseJoins.some((j) => String(j).toLowerCase().includes("join payments"));
-  if (!hasPaymentsJoin) joins.push("INNER JOIN payments p ON p.sale_id = s.id");
-
-  // Si stats ya tiene join sale_items (por filtro product), lo reutilizamos
-  const hasItemsJoin = baseJoins.some((j) => String(j).toLowerCase().includes("join sale_items"));
-  if (hasItemsJoin) {
-    for (const j of baseJoins) {
-      if (String(j).toLowerCase().includes("join sale_items")) joins.push(j);
+async function statsSales(req, res, next) {
+  try {
+    const built = buildStatsFiltersSql(req);
+    if (!built.ok) {
+      return res.status(400).json({ ok: false, code: built.code, message: built.message });
     }
-  }
 
-  // Si stats ya tenía join payments por filtro pay_method, lo reutilizamos
-  if (hasPaymentsJoin) {
-    for (const j of baseJoins) {
-      if (String(j).toLowerCase().includes("join payments")) joins.push(j);
+    const { whereSql, replacements, tables } = built;
+    const { salesTable, payTable } = tables;
+
+    // 1) Totales de sales (sin joins)
+    const sqlTotals = `
+      SELECT
+        COUNT(*) AS sales_count,
+        COALESCE(SUM(s.total),0) AS total_sum,
+        COALESCE(SUM(s.paid_total),0) AS paid_sum
+      FROM ${salesTable} s
+      ${whereSql}
+    `;
+
+    // 2) Breakdown de pagos (sum de payments.amount sobre las sales filtradas)
+    //    (NO se duplica porque el set de sales es 1 fila por sale)
+    const sqlPayments = `
+      SELECT
+        UPPER(p.method) AS method,
+        COALESCE(SUM(p.amount),0) AS amount_sum
+      FROM ${payTable} p
+      INNER JOIN ${salesTable} s ON s.id = p.sale_id
+      ${whereSql}
+      GROUP BY UPPER(p.method)
+      ORDER BY UPPER(p.method) ASC
+    `;
+
+    const [rowsTotals] = await sequelize.query(sqlTotals, { replacements });
+    const [rowsPay] = await sequelize.query(sqlPayments, { replacements });
+
+    const t = rowsTotals?.[0] || {};
+
+    // normalizamos a un objeto “bonito”
+    const byMethod = {};
+    for (const r of rowsPay || []) {
+      const k = String(r.method || "").trim().toUpperCase() || "OTHER";
+      byMethod[k] = Number(r.amount_sum || 0);
     }
+
+    // Mapeo “UI friendly” (lo que pediste)
+    const methods = {
+      CASH: byMethod.CASH || byMethod.EFECTIVO || 0,
+      TRANSFER: byMethod.TRANSFER || byMethod.TRANSFERENCIA || 0,
+      DEBIT: byMethod.DEBIT || byMethod["TARJETA_DEBITO"] || byMethod["DEBITO"] || 0,
+      CREDIT: byMethod.CREDIT || byMethod["TARJETA_CREDITO"] || byMethod["CREDITO"] || 0,
+      QR: byMethod.QR || 0,
+      OTHER: 0,
+    };
+
+    // “OTHER” = todo lo que no entró en los principales
+    const known = new Set(["CASH", "EFECTIVO", "TRANSFER", "TRANSFERENCIA", "DEBIT", "TARJETA_DEBITO", "DEBITO", "CREDIT", "TARJETA_CREDITO", "CREDITO", "QR"]);
+    let otherSum = 0;
+    for (const [k, v] of Object.entries(byMethod)) {
+      if (!known.has(k)) otherSum += Number(v || 0);
+    }
+    methods.OTHER = otherSum;
+
+    return res.json({
+      ok: true,
+      data: {
+        sales_count: toInt(t.sales_count, 0),
+        total_sum: Number(t.total_sum || 0),
+        paid_sum: Number(t.paid_sum || 0),
+
+        // ✅ breakdown por tipo de pago (lo que pediste)
+        payments: {
+          cash: methods.CASH,
+          transfer: methods.TRANSFER,
+          debit: methods.DEBIT,
+          credit: methods.CREDIT,
+          qr: methods.QR,
+          other: methods.OTHER,
+
+          // ✅ además te dejo el crudo por si querés mostrar “métodos raros”
+          raw_by_method: byMethod,
+        },
+      },
+    });
+  } catch (e) {
+    next(e);
   }
-
-  const sql = `
-    SELECT
-      UPPER(p.method) AS method,
-      COALESCE(SUM(p.amount),0) AS amount_sum,
-      COUNT(*) AS payments_count
-    FROM sales s
-    ${joins.join("\n")}
-    ${whereSql}
-    GROUP BY UPPER(p.method)
-    ORDER BY amount_sum DESC
-  `;
-
-  return { sql, replacements: repl };
-}
-
-// Agrupador “humano” por método (robusto)
-function normalizePayGroup(methodRaw) {
-  const m = String(methodRaw || "").trim().toUpperCase();
-
-  // efectivo
-  if (m.includes("CASH") || m.includes("EFECT") || m === "E" || m === "EFECTIVO") return "EFECTIVO";
-
-  // transferencia
-  if (m.includes("TRANSFER") || m.includes("BANK") || m.includes("CBU") || m.includes("ALIAS")) return "TRANSFERENCIA";
-
-  // qr
-  if (m.includes("QR") || m.includes("MERCADOPAGO") || m.includes("MP") || m.includes("SCAN")) return "QR";
-
-  // debito (cuotas)
-  // (si tenés "DEBIT_INSTALLMENTS" o "DEBITO_CUOTAS" entra acá)
-  if (
-    m.includes("DEBIT") ||
-    m.includes("DÉBITO") ||
-    m.includes("DEBITO") ||
-    m.includes("CUOT") ||
-    m.includes("INSTALL")
-  ) return "TARJETA_DEBITO_CUOTAS";
-
-  return "OTROS";
 }
 
 // ============================
 // GET /api/v1/pos/sales
-// FIX: evita alias roto "Sale->Sale.id" (MySQL)
-// - count directo si no hay joins requeridos
-// - si hay joins requeridos: COUNT DISTINCT por SQL
 // ============================
 async function listSales(req, res, next) {
   try {
@@ -537,7 +564,11 @@ async function listSales(req, res, next) {
     const { where, include, salePaymentsAs, saleItemsAs } = built;
     const hasRequiredJoin = (include || []).some((x) => x?.required === true);
 
-    // ✅ COUNT robusto
+    const salesTable = getTableName(Sale, "sales");
+    const payTable = getTableName(Payment, "payments");
+    const itemsTable = getTableName(SaleItem, "sale_items");
+
+    // ✅ COUNT robusto (evita alias raros y duplicación)
     let total = 0;
 
     if (!hasRequiredJoin) {
@@ -546,15 +577,15 @@ async function listSales(req, res, next) {
       const needPay = (include || []).some((x) => x?.as === salePaymentsAs && x?.required === true);
       const needItems = (include || []).some((x) => x?.as === saleItemsAs && x?.required === true);
 
+      const joins = [];
+      const conds = [];
+      const repl = {};
+
       const base = buildWhereFromQuery(req);
       if (!base.ok) {
         return res.status(400).json({ ok: false, code: base.code, message: base.message });
       }
       const w = base.where;
-
-      const joins = [];
-      const conds = [];
-      const repl = {};
 
       if (w.branch_id) { conds.push("s.branch_id = :branch_id"); repl.branch_id = w.branch_id; }
       if (w.status) { conds.push("s.status = :status"); repl.status = w.status; }
@@ -588,24 +619,18 @@ async function listSales(req, res, next) {
         conds.push(`(${parts.join(" OR ")})`);
       }
 
-      const customer = String(req.query.customer || "").trim();
-      if (customer) {
-        conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
-        repl.cLike = `%${customer}%`;
-      }
-
       const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
       if (seller_id > 0) { conds.push("s.user_id = :seller_id"); repl.seller_id = seller_id; }
 
       const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
       if (needPay) {
-        joins.push("INNER JOIN payments p ON p.sale_id = s.id");
-        if (pay_method) { conds.push("UPPER(p.method) = :pay_method"); repl.pay_method = pay_method; }
+        joins.push(`INNER JOIN ${payTable} p ON p.sale_id = s.id`);
+        if (pay_method) { conds.push("p.method = :pay_method"); repl.pay_method = pay_method; }
       }
 
       const product = String(req.query.product || "").trim();
       if (needItems) {
-        joins.push("INNER JOIN sale_items si ON si.sale_id = s.id");
+        joins.push(`INNER JOIN ${itemsTable} si ON si.sale_id = s.id`);
         if (product) {
           const pNum = toInt(product, 0);
           if (pNum > 0) { conds.push("si.product_id = :product_id"); repl.product_id = pNum; }
@@ -622,7 +647,7 @@ async function listSales(req, res, next) {
         SELECT COUNT(*) AS c
         FROM (
           SELECT DISTINCT s.id
-          FROM sales s
+          FROM ${salesTable} s
           ${joins.join("\n")}
           ${whereSql}
         ) t
@@ -632,7 +657,6 @@ async function listSales(req, res, next) {
       total = toInt(r?.[0]?.c, 0);
     }
 
-    // ✅ ROWS paginados
     const rows = await Sale.findAll({
       where,
       order: [["id", "DESC"]],
@@ -658,67 +682,6 @@ async function listSales(req, res, next) {
 }
 
 // ============================
-// GET /api/v1/pos/sales/stats
-// ✅ Totales reales + breakdown por tipo de pago
-// ============================
-async function statsSales(req, res, next) {
-  try {
-    const built = buildStatsSql(req);
-    if (!built.ok) {
-      return res.status(400).json({ ok: false, code: built.code, message: built.message });
-    }
-
-    const [rows] = await sequelize.query(built.sql, { replacements: built.replacements });
-    const r = rows?.[0] || {};
-
-    // Breakdown por método
-    const breakdownBuilt = buildPaymentBreakdownSql(built);
-    const [pRows] = await sequelize.query(breakdownBuilt.sql, { replacements: breakdownBuilt.replacements });
-
-    const byMethodRaw = (pRows || []).map((x) => ({
-      method: String(x.method || "").trim(),
-      amount_sum: Number(x.amount_sum || 0),
-      payments_count: toInt(x.payments_count, 0),
-    }));
-
-    // Agrupado humano
-    const grouped = {
-      EFECTIVO: 0,
-      TRANSFERENCIA: 0,
-      TARJETA_DEBITO_CUOTAS: 0,
-      QR: 0,
-      OTROS: 0,
-    };
-
-    for (const it of byMethodRaw) {
-      const g = normalizePayGroup(it.method);
-      grouped[g] = (grouped[g] || 0) + Number(it.amount_sum || 0);
-    }
-
-    return res.json({
-      ok: true,
-      data: {
-        sales_count: toInt(r.sales_count, 0),
-        paid_sum: Number(r.paid_sum || 0),
-        total_sum: Number(r.total_sum || 0),
-
-        // ✅ lo que pediste explícito
-        total_efectivo: grouped.EFECTIVO,
-        total_transferencia: grouped.TRANSFERENCIA,
-        total_tarjeta_debito_cuotas: grouped.TARJETA_DEBITO_CUOTAS,
-        total_qr: grouped.QR,
-        total_otros: grouped.OTROS,
-
-        // opcional útil para UI/tabla
-        by_method_raw: byMethodRaw,
-      },
-    });
-  } catch (e) {
-    next(e);
-  }
-}
-
-// ============================
 // OPTIONS para desplegables reales
 // ============================
 
@@ -732,6 +695,7 @@ async function optionsSellers(req, res, next) {
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
+    // sellers que efectivamente tienen ventas en el scope
     const rows = await Sale.findAll({
       where,
       attributes: [[fn("DISTINCT", col("Sale.user_id")), "user_id"]],
@@ -839,7 +803,8 @@ async function optionsProducts(req, res, next) {
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
-    const itemSaleAs = findAssocAlias(SaleItem, Sale); // ej: "sale"
+    const itemSaleAs = findAssocAlias(SaleItem, Sale); // "sale" si existe
+
     let rows = [];
 
     if (SaleItem && Sale && itemSaleAs) {
@@ -865,6 +830,10 @@ async function optionsProducts(req, res, next) {
         raw: true,
       });
     } else {
+      // fallback SQL
+      const salesTable = getTableName(Sale, "sales");
+      const itemsTable = getTableName(SaleItem, "sale_items");
+
       const conds = [];
       const repl = {};
 
@@ -888,8 +857,8 @@ async function optionsProducts(req, res, next) {
           MAX(si.product_name_snapshot) AS name,
           MAX(si.product_sku_snapshot) AS sku,
           MAX(si.product_barcode_snapshot) AS barcode
-        FROM sale_items si
-        INNER JOIN sales s ON s.id = si.sale_id
+        FROM ${itemsTable} si
+        INNER JOIN ${salesTable} s ON s.id = si.sale_id
         ${whereSql}
         GROUP BY si.product_id
         ORDER BY name ASC
@@ -930,48 +899,6 @@ async function optionsProducts(req, res, next) {
   }
 }
 
-// GET /api/v1/pos/sales/options/pay-methods?q=...
-async function optionsPayMethods(req, res, next) {
-  try {
-    const base = buildWhereFromQuery(req);
-    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
-
-    const where = base.where;
-    const q = String(req.query.q || "").trim().toUpperCase();
-    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
-
-    const conds = [];
-    const repl = {};
-
-    if (where.branch_id) { conds.push("s.branch_id = :branch_id"); repl.branch_id = where.branch_id; }
-    if (where.status) { conds.push("s.status = :status"); repl.status = where.status; }
-    if (where.sold_at?.[Op.between]) { conds.push("s.sold_at BETWEEN :from AND :to"); repl.from = where.sold_at[Op.between][0]; repl.to = where.sold_at[Op.between][1]; }
-    else if (where.sold_at?.[Op.gte]) { conds.push("s.sold_at >= :from"); repl.from = where.sold_at[Op.gte]; }
-    else if (where.sold_at?.[Op.lte]) { conds.push("s.sold_at <= :to"); repl.to = where.sold_at[Op.lte]; }
-
-    const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-
-    const sql = `
-      SELECT DISTINCT UPPER(p.method) AS method
-      FROM payments p
-      INNER JOIN sales s ON s.id = p.sale_id
-      ${whereSql}
-      ORDER BY method ASC
-      LIMIT 200
-    `;
-
-    const [rows] = await sequelize.query(sql, { replacements: repl });
-    let methods = (rows || []).map(r => String(r.method || "").trim()).filter(Boolean);
-
-    if (q) methods = methods.filter(m => m.includes(q));
-    methods = methods.slice(0, limit);
-
-    return res.json({ ok: true, data: methods.map((m) => ({ value: m, title: m })) });
-  } catch (e) {
-    next(e);
-  }
-}
-
 // ============================
 // GET /api/v1/pos/sales/:id
 // ============================
@@ -993,7 +920,7 @@ async function getSaleById(req, res, next) {
     const productCategoryAs = findAssocAlias(Product, Category);
     const productImagesAs = findAssocAlias(Product, ProductImage);
 
-    const catParentAs = findAssocAlias(Category, Category); // "parent"
+    const catParentAs = findAssocAlias(Category, Category);
 
     const include = [];
 
@@ -1108,6 +1035,7 @@ async function createSale(req, res, next) {
       const quantity = toFloat(it?.quantity, 0);
       const unit_price = toFloat(it?.unit_price ?? it?.unitPrice ?? it?.price, 0);
 
+      // resolve warehouse igual que tu versión original
       const warehouse_id = await (async () => {
         const direct = toInt(it?.warehouse_id || it?.warehouseId, 0);
         if (direct > 0) return direct;
@@ -1157,8 +1085,7 @@ async function createSale(req, res, next) {
         return res.status(400).json({
           ok: false,
           code: "WAREHOUSE_REQUIRED",
-          message:
-            "warehouse_id requerido (no vino en item y no se encontró depósito default para esta sucursal).",
+          message: "warehouse_id requerido (no vino en item y no se encontró depósito default para esta sucursal).",
         });
       }
 
@@ -1261,10 +1188,9 @@ async function createSale(req, res, next) {
 
     await t.commit();
 
+    const payAs = findAssocAlias(Sale, Payment);
     const created = await Sale.findByPk(sale.id, {
-      include: findAssocAlias(Sale, Payment)
-        ? [{ model: Payment, as: findAssocAlias(Sale, Payment), required: false }]
-        : [],
+      include: payAs ? [{ model: Payment, as: payAs, required: false }] : [],
     });
 
     return res.status(201).json({ ok: true, message: "Venta creada", data: created });
@@ -1329,12 +1255,9 @@ async function deleteSale(req, res, next) {
 module.exports = {
   listSales,
   statsSales,
-
   optionsSellers,
   optionsCustomers,
   optionsProducts,
-  optionsPayMethods,
-
   getSaleById,
   createSale,
   deleteSale,
