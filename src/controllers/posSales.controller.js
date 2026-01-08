@@ -1,5 +1,5 @@
 // src/controllers/posSales.controller.js
-const { Op } = require("sequelize");
+const { Op, fn, col, literal } = require("sequelize");
 const {
   sequelize,
   Sale,
@@ -232,6 +232,60 @@ function pickBranchAttributes() {
   return Array.from(new Set(attrs));
 }
 
+/**
+ * ✅ (NUEVO) Construye "where" EXACTAMENTE con la misma lógica que listSales
+ * para reutilizarlo en /stats sin tocar lo que ya funciona.
+ */
+function buildWhereFromQuery(req) {
+  const admin = isAdminReq(req);
+
+  const q = String(req.query.q || "").trim();
+  const status = String(req.query.status || "").trim().toUpperCase();
+
+  const from = parseDateTime(req.query.from);
+  const to = parseDateTime(req.query.to);
+
+  const where = {};
+
+  if (admin) {
+    const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
+    if (requested > 0) where.branch_id = requested;
+  } else {
+    const branch_id = getAuthBranchId(req);
+    if (!branch_id) {
+      return {
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      };
+    }
+    where.branch_id = branch_id;
+  }
+
+  if (status) where.status = status;
+
+  if (from && to) where.sold_at = { [Op.between]: [from, to] };
+  else if (from) where.sold_at = { [Op.gte]: from };
+  else if (to) where.sold_at = { [Op.lte]: to };
+
+  if (q) {
+    const qNum = toFloat(q, NaN);
+    where[Op.or] = [
+      { customer_name: { [Op.like]: `%${q}%` } },
+      { sale_number: { [Op.like]: `%${q}%` } },
+      { customer_phone: { [Op.like]: `%${q}%` } },
+      { customer_doc: { [Op.like]: `%${q}%` } },
+    ];
+
+    if (Number.isFinite(qNum)) {
+      where[Op.or].push({ id: toInt(qNum, 0) });
+      where[Op.or].push({ total: qNum });
+    }
+  }
+
+  return { ok: true, where };
+}
+
 // ============================
 // GET /api/v1/pos/sales
 // ============================
@@ -275,26 +329,20 @@ async function listSales(req, res, next) {
     else if (from) where.sold_at = { [Op.gte]: from };
     else if (to) where.sold_at = { [Op.lte]: to };
 
-if (q) {
-  const qNum = toFloat(q, NaN);
-  where[Op.or] = [
-    { customer_name: { [Op.like]: `%${q}%` } },
-    { sale_number: { [Op.like]: `%${q}%` } },
-    { customer_phone: { [Op.like]: `%${q}%` } },
-    { customer_doc: { [Op.like]: `%${q}%` } },
-  ];
+    if (q) {
+      const qNum = toFloat(q, NaN);
+      where[Op.or] = [
+        { customer_name: { [Op.like]: `%${q}%` } },
+        { sale_number: { [Op.like]: `%${q}%` } },
+        { customer_phone: { [Op.like]: `%${q}%` } },
+        { customer_doc: { [Op.like]: `%${q}%` } },
+      ];
 
-  if (Number.isFinite(qNum)) {
-    where[Op.or].push({ id: toInt(qNum, 0) });
-    where[Op.or].push({ total: qNum });
-  }
-}
-
-
-
-
-
-
+      if (Number.isFinite(qNum)) {
+        where[Op.or].push({ id: toInt(qNum, 0) });
+        where[Op.or].push({ total: qNum });
+      }
+    }
 
     const { count, rows } = await Sale.findAndCountAll({
       where,
@@ -322,6 +370,104 @@ if (q) {
       ok: true,
       data: rows,
       meta: { page, limit, total: count, pages },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// ============================
+// ✅ (NUEVO) GET /api/v1/pos/sales/stats
+// - Count total con filtros
+// - Suma total con filtros
+// - Método principal (por monto)
+// NO afecta listSales, solo agrega endpoint.
+// ============================
+async function statsSales(req, res, next) {
+  try {
+    const built = buildWhereFromQuery(req);
+    if (!built.ok) {
+      return res.status(400).json({ ok: false, code: built.code, message: built.message });
+    }
+    const { where } = built;
+
+    // 1) Count + Sum
+    const agg = await Sale.findOne({
+      where,
+      attributes: [
+        [fn("COUNT", col("Sale.id")), "sales_count"],
+        [fn("COALESCE", fn("SUM", col("Sale.total")), 0), "total_sum"],
+      ],
+      raw: true,
+    });
+
+    const sales_count = toInt(agg?.sales_count, 0);
+    const total_sum = Number(agg?.total_sum || 0);
+
+    // 2) Método principal (por suma de pagos)
+    // ⚠️ Usamos "include Sale as 'sale'" SOLO si existe la asociación.
+    const payAssocOk = !!Payment?.associations?.sale;
+
+    let main_method = null;
+
+    if (payAssocOk) {
+      const rows = await Payment.findAll({
+        attributes: [
+          "method",
+          [fn("COALESCE", fn("SUM", col("Payment.amount")), 0), "amount_sum"],
+        ],
+        include: [
+          {
+            model: Sale,
+            as: "sale",
+            required: true,
+            attributes: [],
+            where,
+          },
+        ],
+        group: ["Payment.method"],
+        order: [[literal("amount_sum"), "DESC"]],
+        raw: true,
+      });
+
+      main_method = rows?.[0]?.method || null;
+    } else {
+      // Fallback sin asociaciones (join manual)
+      const [rows] = await sequelize.query(
+        `
+          SELECT p.method, COALESCE(SUM(p.amount),0) AS amount_sum
+          FROM payments p
+          INNER JOIN sales s ON s.id = p.sale_id
+          WHERE 1=1
+            ${where.branch_id ? "AND s.branch_id = :branch_id" : ""}
+            ${where.status ? "AND s.status = :status" : ""}
+            ${where.sold_at?.[Op.between] ? "AND s.sold_at BETWEEN :from AND :to" : ""}
+            ${where.sold_at?.[Op.gte] ? "AND s.sold_at >= :from" : ""}
+            ${where.sold_at?.[Op.lte] ? "AND s.sold_at <= :to" : ""}
+          GROUP BY p.method
+          ORDER BY amount_sum DESC
+          LIMIT 1
+        `,
+        {
+          replacements: {
+            branch_id: where.branch_id ?? null,
+            status: where.status ?? null,
+            from: where.sold_at?.[Op.between]?.[0] ?? where.sold_at?.[Op.gte] ?? null,
+            to: where.sold_at?.[Op.between]?.[1] ?? where.sold_at?.[Op.lte] ?? null,
+          },
+        }
+      );
+
+      main_method = rows?.[0]?.method || null;
+    }
+
+    return res.json({
+      ok: true,
+      data: {
+        sales_count,
+        total_sum,
+        main_method,
+      },
     });
   } catch (e) {
     next(e);
@@ -649,6 +795,7 @@ async function deleteSale(req, res, next) {
 
 module.exports = {
   listSales,
+  statsSales, // ✅ NUEVO (no afecta lo demás)
   getSaleById,
   createSale,
   deleteSale,
