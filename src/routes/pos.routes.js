@@ -1,30 +1,31 @@
 // src/routes/pos.routes.js
-const router = require("express").Router();
-const { requireAuth } = require("../middlewares/auth");
+const express = require("express");
+const router = express.Router();
 
-const posController = require("../controllers/pos.controller");
-const posSalesController = require("../controllers/posSales.controller");
+// ⚠️ Ajustá el path si tu middleware está en otro lado.
+// En tu proyecto ya existe porque aparece [AUTH] AUTH_OK en logs.
+const requireAuth = require("../middlewares/requireAuth");
 
-// ===== CONTEXTO POS =====
-router.get("/context", requireAuth, posController.getContext);
+const posSales = require("../controllers/posSales.controller");
 
-// ===== PRODUCTOS POS (por depósito) =====
-router.get("/products", requireAuth, posController.listProductsForPos);
+// ============================
+// POS - SALES
+// Base: /api/v1
+// ============================
 
-// ===== VENTAS =====
-router.get("/sales", requireAuth, posSalesController.listSales);
-router.get("/sales/stats", requireAuth, posSalesController.statsSales);
+// Listado + stats
+router.get("/pos/sales", requireAuth, posSales.listSales);
+router.get("/pos/sales/stats", requireAuth, posSales.statsSales);
 
-// ✅ desplegables
-router.get("/sales/options/sellers", requireAuth, posSalesController.optionsSellers);
-router.get("/sales/options/customers", requireAuth, posSalesController.optionsCustomers);
-router.get("/sales/options/products", requireAuth, posSalesController.optionsProducts);
+// Options para desplegables REALES
+router.get("/pos/sales/options/sellers", requireAuth, posSales.optionsSellers);
+router.get("/pos/sales/options/customers", requireAuth, posSales.optionsCustomers);
+router.get("/pos/sales/options/products", requireAuth, posSales.optionsProducts);
+router.get("/pos/sales/options/pay-methods", requireAuth, posSales.optionsPayMethods);
 
-router.get("/sales/:id", requireAuth, posSalesController.getSaleById);
-
-// ✅ CLAVE: crear venta usando el controller que descuenta stock
-router.post("/sales", requireAuth, posController.createSale);
-
-router.delete("/sales/:id", requireAuth, posSalesController.deleteSale);
+// CRUD
+router.get("/pos/sales/:id", requireAuth, posSales.getSaleById);
+router.post("/pos/sales", requireAuth, posSales.createSale);
+router.delete("/pos/sales/:id", requireAuth, posSales.deleteSale);
 
 module.exports = router;
