@@ -94,18 +94,13 @@ function getAuthUserId(req) {
 
 /**
  * ✅ branch_id SIEMPRE desde el usuario/contexto
- * (no desde body/query)
  */
 function getAuthBranchId(req) {
   return (
-    // soportar branchContext.middleware.js
     toInt(req?.ctx?.branchId, 0) ||
     toInt(req?.ctx?.branch_id, 0) ||
-
-    // si algún día lo agregás al token o a req.user
     toInt(req?.user?.branch_id, 0) ||
     toInt(req?.user?.branchId, 0) ||
-
     toInt(req?.auth?.branch_id, 0) ||
     toInt(req?.auth?.branchId, 0) ||
     toInt(req?.branch?.id, 0) ||
@@ -147,66 +142,25 @@ function isAdminReq(req) {
 }
 
 /**
- * 🏬 Resolver warehouse_id obligatorio:
- * 1) item.warehouse_id
- * 2) req.ctx / req.warehouse / req.warehouseId / req.branchContext.*
- * 3) primer depósito de la sucursal en DB
+ * ✅ Detecta alias real de asociación entre modelos (evita 500 por "as" incorrecto)
  */
-async function resolveWarehouseId(req, branch_id, itemWarehouseId, tx) {
-  const direct = toInt(itemWarehouseId, 0);
-  if (direct > 0) return direct;
-
-  const fromReq =
-    toInt(req?.ctx?.warehouseId, 0) ||
-    toInt(req?.ctx?.warehouse_id, 0) ||
-    toInt(req?.warehouse?.id, 0) ||
-    toInt(req?.warehouseId, 0) ||
-    toInt(req?.branchContext?.warehouse_id, 0) ||
-    toInt(req?.branchContext?.default_warehouse_id, 0) ||
-    toInt(req?.branch?.warehouse_id, 0) ||
-    toInt(req?.branch?.default_warehouse_id, 0) ||
-    0;
-
-  if (fromReq > 0) return fromReq;
-
-  const wh = await Warehouse.findOne({
-    where: { branch_id: toInt(branch_id, 0) },
-    order: [["id", "ASC"]],
-    transaction: tx,
-  });
-
-  return toInt(wh?.id, 0);
+function findAssocAlias(sourceModel, targetModel) {
+  try {
+    const assocs = sourceModel?.associations || {};
+    for (const [alias, a] of Object.entries(assocs)) {
+      if (!a) continue;
+      if (a.target === targetModel) return alias;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
-/**
- * ✅ Validar que un warehouse pertenezca a la sucursal
- */
-async function assertWarehouseInBranch(warehouse_id, branch_id, tx) {
-  const wh = await Warehouse.findByPk(warehouse_id, { transaction: tx });
-  if (!wh) {
-    return { ok: false, code: "WAREHOUSE_NOT_FOUND", message: "Depósito inexistente." };
-  }
-  if (toInt(wh.branch_id, 0) !== toInt(branch_id, 0)) {
-    return {
-      ok: false,
-      code: "CROSS_BRANCH_WAREHOUSE",
-      message: "El depósito no pertenece a la sucursal del usuario.",
-    };
-  }
-  return { ok: true, warehouse: wh };
-}
-
-/**
- * ✅ Elegir atributos válidos del User (evita pedir user.name si no existe)
- */
 function pickUserAttributes() {
   const attrs = [];
   const has = (k) => !!User?.rawAttributes?.[k];
-
-  // id siempre
   attrs.push("id");
-
-  // opciones comunes
   if (has("name")) attrs.push("name");
   if (has("full_name")) attrs.push("full_name");
   if (has("username")) attrs.push("username");
@@ -214,13 +168,9 @@ function pickUserAttributes() {
   if (has("identifier")) attrs.push("identifier");
   if (has("first_name")) attrs.push("first_name");
   if (has("last_name")) attrs.push("last_name");
-
   return Array.from(new Set(attrs));
 }
 
-/**
- * ✅ Elegir atributos válidos del Branch
- */
 function pickBranchAttributes() {
   const attrs = [];
   const has = (k) => !!Branch?.rawAttributes?.[k];
@@ -232,8 +182,7 @@ function pickBranchAttributes() {
 }
 
 /**
- * ✅ (NUEVO) Construye "where" base con la misma lógica del listado original
- * (se usa como parte de buildQueryFilters)
+ * ✅ Base where (misma lógica que antes) + q/status/from/to/branch
  */
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
@@ -279,6 +228,7 @@ function buildWhereFromQuery(req) {
     if (Number.isFinite(qNum)) {
       where[Op.or].push({ id: toInt(qNum, 0) });
       where[Op.or].push({ total: qNum });
+      where[Op.or].push({ paid_total: qNum });
     }
   }
 
@@ -286,8 +236,8 @@ function buildWhereFromQuery(req) {
 }
 
 /**
- * ✅ (UPGRADE) Build where + include para filtros reales:
- * - seller_id (vendedor)
+ * ✅ Filtros reales + include robusto según asociaciones existentes
+ * - seller_id / seller (id)
  * - customer (texto)
  * - pay_method (Payment.method)
  * - product (SaleItem snapshots / product_id)
@@ -299,7 +249,11 @@ function buildQueryFilters(req) {
   const where = base.where;
 
   const customer = String(req.query.customer || "").trim();
-  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId, 0);
+
+  // ⚠️ soporta seller_id, user_id, sellerId, y TAMBIÉN "seller" (como manda tu Vue)
+  const seller_id =
+    toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+
   const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
   const product = String(req.query.product || "").trim();
 
@@ -319,27 +273,34 @@ function buildQueryFilters(req) {
 
   const include = [];
 
+  // Alias reales
+  const salePaymentsAs = findAssocAlias(Sale, Payment);   // ej: "payments"
+  const saleItemsAs = findAssocAlias(Sale, SaleItem);     // ej: "items"
+  const saleBranchAs = findAssocAlias(Sale, Branch);      // ej: "branch"
+  const saleUserAs = findAssocAlias(Sale, User);          // ej: "user"
+
   // payments: required solo si filtras pay_method
-  if (pay_method) {
-    include.push({
-      model: Payment,
-      as: "payments",
-      required: true,
-      where: { method: pay_method },
-      attributes: [],
-    });
-  } else {
-    include.push({ model: Payment, as: "payments", required: false });
+  if (Payment && salePaymentsAs) {
+    if (pay_method) {
+      include.push({
+        model: Payment,
+        as: salePaymentsAs,
+        required: true,
+        where: { method: pay_method },
+        attributes: [],
+      });
+    } else {
+      include.push({ model: Payment, as: salePaymentsAs, required: false });
+    }
   }
 
-  // product: required si filtras producto
-  if (product) {
+  // product: required si filtras producto (usa SaleItem)
+  if (product && SaleItem && saleItemsAs) {
     const pNum = toInt(product, 0);
     const itemWhere = {};
 
-    if (pNum > 0) {
-      itemWhere.product_id = pNum;
-    } else {
+    if (pNum > 0) itemWhere.product_id = pNum;
+    else {
       itemWhere[Op.or] = [
         { product_name_snapshot: { [Op.like]: `%${product}%` } },
         { product_sku_snapshot: { [Op.like]: `%${product}%` } },
@@ -349,22 +310,28 @@ function buildQueryFilters(req) {
 
     include.push({
       model: SaleItem,
-      as: "items",
+      as: saleItemsAs,
       required: true,
       where: itemWhere,
       attributes: [],
     });
   }
 
-  // branch/user info (para UI)
-  if (Branch) include.push({ model: Branch, as: "branch", required: false, attributes: pickBranchAttributes() });
-  if (User) include.push({ model: User, as: "user", required: false, attributes: pickUserAttributes() });
+  // branch/user info para UI
+  if (Branch && saleBranchAs) {
+    include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
+  }
+  if (User && saleUserAs) {
+    include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
+  }
 
-  return { ok: true, where, include };
+  return { ok: true, where, include, salePaymentsAs, saleItemsAs, saleBranchAs, saleUserAs };
 }
 
 /**
- * ✅ Helper SQL para stats precisos sin duplicar sumas por joins
+ * ✅ Stats precisos sin duplicar SUM por joins (raw SQL)
+ * ⚠️ usa nombres de tablas por defecto: sales, payments, sale_items
+ *    Si tus tablas se llaman distinto, avisame y lo ajusto en 2 líneas.
  */
 function buildStatsSql(req) {
   const base = buildWhereFromQuery(req);
@@ -373,7 +340,8 @@ function buildStatsSql(req) {
   const where = base.where;
 
   const customer = String(req.query.customer || "").trim();
-  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId, 0);
+  const seller_id =
+    toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
   const product = String(req.query.product || "").trim();
 
@@ -381,18 +349,15 @@ function buildStatsSql(req) {
   const conds = [];
   const repl = {};
 
-  // branch (puede ser number)
   if (where.branch_id) {
     conds.push("s.branch_id = :branch_id");
     repl.branch_id = where.branch_id;
   }
-
   if (where.status) {
     conds.push("s.status = :status");
     repl.status = where.status;
   }
 
-  // dates
   if (where.sold_at?.[Op.between]) {
     conds.push("s.sold_at BETWEEN :from AND :to");
     repl.from = where.sold_at[Op.between][0];
@@ -405,44 +370,29 @@ function buildStatsSql(req) {
     repl.to = where.sold_at[Op.lte];
   }
 
-  // q (de buildWhereFromQuery)
   const q = String(req.query.q || "").trim();
   if (q) {
-    // replicamos la lógica general de q
     const qNum = toFloat(q, NaN);
-    conds.push(
-      "(" +
-        [
-          "s.customer_name LIKE :qLike",
-          "s.sale_number LIKE :qLike",
-          "s.customer_phone LIKE :qLike",
-          "s.customer_doc LIKE :qLike",
-          Number.isFinite(qNum) ? "s.id = :qId" : null,
-          Number.isFinite(qNum) ? "s.total = :qTotal" : null,
-          Number.isFinite(qNum) ? "s.paid_total = :qPaid" : null,
-        ]
-          .filter(Boolean)
-          .join(" OR ") +
-        ")"
-    );
+    const parts = [
+      "s.customer_name LIKE :qLike",
+      "s.sale_number LIKE :qLike",
+      "s.customer_phone LIKE :qLike",
+      "s.customer_doc LIKE :qLike",
+    ];
     repl.qLike = `%${q}%`;
     if (Number.isFinite(qNum)) {
+      parts.push("s.id = :qId");
+      parts.push("s.total = :qTotal");
+      parts.push("s.paid_total = :qPaid");
       repl.qId = toInt(qNum, 0);
       repl.qTotal = qNum;
       repl.qPaid = qNum;
     }
+    conds.push(`(${parts.join(" OR ")})`);
   }
 
   if (customer) {
-    conds.push(
-      "(" +
-        [
-          "s.customer_name LIKE :cLike",
-          "s.customer_doc LIKE :cLike",
-          "s.customer_phone LIKE :cLike",
-        ].join(" OR ") +
-        ")"
-    );
+    conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
     repl.cLike = `%${customer}%`;
   }
 
@@ -464,22 +414,13 @@ function buildStatsSql(req) {
       conds.push("si.product_id = :product_id");
       repl.product_id = pNum;
     } else {
-      conds.push(
-        "(" +
-          [
-            "si.product_name_snapshot LIKE :pLike",
-            "si.product_sku_snapshot LIKE :pLike",
-            "si.product_barcode_snapshot LIKE :pLike",
-          ].join(" OR ") +
-          ")"
-      );
+      conds.push("(si.product_name_snapshot LIKE :pLike OR si.product_sku_snapshot LIKE :pLike OR si.product_barcode_snapshot LIKE :pLike)");
       repl.pLike = `%${product}%`;
     }
   }
 
   const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
-  // subquery DISTINCT para NO duplicar SUM por joins
   const sql = `
     SELECT
       COUNT(*) AS sales_count,
@@ -509,9 +450,16 @@ async function listSales(req, res, next) {
     if (!built.ok) {
       return res.status(400).json({ ok: false, code: built.code, message: built.message });
     }
-    const { where, include } = built;
 
-    const useDistinct = (include || []).some((x) => x?.as === "items" || (x?.as === "payments" && x?.required === true));
+    const { where, include, salePaymentsAs, saleItemsAs } = built;
+
+    // distinct SOLO si hay joins required (payments/items). Si no, no hace falta.
+    const useDistinct = (include || []).some((x) => {
+      if (!x) return false;
+      if (x.as === saleItemsAs && x.required === true) return true;
+      if (x.as === salePaymentsAs && x.required === true) return true;
+      return false;
+    });
 
     const { count, rows } = await Sale.findAndCountAll({
       where,
@@ -537,7 +485,6 @@ async function listSales(req, res, next) {
 
 // ============================
 // GET /api/v1/pos/sales/stats
-// ✅ Count + SUM(paid_total) + SUM(total) (preciso, sin duplicar)
 // ============================
 async function statsSales(req, res, next) {
   try {
@@ -563,7 +510,7 @@ async function statsSales(req, res, next) {
 }
 
 // ============================
-// ✅ OPTIONS para desplegables reales
+// OPTIONS para desplegables reales
 // ============================
 
 // GET /api/v1/pos/sales/options/sellers?q=...
@@ -573,11 +520,10 @@ async function optionsSellers(req, res, next) {
     if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
 
     const where = base.where;
-
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
-    // vendedores que efectivamente tienen ventas en el scope
+    // sellers que efectivamente tienen ventas en el scope
     const rows = await Sale.findAll({
       where,
       attributes: [[fn("DISTINCT", col("Sale.user_id")), "user_id"]],
@@ -629,11 +575,9 @@ async function optionsCustomers(req, res, next) {
     if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
 
     const where = { ...base.where };
-
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
-    // excluimos nulls
     where.customer_name = { [Op.ne]: null };
 
     if (q) {
@@ -682,17 +626,16 @@ async function optionsProducts(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
     if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
-    const where = base.where;
 
+    const where = base.where;
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
-    // Si existe asociación SaleItem -> Sale como "sale", usamos ORM. Si no, fallback SQL.
-    const hasAssoc = !!SaleItem?.associations?.sale;
+    const itemSaleAs = findAssocAlias(SaleItem, Sale); // ej: "sale" (si existe)
 
     let rows = [];
 
-    if (hasAssoc) {
+    if (SaleItem && Sale && itemSaleAs) {
       rows = await SaleItem.findAll({
         attributes: [
           "product_id",
@@ -703,7 +646,7 @@ async function optionsProducts(req, res, next) {
         include: [
           {
             model: Sale,
-            as: "sale",
+            as: itemSaleAs,
             required: true,
             attributes: [],
             where,
@@ -715,7 +658,7 @@ async function optionsProducts(req, res, next) {
         raw: true,
       });
     } else {
-      // fallback SQL (por si no existe SaleItem.as('sale'))
+      // fallback SQL
       const conds = [];
       const repl = {};
 
@@ -791,50 +734,60 @@ async function getSaleById(req, res, next) {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
+    const salePaymentsAs = findAssocAlias(Sale, Payment);
+    const saleItemsAs = findAssocAlias(Sale, SaleItem);
+    const saleBranchAs = findAssocAlias(Sale, Branch);
+    const saleUserAs = findAssocAlias(Sale, User);
+
+    const itemWarehouseAs = findAssocAlias(SaleItem, Warehouse);
+    const itemProductAs = findAssocAlias(SaleItem, Product);
+
+    const productCategoryAs = findAssocAlias(Product, Category);
+    const productImagesAs = findAssocAlias(Product, ProductImage);
+
+    const catParentAs = findAssocAlias(Category, Category); // muchas veces es "parent"
+
+    const include = [];
+
+    if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
+    if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
+    if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
+
+    if (SaleItem && saleItemsAs) {
+      const itemInclude = [];
+
+      if (Warehouse && itemWarehouseAs) itemInclude.push({ model: Warehouse, as: itemWarehouseAs, required: false });
+
+      if (Product && itemProductAs) {
+        const prodInclude = [];
+
+        if (Category && productCategoryAs) {
+          const catInclude = [];
+          if (catParentAs) catInclude.push({ model: Category, as: catParentAs, required: false });
+          prodInclude.push({ model: Category, as: productCategoryAs, required: false, include: catInclude });
+        }
+
+        if (ProductImage && productImagesAs) {
+          prodInclude.push({ model: ProductImage, as: productImagesAs, required: false });
+        }
+
+        itemInclude.push({ model: Product, as: itemProductAs, required: false, include: prodInclude });
+      }
+
+      include.push({ model: SaleItem, as: saleItemsAs, required: false, include: itemInclude });
+    }
+
+    const order = [];
+    if (salePaymentsAs) order.push([{ model: Payment, as: salePaymentsAs }, "id", "ASC"]);
+    if (saleItemsAs) order.push([{ model: SaleItem, as: saleItemsAs }, "id", "ASC"]);
+
     const sale = await Sale.findByPk(id, {
-      include: [
-        { model: Payment, as: "payments", required: false },
-
-        Branch
-          ? { model: Branch, as: "branch", required: false, attributes: pickBranchAttributes() }
-          : null,
-
-        User
-          ? { model: User, as: "user", required: false, attributes: pickUserAttributes() }
-          : null,
-
-        {
-          model: SaleItem,
-          as: "items",
-          required: false,
-          include: [
-            { model: Warehouse, as: "warehouse", required: false },
-            {
-              model: Product,
-              as: "product",
-              required: false,
-              include: [
-                {
-                  model: Category,
-                  as: "category",
-                  required: false,
-                  include: [{ model: Category, as: "parent", required: false }],
-                },
-                { model: ProductImage, as: "images", required: false },
-              ],
-            },
-          ],
-        },
-      ].filter(Boolean),
-      order: [
-        [{ model: Payment, as: "payments" }, "id", "ASC"],
-        [{ model: SaleItem, as: "items" }, "id", "ASC"],
-      ],
+      include,
+      order: order.length ? order : undefined,
     });
 
     if (!sale) return res.status(404).json({ ok: false, message: "Venta no encontrada" });
 
-    // ✅ No-admin: no puede ver otra sucursal
     if (!admin) {
       const branch_id = getAuthBranchId(req);
       if (!branch_id) {
@@ -907,12 +860,32 @@ async function createSale(req, res, next) {
       const quantity = toFloat(it?.quantity, 0);
       const unit_price = toFloat(it?.unit_price ?? it?.unitPrice ?? it?.price, 0);
 
-      const warehouse_id = await resolveWarehouseId(
-        req,
-        branch_id,
-        it?.warehouse_id || it?.warehouseId,
-        t
-      );
+      // resolve warehouse igual que tu versión original
+      const warehouse_id = await (async () => {
+        const direct = toInt(it?.warehouse_id || it?.warehouseId, 0);
+        if (direct > 0) return direct;
+
+        const fromReq =
+          toInt(req?.ctx?.warehouseId, 0) ||
+          toInt(req?.ctx?.warehouse_id, 0) ||
+          toInt(req?.warehouse?.id, 0) ||
+          toInt(req?.warehouseId, 0) ||
+          toInt(req?.branchContext?.warehouse_id, 0) ||
+          toInt(req?.branchContext?.default_warehouse_id, 0) ||
+          toInt(req?.branch?.warehouse_id, 0) ||
+          toInt(req?.branch?.default_warehouse_id, 0) ||
+          0;
+
+        if (fromReq > 0) return fromReq;
+
+        const wh = await Warehouse.findOne({
+          where: { branch_id: toInt(branch_id, 0) },
+          order: [["id", "ASC"]],
+          transaction: t,
+        });
+
+        return toInt(wh?.id, 0);
+      })();
 
       normItems.push({
         product_id,
@@ -942,10 +915,18 @@ async function createSale(req, res, next) {
         });
       }
 
-      const whCheck = await assertWarehouseInBranch(it.warehouse_id, branch_id, t);
-      if (!whCheck.ok) {
+      const wh = await Warehouse.findByPk(it.warehouse_id, { transaction: t });
+      if (!wh) {
         await t.rollback();
-        return res.status(403).json({ ok: false, code: whCheck.code, message: whCheck.message });
+        return res.status(404).json({ ok: false, code: "WAREHOUSE_NOT_FOUND", message: "Depósito inexistente." });
+      }
+      if (toInt(wh.branch_id, 0) !== toInt(branch_id, 0)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_WAREHOUSE",
+          message: "El depósito no pertenece a la sucursal del usuario.",
+        });
       }
     }
 
@@ -1034,14 +1015,14 @@ async function createSale(req, res, next) {
     await t.commit();
 
     const created = await Sale.findByPk(sale.id, {
-      include: [{ model: Payment, as: "payments", required: false }],
+      include: findAssocAlias(Sale, Payment)
+        ? [{ model: Payment, as: findAssocAlias(Sale, Payment), required: false }]
+        : [],
     });
 
     return res.status(201).json({ ok: true, message: "Venta creada", data: created });
   } catch (e) {
-    try {
-      await t.rollback();
-    } catch {}
+    try { await t.rollback(); } catch {}
     next(e);
   }
 }
@@ -1053,10 +1034,8 @@ async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
     const admin = isAdminReq(req);
-
     const branch_id = getAuthBranchId(req);
 
-    // ✅ No-admin: branch_id obligatorio
     if (!admin && !branch_id) {
       await t.rollback();
       return res.status(400).json({
@@ -1078,8 +1057,6 @@ async function deleteSale(req, res, next) {
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
     }
 
-    // ✅ No-admin: no puede eliminar una venta de otra sucursal
-    // ✅ Admin: puede cross-branch
     if (!admin && toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
       await t.rollback();
       return res.status(403).json({
@@ -1097,9 +1074,7 @@ async function deleteSale(req, res, next) {
     await t.commit();
     return res.json({ ok: true, message: "Venta eliminada" });
   } catch (e) {
-    try {
-      await t.rollback();
-    } catch {}
+    try { await t.rollback(); } catch {}
     next(e);
   }
 }

@@ -2,10 +2,7 @@
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
 
-// ✅ POS controller (context + products + createSale con stock)
 const posController = require("../controllers/pos.controller");
-
-// ✅ POS Sales controller (list/get/delete + stats + options)
 const posSalesController = require("../controllers/posSales.controller");
 
 // ===== CONTEXTO POS =====
@@ -18,7 +15,7 @@ router.get("/products", requireAuth, posController.listProductsForPos);
 router.get("/sales", requireAuth, posSalesController.listSales);
 router.get("/sales/stats", requireAuth, posSalesController.statsSales);
 
-// desplegables reales
+// ✅ desplegables
 router.get("/sales/options/sellers", requireAuth, posSalesController.optionsSellers);
 router.get("/sales/options/customers", requireAuth, posSalesController.optionsCustomers);
 router.get("/sales/options/products", requireAuth, posSalesController.optionsProducts);
