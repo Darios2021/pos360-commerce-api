@@ -1,45 +1,34 @@
 // src/routes/pos.routes.js
-// ✅ COPY-PASTE FINAL (POS routes robustas, sin requireAuth externo)
-// - Evita crash "Route.get requires callback" (destructure de funciones)
-// - Evita "Cannot find module ../middlewares/requireAuth" (auth local)
-// - Expone endpoints que tu frontend está llamando:
-//    GET /api/v1/pos/context
-//    GET /api/v1/pos/sales
-//    GET /api/v1/pos/filters/users
-//    GET /api/v1/pos/filters/customers
-//    GET /api/v1/pos/filters/products
-//    GET /api/v1/pos/filters/payment-methods
+// ✅ COPY-PASTE FINAL COMPLETO (NO cambia tu controller)
 
-const express = require("express");
-const router = express.Router();
+const router = require("express").Router();
 
 const {
-  getContext,
   listSales,
-  getFilterUsers,
-  getFilterCustomers,
-  getFilterProducts,
-  getFilterPaymentMethods,
+  statsSales,
+  optionsSellers,
+  optionsCustomers,
+  optionsProducts,
+  getSaleById,
+  createSale,
+  deleteSale,
 } = require("../controllers/posSales.controller");
 
-// =======================
-// Auth local (req.user ya viene seteado por tu middleware global)
-// =======================
-function requireAuth(req, res, next) {
-  if (req.user && (req.user.id || req.user.userId)) return next();
-  return res.status(401).json({ ok: false, message: "No autenticado" });
-}
+// OJO: requireAuth YA viene aplicado desde v1.routes.js en /pos
+// safeUse("/pos", requireAuth, posRoutes);
+// así que acá NO lo volvemos a meter.
 
-// =======================
-// Routes
-// =======================
-router.get("/context", requireAuth, getContext);
-router.get("/sales", requireAuth, listSales);
+router.get("/sales/stats", statsSales);
 
-// Dropdowns reales (para tus filtros)
-router.get("/filters/users", requireAuth, getFilterUsers);
-router.get("/filters/customers", requireAuth, getFilterCustomers);
-router.get("/filters/products", requireAuth, getFilterProducts);
-router.get("/filters/payment-methods", requireAuth, getFilterPaymentMethods);
+// options (antes que :id)
+router.get("/sales/options/sellers", optionsSellers);
+router.get("/sales/options/customers", optionsCustomers);
+router.get("/sales/options/products", optionsProducts);
+
+router.get("/sales", listSales);
+router.get("/sales/:id", getSaleById);
+
+router.post("/sales", createSale);
+router.delete("/sales/:id", deleteSale);
 
 module.exports = router;

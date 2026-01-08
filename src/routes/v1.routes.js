@@ -1,5 +1,6 @@
 // src/routes/v1.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
+
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
 
@@ -68,6 +69,8 @@ safeUse("/branches", requireAuth, branchesRoutes);
 safeUse("/warehouses", requireAuth, warehousesRoutes);
 safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
+
+// POS
 safeUse("/pos", requireAuth, posRoutes);
 
 // ✅ Perfil
