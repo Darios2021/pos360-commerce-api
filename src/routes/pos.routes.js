@@ -28,8 +28,16 @@ const getSaleById = posSalesController.getSaleById;
 const createSale = posSalesController.createSale;
 const deleteSale = posSalesController.deleteSale;
 
-// ✅ NUEVO: devoluciones
-const createRefund = posSalesController.createRefund;
+// ✅ NUEVO (opcional): si el controller ya lo exporta, lo conectamos
+const createRefund =
+  posSalesController.createRefund ||
+  posSalesController.createSaleRefund ||
+  posSalesController.refundSale;
+
+const createExchange =
+  posSalesController.createExchange ||
+  posSalesController.createSaleExchange ||
+  posSalesController.exchangeSale;
 
 // ==============================
 // Guards para evitar [object Undefined]
@@ -57,24 +65,20 @@ assertFn("getSaleById", getSaleById);
 assertFn("createSale", createSale);
 assertFn("deleteSale", deleteSale);
 
-// ✅ NUEVO: validamos devoluciones
-assertFn("createRefund", createRefund);
-
 // ==============================
 // ✅ ROUTES
 // ==============================
 
-// ---- POS CONTEXT (lo que te tira 404 hoy)
+// ---- POS CONTEXT
 router.get("/context", getContext);
 
-// ---- POS PRODUCTS (buscador / grilla)
+// ---- POS PRODUCTS
 router.get("/products", listProductsForPos);
 
-// ---- POS CREATE SALE (el de pos.controller.js)
-// Nota: lo dejo en singular para no pisar el otro createSale de /sales
+// ---- POS CREATE SALE (pos.controller.js)
 router.post("/sale", createPosSale);
 
-// ---- SALES MODULE (listado, stats, etc)
+// ---- SALES MODULE
 router.get("/sales", listSales);
 router.get("/sales/stats", statsSales);
 
@@ -86,7 +90,20 @@ router.get("/sales/:id", getSaleById);
 router.post("/sales", createSale);
 router.delete("/sales/:id", deleteSale);
 
-// ✅ NUEVO: registrar devolución (lo usa tu modal)
-router.post("/sales/:id/refunds", createRefund);
+// ---- DEVOLUCIONES (si existe handler)
+if (typeof createRefund === "function") {
+  router.post("/sales/:id/refunds", createRefund);
+} else {
+  // eslint-disable-next-line no-console
+  console.warn("⚠️ [pos.routes] createRefund NO está exportado en posSales.controller.js -> no se registra /sales/:id/refunds");
+}
+
+// ---- CAMBIOS (si existe handler)
+if (typeof createExchange === "function") {
+  router.post("/sales/:id/exchanges", createExchange);
+} else {
+  // eslint-disable-next-line no-console
+  console.warn("⚠️ [pos.routes] createExchange NO está exportado en posSales.controller.js -> no se registra /sales/:id/exchanges");
+}
 
 module.exports = router;
