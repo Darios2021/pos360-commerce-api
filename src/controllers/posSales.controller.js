@@ -12,6 +12,8 @@ const {
   Branch,
   User,
   UserBranch,
+  // ✅ NUEVO (si no existe aún, crealo en models)
+  SaleRefund,
 } = require("../models");
 
 function toInt(v, d = 0) {
@@ -289,7 +291,6 @@ function buildQueryFilters(req) {
   const saleBranchAs = findAssocAlias(Sale, Branch);    // "branch"
   const saleUserAs = findAssocAlias(Sale, User);        // "user"
 
-  // payments: required solo si filtras pay_method
   if (Payment && salePaymentsAs) {
     if (pay_method) {
       include.push({
@@ -304,7 +305,6 @@ function buildQueryFilters(req) {
     }
   }
 
-  // product: required si filtras producto (usa SaleItem)
   if (product && SaleItem && saleItemsAs) {
     const pNum = toInt(product, 0);
     const itemWhere = {};
@@ -327,7 +327,6 @@ function buildQueryFilters(req) {
     });
   }
 
-  // branch/user info para UI
   if (Branch && saleBranchAs) {
     include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
   }
@@ -377,7 +376,6 @@ function buildStatsFiltersSql(req) {
     repl.to = where.sold_at[Op.lte];
   }
 
-  // q del buscador principal
   const q = String(req.query.q || "").trim();
   if (q) {
     const qNum = toFloat(q, NaN);
@@ -395,7 +393,6 @@ function buildStatsFiltersSql(req) {
     conds.push(`(${parts.join(" OR ")})`);
   }
 
-  // customer filtro dedicado
   if (customer) {
     conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
     repl.cLike = `%${customer}%`;
@@ -410,7 +407,6 @@ function buildStatsFiltersSql(req) {
   const payTable = getTableName(Payment, "payments");
   const itemsTable = getTableName(SaleItem, "sale_items");
 
-  // pay_method -> EXISTS en payments
   if (pay_method) {
     conds.push(`EXISTS (
       SELECT 1 FROM ${payTable} p
@@ -419,7 +415,6 @@ function buildStatsFiltersSql(req) {
     repl.pay_method = pay_method;
   }
 
-  // product -> EXISTS en sale_items (por id o snapshots)
   if (product) {
     const pNum = toInt(product, 0);
     if (pNum > 0) {
@@ -452,11 +447,11 @@ function buildStatsFiltersSql(req) {
 }
 
 /**
- * ✅ Stats:
+ * ✅ Stats NETO:
  * - total ventas (count)
- * - total vendido (SUM(s.total))
- * - total cobrado (SUM(s.paid_total))
- * - breakdown por método (SUM(payments.amount) group by method)
+ * - total vendido NETO (SUM(s.total) - SUM(refunds))
+ * - total cobrado NETO (SUM(s.paid_total) - SUM(refunds))
+ * - breakdown por método (SUM(payments.amount) - refunds prorrateo NO incluido; se deja bruto por método)
  */
 async function statsSales(req, res, next) {
   try {
@@ -468,18 +463,32 @@ async function statsSales(req, res, next) {
     const { whereSql, replacements, tables } = built;
     const { salesTable, payTable } = tables;
 
-    // 1) Totales de sales (sin joins)
+    const refundsTable = getTableName(SaleRefund, "sale_refunds");
+
+    // 0) Refunds agregadas por sale_id (para neto)
+    const refundsJoin = SaleRefund
+      ? `LEFT JOIN (
+          SELECT r.sale_id, COALESCE(SUM(r.amount),0) AS refunds_sum
+          FROM ${refundsTable} r
+          GROUP BY r.sale_id
+        ) rr ON rr.sale_id = s.id`
+      : `LEFT JOIN (SELECT NULL AS sale_id, 0 AS refunds_sum) rr ON 1=0`;
+
+    // 1) Totales NETOS
     const sqlTotals = `
       SELECT
         COUNT(*) AS sales_count,
-        COALESCE(SUM(s.total),0) AS total_sum,
-        COALESCE(SUM(s.paid_total),0) AS paid_sum
+        COALESCE(SUM(s.total),0) AS gross_total_sum,
+        COALESCE(SUM(s.paid_total),0) AS gross_paid_sum,
+        COALESCE(SUM(rr.refunds_sum),0) AS refunds_sum,
+        (COALESCE(SUM(s.total),0) - COALESCE(SUM(rr.refunds_sum),0)) AS total_sum,
+        (COALESCE(SUM(s.paid_total),0) - COALESCE(SUM(rr.refunds_sum),0)) AS paid_sum
       FROM ${salesTable} s
+      ${refundsJoin}
       ${whereSql}
     `;
 
-    // 2) Breakdown de pagos (sum de payments.amount sobre las sales filtradas)
-    //    (NO se duplica porque el set de sales es 1 fila por sale)
+    // 2) Breakdown de pagos (bruto por método)
     const sqlPayments = `
       SELECT
         UPPER(p.method) AS method,
@@ -496,14 +505,12 @@ async function statsSales(req, res, next) {
 
     const t = rowsTotals?.[0] || {};
 
-    // normalizamos a un objeto “bonito”
     const byMethod = {};
     for (const r of rowsPay || []) {
       const k = String(r.method || "").trim().toUpperCase() || "OTHER";
       byMethod[k] = Number(r.amount_sum || 0);
     }
 
-    // Mapeo “UI friendly” (lo que pediste)
     const methods = {
       CASH: byMethod.CASH || byMethod.EFECTIVO || 0,
       TRANSFER: byMethod.TRANSFER || byMethod.TRANSFERENCIA || 0,
@@ -513,8 +520,7 @@ async function statsSales(req, res, next) {
       OTHER: 0,
     };
 
-    // “OTHER” = todo lo que no entró en los principales
-    const known = new Set(["CASH", "EFECTIVO", "TRANSFER", "TRANSFERENCIA", "DEBIT", "TARJETA_DEBITO", "DEBITO", "CREDIT", "TARJETA_CREDITO", "CREDITO", "QR"]);
+    const known = new Set(["CASH","EFECTIVO","TRANSFER","TRANSFERENCIA","DEBIT","TARJETA_DEBITO","DEBITO","CREDIT","TARJETA_CREDITO","CREDITO","QR"]);
     let otherSum = 0;
     for (const [k, v] of Object.entries(byMethod)) {
       if (!known.has(k)) otherSum += Number(v || 0);
@@ -525,10 +531,16 @@ async function statsSales(req, res, next) {
       ok: true,
       data: {
         sales_count: toInt(t.sales_count, 0),
+
+        // ✅ NETO (impacta devoluciones)
         total_sum: Number(t.total_sum || 0),
         paid_sum: Number(t.paid_sum || 0),
 
-        // ✅ breakdown por tipo de pago (lo que pediste)
+        // ✅ extra útil para auditoría
+        refunds_sum: Number(t.refunds_sum || 0),
+        gross_total_sum: Number(t.gross_total_sum || 0),
+        gross_paid_sum: Number(t.gross_paid_sum || 0),
+
         payments: {
           cash: methods.CASH,
           transfer: methods.TRANSFER,
@@ -536,8 +548,6 @@ async function statsSales(req, res, next) {
           credit: methods.CREDIT,
           qr: methods.QR,
           other: methods.OTHER,
-
-          // ✅ además te dejo el crudo por si querés mostrar “métodos raros”
           raw_by_method: byMethod,
         },
       },
@@ -568,7 +578,6 @@ async function listSales(req, res, next) {
     const payTable = getTableName(Payment, "payments");
     const itemsTable = getTableName(SaleItem, "sale_items");
 
-    // ✅ COUNT robusto (evita alias raros y duplicación)
     let total = 0;
 
     if (!hasRequiredJoin) {
@@ -685,7 +694,6 @@ async function listSales(req, res, next) {
 // OPTIONS para desplegables reales
 // ============================
 
-// GET /api/v1/pos/sales/options/sellers?q=...
 async function optionsSellers(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
@@ -695,7 +703,6 @@ async function optionsSellers(req, res, next) {
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
-    // sellers que efectivamente tienen ventas en el scope
     const rows = await Sale.findAll({
       where,
       attributes: [[fn("DISTINCT", col("Sale.user_id")), "user_id"]],
@@ -740,7 +747,6 @@ async function optionsSellers(req, res, next) {
   }
 }
 
-// GET /api/v1/pos/sales/options/customers?q=...
 async function optionsCustomers(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
@@ -793,7 +799,6 @@ async function optionsCustomers(req, res, next) {
   }
 }
 
-// GET /api/v1/pos/sales/options/products?q=...
 async function optionsProducts(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
@@ -803,7 +808,7 @@ async function optionsProducts(req, res, next) {
     const q = String(req.query.q || "").trim();
     const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
 
-    const itemSaleAs = findAssocAlias(SaleItem, Sale); // "sale" si existe
+    const itemSaleAs = findAssocAlias(SaleItem, Sale);
 
     let rows = [];
 
@@ -830,7 +835,6 @@ async function optionsProducts(req, res, next) {
         raw: true,
       });
     } else {
-      // fallback SQL
       const salesTable = getTableName(Sale, "sales");
       const itemsTable = getTableName(SaleItem, "sale_items");
 
@@ -913,6 +917,7 @@ async function getSaleById(req, res, next) {
     const saleItemsAs = findAssocAlias(Sale, SaleItem);
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
+    const saleRefundsAs = SaleRefund ? findAssocAlias(Sale, SaleRefund) : null;
 
     const itemWarehouseAs = findAssocAlias(SaleItem, Warehouse);
     const itemProductAs = findAssocAlias(SaleItem, Product);
@@ -927,6 +932,9 @@ async function getSaleById(req, res, next) {
     if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
+
+    // ✅ NUEVO: refunds en detalle
+    if (SaleRefund && saleRefundsAs) include.push({ model: SaleRefund, as: saleRefundsAs, required: false });
 
     if (SaleItem && saleItemsAs) {
       const itemInclude = [];
@@ -955,6 +963,7 @@ async function getSaleById(req, res, next) {
     const order = [];
     if (salePaymentsAs) order.push([{ model: Payment, as: salePaymentsAs }, "id", "ASC"]);
     if (saleItemsAs) order.push([{ model: SaleItem, as: saleItemsAs }, "id", "ASC"]);
+    if (SaleRefund && saleRefundsAs) order.push([{ model: SaleRefund, as: saleRefundsAs }, "id", "ASC"]);
 
     const sale = await Sale.findByPk(id, {
       include,
@@ -1035,7 +1044,6 @@ async function createSale(req, res, next) {
       const quantity = toFloat(it?.quantity, 0);
       const unit_price = toFloat(it?.unit_price ?? it?.unitPrice ?? it?.price, 0);
 
-      // resolve warehouse igual que tu versión original
       const warehouse_id = await (async () => {
         const direct = toInt(it?.warehouse_id || it?.warehouseId, 0);
         if (direct > 0) return direct;
@@ -1201,6 +1209,130 @@ async function createSale(req, res, next) {
 }
 
 // ============================
+// POST /api/v1/pos/sales/:id/refunds
+// ✅ Registra devolución (solo ADMIN)
+// ============================
+async function createRefund(req, res, next) {
+  const t = await sequelize.transaction();
+  try {
+    if (!SaleRefund) {
+      await t.rollback();
+      return res.status(500).json({
+        ok: false,
+        code: "REFUNDS_MODEL_MISSING",
+        message: "SaleRefund no está definido. Creá el modelo/tabla sale_refunds.",
+      });
+    }
+
+    const admin = isAdminReq(req);
+    if (!admin) {
+      await t.rollback();
+      return res.status(403).json({
+        ok: false,
+        code: "ADMIN_ONLY",
+        message: "Solo administrador puede registrar devoluciones.",
+      });
+    }
+
+    const id = toInt(req.params.id, 0);
+    if (!id) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: "ID inválido" });
+    }
+
+    const amount = toFloat(req.body?.amount, NaN);
+    const reason = String(req.body?.reason || "").trim() || null;
+    const restock = !!req.body?.restock;
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, code: "BAD_AMOUNT", message: "Monto inválido" });
+    }
+
+    const sale = await Sale.findByPk(id, { transaction: t });
+    if (!sale) {
+      await t.rollback();
+      return res.status(404).json({ ok: false, message: "Venta no encontrada" });
+    }
+
+    // si querés también evitar cross-branch incluso siendo admin, descomentá:
+    // const requestedBranch = toInt(req.query.branch_id ?? req.query.branchId, 0);
+    // if (requestedBranch > 0 && toInt(sale.branch_id, 0) !== requestedBranch) ...
+
+    // total ya devuelto
+    const refundsTable = getTableName(SaleRefund, "sale_refunds");
+    const salesTable = getTableName(Sale, "sales");
+
+    const sql = `
+      SELECT COALESCE(SUM(r.amount),0) AS refunded_sum
+      FROM ${refundsTable} r
+      WHERE r.sale_id = :sale_id
+    `;
+    const [r] = await sequelize.query(sql, { replacements: { sale_id: id }, transaction: t });
+    const refundedSum = Number(r?.[0]?.refunded_sum || 0);
+
+    const paidTotal = Number(sale.paid_total || 0);
+    const remaining = Math.max(0, paidTotal - refundedSum);
+
+    if (amount > remaining) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        code: "AMOUNT_EXCEEDS_REMAINING",
+        message: `El monto supera lo disponible para devolver. Disponible: ${remaining}`,
+        data: { remaining, paid_total: paidTotal, refunded_sum: refundedSum },
+      });
+    }
+
+    const user_id = getAuthUserId(req) || null;
+
+    const refund = await SaleRefund.create(
+      {
+        sale_id: id,
+        amount,
+        reason,
+        restock: restock ? 1 : 0,
+        created_by: user_id,
+      },
+      { transaction: t }
+    );
+
+    // ✅ actualizar estado si quedó totalmente devuelta
+    const newRefunded = refundedSum + amount;
+    const fullyRefunded = newRefunded >= paidTotal - 0.00001;
+
+    if (Sale?.rawAttributes?.status) {
+      await sale.update(
+        { status: fullyRefunded ? "REFUNDED" : sale.status },
+        { transaction: t }
+      );
+    }
+
+    // 🧠 STOCK: por ahora dejamos registro restock=true para procesarlo.
+    // Si ya tenés lógica de stock/movimientos, acá es donde se ejecuta.
+    // (no la implemento a ciegas para no romper tu inventario)
+
+    await t.commit();
+
+    // devolver resumen útil
+    return res.status(201).json({
+      ok: true,
+      message: "Devolución registrada",
+      data: {
+        refund,
+        sale_id: id,
+        refunded_sum: newRefunded,
+        remaining: Math.max(0, paidTotal - newRefunded),
+        status: fullyRefunded ? "REFUNDED" : sale.status,
+      },
+    });
+  } catch (e) {
+    try { await t.rollback(); } catch {}
+    next(e);
+  }
+}
+
+// ============================
 // DELETE /api/v1/pos/sales/:id
 // ============================
 async function deleteSale(req, res, next) {
@@ -1239,6 +1371,9 @@ async function deleteSale(req, res, next) {
       });
     }
 
+    // ✅ si hay devoluciones, también se limpian (si existe modelo)
+    if (SaleRefund) await SaleRefund.destroy({ where: { sale_id: id }, transaction: t });
+
     await Payment.destroy({ where: { sale_id: id }, transaction: t });
     await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
 
@@ -1261,4 +1396,7 @@ module.exports = {
   getSaleById,
   createSale,
   deleteSale,
+
+  // ✅ NUEVO
+  createRefund,
 };

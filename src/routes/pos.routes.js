@@ -28,6 +28,9 @@ const getSaleById = posSalesController.getSaleById;
 const createSale = posSalesController.createSale;
 const deleteSale = posSalesController.deleteSale;
 
+// ✅ NUEVO: devoluciones
+const createRefund = posSalesController.createRefund;
+
 // ==============================
 // Guards para evitar [object Undefined]
 // ==============================
@@ -54,6 +57,9 @@ assertFn("getSaleById", getSaleById);
 assertFn("createSale", createSale);
 assertFn("deleteSale", deleteSale);
 
+// ✅ NUEVO: validamos devoluciones
+assertFn("createRefund", createRefund);
+
 // ==============================
 // ✅ ROUTES
 // ==============================
@@ -79,5 +85,8 @@ router.get("/sales/options/products", optionsProducts);
 router.get("/sales/:id", getSaleById);
 router.post("/sales", createSale);
 router.delete("/sales/:id", deleteSale);
+
+// ✅ NUEVO: registrar devolución (lo usa tu modal)
+router.post("/sales/:id/refunds", createRefund);
 
 module.exports = router;
