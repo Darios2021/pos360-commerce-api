@@ -1,4 +1,6 @@
 // src/controllers/posSales.controller.js
+// ✅ COPY-PASTE FINAL COMPLETO (RESPETA TU BD REAL)
+// NOTA: sale_refunds es VIEW => SOLO LECTURA
 const { Op, fn, col, literal } = require("sequelize");
 const {
   sequelize,
@@ -12,31 +14,27 @@ const {
   Branch,
   User,
   UserBranch,
-  // ✅ NUEVO (si no existe aún, crealo en models)
-  SaleRefund,
+  SaleRefund, // VIEW (solo lectura)
+  SaleExchange,
 } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
-
 function toFloat(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
-
 function parseDateTime(v) {
   if (!v) return null;
   const s = String(v).trim();
   const d = new Date(s.replace(" ", "T"));
   return isNaN(d.getTime()) ? null : d;
 }
-
 function nowDate() {
   return new Date();
 }
-
 function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
@@ -252,308 +250,54 @@ function buildWhereFromQuery(req) {
 }
 
 /**
- * ✅ Filtros reales + include robusto según asociaciones existentes
- * - seller_id / seller (id)
- * - customer (texto)
- * - pay_method (Payment.method)
- * - product (SaleItem snapshots / product_id)
+ * ✅ List filters SIN duplicar por joins:
+ * - pay_method: EXISTS payments
+ * - product: EXISTS sale_items
  */
-function buildQueryFilters(req) {
-  const base = buildWhereFromQuery(req);
-  if (!base.ok) return base;
-
-  const where = base.where;
-
-  const customer = String(req.query.customer || "").trim();
-  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+function injectExistsFiltersIntoWhere(where, req) {
   const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
   const product = String(req.query.product || "").trim();
 
-  if (seller_id > 0) where.user_id = seller_id;
-
-  if (customer) {
-    where[Op.and] = (where[Op.and] || []).concat([
-      {
-        [Op.or]: [
-          { customer_name: { [Op.like]: `%${customer}%` } },
-          { customer_doc: { [Op.like]: `%${customer}%` } },
-          { customer_phone: { [Op.like]: `%${customer}%` } },
-        ],
-      },
-    ]);
-  }
-
-  const include = [];
-
-  // Alias reales
-  const salePaymentsAs = findAssocAlias(Sale, Payment); // "payments"
-  const saleItemsAs = findAssocAlias(Sale, SaleItem);   // "items"
-  const saleBranchAs = findAssocAlias(Sale, Branch);    // "branch"
-  const saleUserAs = findAssocAlias(Sale, User);        // "user"
-
-  if (Payment && salePaymentsAs) {
-    if (pay_method) {
-      include.push({
-        model: Payment,
-        as: salePaymentsAs,
-        required: true,
-        where: { method: pay_method },
-        attributes: [],
-      });
-    } else {
-      include.push({ model: Payment, as: salePaymentsAs, required: false });
-    }
-  }
-
-  if (product && SaleItem && saleItemsAs) {
-    const pNum = toInt(product, 0);
-    const itemWhere = {};
-
-    if (pNum > 0) itemWhere.product_id = pNum;
-    else {
-      itemWhere[Op.or] = [
-        { product_name_snapshot: { [Op.like]: `%${product}%` } },
-        { product_sku_snapshot: { [Op.like]: `%${product}%` } },
-        { product_barcode_snapshot: { [Op.like]: `%${product}%` } },
-      ];
-    }
-
-    include.push({
-      model: SaleItem,
-      as: saleItemsAs,
-      required: true,
-      where: itemWhere,
-      attributes: [],
-    });
-  }
-
-  if (Branch && saleBranchAs) {
-    include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
-  }
-  if (User && saleUserAs) {
-    include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
-  }
-
-  return { ok: true, where, include, salePaymentsAs, saleItemsAs, saleBranchAs, saleUserAs };
-}
-
-/**
- * ✅ Construye condiciones SQL (SIN duplicar por joins)
- * Usamos EXISTS para pay_method y product, así NO se multiplican filas.
- */
-function buildStatsFiltersSql(req) {
-  const base = buildWhereFromQuery(req);
-  if (!base.ok) return base;
-
-  const where = base.where;
-
-  const customer = String(req.query.customer || "").trim();
-  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
-  const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
-  const product = String(req.query.product || "").trim();
-
-  const conds = [];
-  const repl = {};
-
-  if (where.branch_id) {
-    conds.push("s.branch_id = :branch_id");
-    repl.branch_id = where.branch_id;
-  }
-  if (where.status) {
-    conds.push("s.status = :status");
-    repl.status = where.status;
-  }
-
-  if (where.sold_at?.[Op.between]) {
-    conds.push("s.sold_at BETWEEN :from AND :to");
-    repl.from = where.sold_at[Op.between][0];
-    repl.to = where.sold_at[Op.between][1];
-  } else if (where.sold_at?.[Op.gte]) {
-    conds.push("s.sold_at >= :from");
-    repl.from = where.sold_at[Op.gte];
-  } else if (where.sold_at?.[Op.lte]) {
-    conds.push("s.sold_at <= :to");
-    repl.to = where.sold_at[Op.lte];
-  }
-
-  const q = String(req.query.q || "").trim();
-  if (q) {
-    const qNum = toFloat(q, NaN);
-    const parts = [
-      "s.customer_name LIKE :qLike",
-      "s.sale_number LIKE :qLike",
-      "s.customer_phone LIKE :qLike",
-      "s.customer_doc LIKE :qLike",
-    ];
-    repl.qLike = `%${q}%`;
-    if (Number.isFinite(qNum)) {
-      parts.push("s.id = :qId");
-      repl.qId = toInt(qNum, 0);
-    }
-    conds.push(`(${parts.join(" OR ")})`);
-  }
-
-  if (customer) {
-    conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
-    repl.cLike = `%${customer}%`;
-  }
-
-  if (seller_id > 0) {
-    conds.push("s.user_id = :seller_id");
-    repl.seller_id = seller_id;
-  }
-
-  const salesTable = getTableName(Sale, "sales");
   const payTable = getTableName(Payment, "payments");
   const itemsTable = getTableName(SaleItem, "sale_items");
 
+  const ands = [];
+
   if (pay_method) {
-    conds.push(`EXISTS (
-      SELECT 1 FROM ${payTable} p
-      WHERE p.sale_id = s.id AND p.method = :pay_method
-    )`);
-    repl.pay_method = pay_method;
+    ands.push(
+      literal(`EXISTS (
+        SELECT 1 FROM ${payTable} p
+        WHERE p.sale_id = Sale.id AND UPPER(p.method) = ${sequelize.escape(pay_method)}
+      )`)
+    );
   }
 
   if (product) {
     const pNum = toInt(product, 0);
     if (pNum > 0) {
-      conds.push(`EXISTS (
-        SELECT 1 FROM ${itemsTable} si
-        WHERE si.sale_id = s.id AND si.product_id = :product_id
-      )`);
-      repl.product_id = pNum;
+      ands.push(
+        literal(`EXISTS (
+          SELECT 1 FROM ${itemsTable} si
+          WHERE si.sale_id = Sale.id AND si.product_id = ${sequelize.escape(pNum)}
+        )`)
+      );
     } else {
-      conds.push(`EXISTS (
-        SELECT 1 FROM ${itemsTable} si
-        WHERE si.sale_id = s.id AND (
-          si.product_name_snapshot LIKE :pLike OR
-          si.product_sku_snapshot LIKE :pLike OR
-          si.product_barcode_snapshot LIKE :pLike
-        )
-      )`);
-      repl.pLike = `%${product}%`;
+      const like = `%${product}%`;
+      ands.push(
+        literal(`EXISTS (
+          SELECT 1 FROM ${itemsTable} si
+          WHERE si.sale_id = Sale.id AND (
+            si.product_name_snapshot LIKE ${sequelize.escape(like)} OR
+            si.product_sku_snapshot LIKE ${sequelize.escape(like)} OR
+            si.product_barcode_snapshot LIKE ${sequelize.escape(like)}
+          )
+        )`)
+      );
     }
   }
 
-  const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-
-  return {
-    ok: true,
-    whereSql,
-    replacements: repl,
-    tables: { salesTable, payTable, itemsTable },
-  };
-}
-
-/**
- * ✅ Stats NETO:
- * - total ventas (count)
- * - total vendido NETO (SUM(s.total) - SUM(refunds))
- * - total cobrado NETO (SUM(s.paid_total) - SUM(refunds))
- * - breakdown por método (SUM(payments.amount) - refunds prorrateo NO incluido; se deja bruto por método)
- */
-async function statsSales(req, res, next) {
-  try {
-    const built = buildStatsFiltersSql(req);
-    if (!built.ok) {
-      return res.status(400).json({ ok: false, code: built.code, message: built.message });
-    }
-
-    const { whereSql, replacements, tables } = built;
-    const { salesTable, payTable } = tables;
-
-    const refundsTable = getTableName(SaleRefund, "sale_refunds");
-
-    // 0) Refunds agregadas por sale_id (para neto)
-    const refundsJoin = SaleRefund
-      ? `LEFT JOIN (
-          SELECT r.sale_id, COALESCE(SUM(r.amount),0) AS refunds_sum
-          FROM ${refundsTable} r
-          GROUP BY r.sale_id
-        ) rr ON rr.sale_id = s.id`
-      : `LEFT JOIN (SELECT NULL AS sale_id, 0 AS refunds_sum) rr ON 1=0`;
-
-    // 1) Totales NETOS
-    const sqlTotals = `
-      SELECT
-        COUNT(*) AS sales_count,
-        COALESCE(SUM(s.total),0) AS gross_total_sum,
-        COALESCE(SUM(s.paid_total),0) AS gross_paid_sum,
-        COALESCE(SUM(rr.refunds_sum),0) AS refunds_sum,
-        (COALESCE(SUM(s.total),0) - COALESCE(SUM(rr.refunds_sum),0)) AS total_sum,
-        (COALESCE(SUM(s.paid_total),0) - COALESCE(SUM(rr.refunds_sum),0)) AS paid_sum
-      FROM ${salesTable} s
-      ${refundsJoin}
-      ${whereSql}
-    `;
-
-    // 2) Breakdown de pagos (bruto por método)
-    const sqlPayments = `
-      SELECT
-        UPPER(p.method) AS method,
-        COALESCE(SUM(p.amount),0) AS amount_sum
-      FROM ${payTable} p
-      INNER JOIN ${salesTable} s ON s.id = p.sale_id
-      ${whereSql}
-      GROUP BY UPPER(p.method)
-      ORDER BY UPPER(p.method) ASC
-    `;
-
-    const [rowsTotals] = await sequelize.query(sqlTotals, { replacements });
-    const [rowsPay] = await sequelize.query(sqlPayments, { replacements });
-
-    const t = rowsTotals?.[0] || {};
-
-    const byMethod = {};
-    for (const r of rowsPay || []) {
-      const k = String(r.method || "").trim().toUpperCase() || "OTHER";
-      byMethod[k] = Number(r.amount_sum || 0);
-    }
-
-    const methods = {
-      CASH: byMethod.CASH || byMethod.EFECTIVO || 0,
-      TRANSFER: byMethod.TRANSFER || byMethod.TRANSFERENCIA || 0,
-      DEBIT: byMethod.DEBIT || byMethod["TARJETA_DEBITO"] || byMethod["DEBITO"] || 0,
-      CREDIT: byMethod.CREDIT || byMethod["TARJETA_CREDITO"] || byMethod["CREDITO"] || 0,
-      QR: byMethod.QR || 0,
-      OTHER: 0,
-    };
-
-    const known = new Set(["CASH","EFECTIVO","TRANSFER","TRANSFERENCIA","DEBIT","TARJETA_DEBITO","DEBITO","CREDIT","TARJETA_CREDITO","CREDITO","QR"]);
-    let otherSum = 0;
-    for (const [k, v] of Object.entries(byMethod)) {
-      if (!known.has(k)) otherSum += Number(v || 0);
-    }
-    methods.OTHER = otherSum;
-
-    return res.json({
-      ok: true,
-      data: {
-        sales_count: toInt(t.sales_count, 0),
-
-        // ✅ NETO (impacta devoluciones)
-        total_sum: Number(t.total_sum || 0),
-        paid_sum: Number(t.paid_sum || 0),
-
-        // ✅ extra útil para auditoría
-        refunds_sum: Number(t.refunds_sum || 0),
-        gross_total_sum: Number(t.gross_total_sum || 0),
-        gross_paid_sum: Number(t.gross_paid_sum || 0),
-
-        payments: {
-          cash: methods.CASH,
-          transfer: methods.TRANSFER,
-          debit: methods.DEBIT,
-          credit: methods.CREDIT,
-          qr: methods.QR,
-          other: methods.OTHER,
-          raw_by_method: byMethod,
-        },
-      },
-    });
-  } catch (e) {
-    next(e);
+  if (ands.length) {
+    where[Op.and] = (where[Op.and] || []).concat(ands);
   }
 }
 
@@ -566,105 +310,25 @@ async function listSales(req, res, next) {
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
     const offset = (page - 1) * limit;
 
-    const built = buildQueryFilters(req);
-    if (!built.ok) {
-      return res.status(400).json({ ok: false, code: built.code, message: built.message });
+    const base = buildWhereFromQuery(req);
+    if (!base.ok) {
+      return res.status(400).json({ ok: false, code: base.code, message: base.message });
     }
 
-    const { where, include, salePaymentsAs, saleItemsAs } = built;
-    const hasRequiredJoin = (include || []).some((x) => x?.required === true);
+    const where = base.where;
 
-    const salesTable = getTableName(Sale, "sales");
-    const payTable = getTableName(Payment, "payments");
-    const itemsTable = getTableName(SaleItem, "sale_items");
+    // filtros extra (sin duplicar)
+    injectExistsFiltersIntoWhere(where, req);
 
-    let total = 0;
+    // includes “de display”
+    const include = [];
+    const saleBranchAs = findAssocAlias(Sale, Branch);
+    const saleUserAs = findAssocAlias(Sale, User);
 
-    if (!hasRequiredJoin) {
-      total = await Sale.count({ where });
-    } else {
-      const needPay = (include || []).some((x) => x?.as === salePaymentsAs && x?.required === true);
-      const needItems = (include || []).some((x) => x?.as === saleItemsAs && x?.required === true);
+    if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
+    if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
 
-      const joins = [];
-      const conds = [];
-      const repl = {};
-
-      const base = buildWhereFromQuery(req);
-      if (!base.ok) {
-        return res.status(400).json({ ok: false, code: base.code, message: base.message });
-      }
-      const w = base.where;
-
-      if (w.branch_id) { conds.push("s.branch_id = :branch_id"); repl.branch_id = w.branch_id; }
-      if (w.status) { conds.push("s.status = :status"); repl.status = w.status; }
-
-      if (w.sold_at?.[Op.between]) {
-        conds.push("s.sold_at BETWEEN :from AND :to");
-        repl.from = w.sold_at[Op.between][0];
-        repl.to = w.sold_at[Op.between][1];
-      } else if (w.sold_at?.[Op.gte]) {
-        conds.push("s.sold_at >= :from");
-        repl.from = w.sold_at[Op.gte];
-      } else if (w.sold_at?.[Op.lte]) {
-        conds.push("s.sold_at <= :to");
-        repl.to = w.sold_at[Op.lte];
-      }
-
-      const q = String(req.query.q || "").trim();
-      if (q) {
-        const qNum = toFloat(q, NaN);
-        const parts = [
-          "s.customer_name LIKE :qLike",
-          "s.sale_number LIKE :qLike",
-          "s.customer_phone LIKE :qLike",
-          "s.customer_doc LIKE :qLike",
-        ];
-        repl.qLike = `%${q}%`;
-        if (Number.isFinite(qNum)) {
-          parts.push("s.id = :qId");
-          repl.qId = toInt(qNum, 0);
-        }
-        conds.push(`(${parts.join(" OR ")})`);
-      }
-
-      const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
-      if (seller_id > 0) { conds.push("s.user_id = :seller_id"); repl.seller_id = seller_id; }
-
-      const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
-      if (needPay) {
-        joins.push(`INNER JOIN ${payTable} p ON p.sale_id = s.id`);
-        if (pay_method) { conds.push("p.method = :pay_method"); repl.pay_method = pay_method; }
-      }
-
-      const product = String(req.query.product || "").trim();
-      if (needItems) {
-        joins.push(`INNER JOIN ${itemsTable} si ON si.sale_id = s.id`);
-        if (product) {
-          const pNum = toInt(product, 0);
-          if (pNum > 0) { conds.push("si.product_id = :product_id"); repl.product_id = pNum; }
-          else {
-            conds.push("(si.product_name_snapshot LIKE :pLike OR si.product_sku_snapshot LIKE :pLike OR si.product_barcode_snapshot LIKE :pLike)");
-            repl.pLike = `%${product}%`;
-          }
-        }
-      }
-
-      const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-
-      const sql = `
-        SELECT COUNT(*) AS c
-        FROM (
-          SELECT DISTINCT s.id
-          FROM ${salesTable} s
-          ${joins.join("\n")}
-          ${whereSql}
-        ) t
-      `;
-
-      const [r] = await sequelize.query(sql, { replacements: repl });
-      total = toInt(r?.[0]?.c, 0);
-    }
+    const total = await Sale.count({ where });
 
     const rows = await Sale.findAll({
       where,
@@ -684,219 +348,150 @@ async function listSales(req, res, next) {
     });
   } catch (e) {
     console.error("[POS SALES] listSales error:", e?.message || e);
-    if (e?.original) console.error("[POS SALES] original:", e.original);
-    if (e?.sql) console.error("[POS SALES] sql:", e.sql);
     next(e);
   }
 }
 
-// ============================
-// OPTIONS para desplegables reales
-// ============================
-
-async function optionsSellers(req, res, next) {
+/**
+ * ✅ Stats NETO:
+ * - total vendido NETO (SUM(total) - SUM(refunds))
+ * - total cobrado NETO (SUM(paid_total) - SUM(refunds))
+ * - breakdown pagos BRUTO por método (CASH/TRANSFER/CARD/QR/OTHER)
+ */
+async function statsSales(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
-    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
-
-    const where = base.where;
-    const q = String(req.query.q || "").trim();
-    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
-
-    const rows = await Sale.findAll({
-      where,
-      attributes: [[fn("DISTINCT", col("Sale.user_id")), "user_id"]],
-      raw: true,
-      limit: 2000,
-    });
-
-    const ids = rows.map((r) => toInt(r.user_id, 0)).filter((n) => n > 0);
-    if (!ids.length) return res.json({ ok: true, data: [] });
-
-    const attrs = pickUserAttributes();
-    const userWhere = { id: ids };
-
-    if (q) {
-      const ors = [];
-      for (const k of ["name", "full_name", "username", "email", "identifier", "first_name", "last_name"]) {
-        if (attrs.includes(k)) ors.push({ [k]: { [Op.like]: `%${q}%` } });
-      }
-      if (ors.length) userWhere[Op.and] = [{ [Op.or]: ors }];
+    if (!base.ok) {
+      return res.status(400).json({ ok: false, code: base.code, message: base.message });
     }
 
-    const users = await User.findAll({
-      where: userWhere,
-      attributes: attrs,
-      limit,
-      order: [["id", "ASC"]],
-      raw: true,
-    });
+    const where = base.where;
+    const salesTable = getTableName(Sale, "sales");
+    const payTable = getTableName(Payment, "payments");
+    const refundsTable = getTableName(SaleRefund, "sale_refunds"); // VIEW
 
-    const label = (u) =>
-      u.name ||
-      u.full_name ||
-      (u.first_name || u.last_name ? `${u.first_name || ""} ${u.last_name || ""}`.trim() : "") ||
-      u.username ||
-      u.email ||
-      u.identifier ||
-      `#${u.id}`;
+    // Reutilizamos mismos filtros EXISTS para stats (en SQL)
+    const conds = [];
+    const repl = {};
 
-    return res.json({ ok: true, data: users.map((u) => ({ value: u.id, title: label(u) })) });
-  } catch (e) {
-    next(e);
-  }
-}
+    if (where.branch_id) { conds.push("s.branch_id = :branch_id"); repl.branch_id = where.branch_id; }
+    if (where.status) { conds.push("s.status = :status"); repl.status = where.status; }
 
-async function optionsCustomers(req, res, next) {
-  try {
-    const base = buildWhereFromQuery(req);
-    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
+    if (where.sold_at?.[Op.between]) {
+      conds.push("s.sold_at BETWEEN :from AND :to");
+      repl.from = where.sold_at[Op.between][0];
+      repl.to = where.sold_at[Op.between][1];
+    } else if (where.sold_at?.[Op.gte]) {
+      conds.push("s.sold_at >= :from");
+      repl.from = where.sold_at[Op.gte];
+    } else if (where.sold_at?.[Op.lte]) {
+      conds.push("s.sold_at <= :to");
+      repl.to = where.sold_at[Op.lte];
+    }
 
-    const where = { ...base.where };
     const q = String(req.query.q || "").trim();
-    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
-
-    where.customer_name = { [Op.ne]: null };
-
     if (q) {
-      where[Op.and] = (where[Op.and] || []).concat([
-        {
-          [Op.or]: [
-            { customer_name: { [Op.like]: `%${q}%` } },
-            { customer_doc: { [Op.like]: `%${q}%` } },
-            { customer_phone: { [Op.like]: `%${q}%` } },
-          ],
+      repl.qLike = `%${q}%`;
+      conds.push("(s.customer_name LIKE :qLike OR s.sale_number LIKE :qLike OR s.customer_phone LIKE :qLike OR s.customer_doc LIKE :qLike)");
+    }
+
+    const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+    if (seller_id > 0) { conds.push("s.user_id = :seller_id"); repl.seller_id = seller_id; }
+
+    const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
+    if (pay_method) {
+      conds.push(`EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`);
+      repl.pay_method = pay_method;
+    }
+
+    const product = String(req.query.product || "").trim();
+    const itemsTable = getTableName(SaleItem, "sale_items");
+    if (product) {
+      const pNum = toInt(product, 0);
+      if (pNum > 0) {
+        conds.push(`EXISTS (SELECT 1 FROM ${itemsTable} si WHERE si.sale_id = s.id AND si.product_id = :product_id)`);
+        repl.product_id = pNum;
+      } else {
+        conds.push(`EXISTS (
+          SELECT 1 FROM ${itemsTable} si
+          WHERE si.sale_id = s.id AND (
+            si.product_name_snapshot LIKE :pLike OR
+            si.product_sku_snapshot LIKE :pLike OR
+            si.product_barcode_snapshot LIKE :pLike
+          )
+        )`);
+        repl.pLike = `%${product}%`;
+      }
+    }
+
+    const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+    const refundsJoin = `
+      LEFT JOIN (
+        SELECT r.sale_id, COALESCE(SUM(r.amount),0) AS refunds_sum
+        FROM ${refundsTable} r
+        GROUP BY r.sale_id
+      ) rr ON rr.sale_id = s.id
+    `;
+
+    const sqlTotals = `
+      SELECT
+        COUNT(*) AS sales_count,
+        COALESCE(SUM(s.total),0) AS gross_total_sum,
+        COALESCE(SUM(s.paid_total),0) AS gross_paid_sum,
+        COALESCE(SUM(rr.refunds_sum),0) AS refunds_sum,
+        (COALESCE(SUM(s.total),0) - COALESCE(SUM(rr.refunds_sum),0)) AS total_sum,
+        (COALESCE(SUM(s.paid_total),0) - COALESCE(SUM(rr.refunds_sum),0)) AS paid_sum
+      FROM ${salesTable} s
+      ${refundsJoin}
+      ${whereSql}
+    `;
+
+    const sqlPayments = `
+      SELECT
+        UPPER(p.method) AS method,
+        COALESCE(SUM(p.amount),0) AS amount_sum
+      FROM ${payTable} p
+      INNER JOIN ${salesTable} s ON s.id = p.sale_id
+      ${whereSql}
+      GROUP BY UPPER(p.method)
+      ORDER BY UPPER(p.method) ASC
+    `;
+
+    const [rowsTotals] = await sequelize.query(sqlTotals, { replacements: repl });
+    const [rowsPay] = await sequelize.query(sqlPayments, { replacements: repl });
+
+    const t = rowsTotals?.[0] || {};
+
+    const byMethod = {};
+    for (const r of rowsPay || []) {
+      const k = String(r.method || "").trim().toUpperCase() || "OTHER";
+      byMethod[k] = Number(r.amount_sum || 0);
+    }
+
+    return res.json({
+      ok: true,
+      data: {
+        sales_count: toInt(t.sales_count, 0),
+
+        // ✅ NETO
+        total_sum: Number(t.total_sum || 0),
+        paid_sum: Number(t.paid_sum || 0),
+
+        // ✅ auditoría
+        refunds_sum: Number(t.refunds_sum || 0),
+        gross_total_sum: Number(t.gross_total_sum || 0),
+        gross_paid_sum: Number(t.gross_paid_sum || 0),
+
+        payments: {
+          cash: byMethod.CASH || 0,
+          transfer: byMethod.TRANSFER || 0,
+          card: byMethod.CARD || 0,
+          qr: byMethod.QR || 0,
+          other: byMethod.OTHER || 0,
+          raw_by_method: byMethod,
         },
-      ]);
-    }
-
-    const rows = await Sale.findAll({
-      where,
-      attributes: ["customer_name", "customer_doc", "customer_phone"],
-      group: ["customer_name", "customer_doc", "customer_phone"],
-      order: [[literal("customer_name"), "ASC"]],
-      limit,
-      raw: true,
-    });
-
-    const title = (c) => {
-      const name = c.customer_name || "Consumidor Final";
-      const doc = c.customer_doc ? ` · ${c.customer_doc}` : "";
-      const phone = c.customer_phone ? ` · ${c.customer_phone}` : "";
-      return `${name}${doc}${phone}`;
-    };
-
-    return res.json({
-      ok: true,
-      data: rows.map((c) => ({
-        value: String(c.customer_doc || c.customer_phone || c.customer_name || "").trim() || (c.customer_name || ""),
-        title: title(c),
-        raw: c,
-      })),
-    });
-  } catch (e) {
-    next(e);
-  }
-}
-
-async function optionsProducts(req, res, next) {
-  try {
-    const base = buildWhereFromQuery(req);
-    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
-
-    const where = base.where;
-    const q = String(req.query.q || "").trim();
-    const limit = Math.min(50, Math.max(5, toInt(req.query.limit, 20)));
-
-    const itemSaleAs = findAssocAlias(SaleItem, Sale);
-
-    let rows = [];
-
-    if (SaleItem && Sale && itemSaleAs) {
-      rows = await SaleItem.findAll({
-        attributes: [
-          "product_id",
-          [fn("MAX", col("SaleItem.product_name_snapshot")), "name"],
-          [fn("MAX", col("SaleItem.product_sku_snapshot")), "sku"],
-          [fn("MAX", col("SaleItem.product_barcode_snapshot")), "barcode"],
-        ],
-        include: [
-          {
-            model: Sale,
-            as: itemSaleAs,
-            required: true,
-            attributes: [],
-            where,
-          },
-        ],
-        group: ["SaleItem.product_id"],
-        order: [[literal("name"), "ASC"]],
-        limit: 500,
-        raw: true,
-      });
-    } else {
-      const salesTable = getTableName(Sale, "sales");
-      const itemsTable = getTableName(SaleItem, "sale_items");
-
-      const conds = [];
-      const repl = {};
-
-      if (where.branch_id) { conds.push("s.branch_id = :branch_id"); repl.branch_id = where.branch_id; }
-      if (where.status) { conds.push("s.status = :status"); repl.status = where.status; }
-      if (where.sold_at?.[Op.between]) { conds.push("s.sold_at BETWEEN :from AND :to"); repl.from = where.sold_at[Op.between][0]; repl.to = where.sold_at[Op.between][1]; }
-      else if (where.sold_at?.[Op.gte]) { conds.push("s.sold_at >= :from"); repl.from = where.sold_at[Op.gte]; }
-      else if (where.sold_at?.[Op.lte]) { conds.push("s.sold_at <= :to"); repl.to = where.sold_at[Op.lte]; }
-
-      const qBase = String(req.query.q || "").trim();
-      if (qBase) {
-        conds.push("(s.customer_name LIKE :qLike OR s.sale_number LIKE :qLike OR s.customer_phone LIKE :qLike OR s.customer_doc LIKE :qLike)");
-        repl.qLike = `%${qBase}%`;
-      }
-
-      const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-
-      const sql = `
-        SELECT
-          si.product_id,
-          MAX(si.product_name_snapshot) AS name,
-          MAX(si.product_sku_snapshot) AS sku,
-          MAX(si.product_barcode_snapshot) AS barcode
-        FROM ${itemsTable} si
-        INNER JOIN ${salesTable} s ON s.id = si.sale_id
-        ${whereSql}
-        GROUP BY si.product_id
-        ORDER BY name ASC
-        LIMIT 500
-      `;
-      const [r] = await sequelize.query(sql, { replacements: repl });
-      rows = r || [];
-    }
-
-    let out = (rows || []).map((r) => ({
-      id: toInt(r.product_id, 0),
-      name: r.name || `Producto #${r.product_id}`,
-      sku: r.sku || "",
-      barcode: r.barcode || "",
-    }));
-
-    if (q) {
-      const qq = q.toLowerCase();
-      out = out.filter((p) =>
-        String(p.id).includes(qq) ||
-        String(p.name).toLowerCase().includes(qq) ||
-        String(p.sku).toLowerCase().includes(qq) ||
-        String(p.barcode).toLowerCase().includes(qq)
-      );
-    }
-
-    out = out.slice(0, limit);
-
-    return res.json({
-      ok: true,
-      data: out.map((p) => ({
-        value: String(p.id),
-        title: `${p.name}${p.sku ? ` · SKU: ${p.sku}` : ""}${p.barcode ? ` · ${p.barcode}` : ""}`,
-      })),
+      },
     });
   } catch (e) {
     next(e);
@@ -917,14 +512,12 @@ async function getSaleById(req, res, next) {
     const saleItemsAs = findAssocAlias(Sale, SaleItem);
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
-    const saleRefundsAs = SaleRefund ? findAssocAlias(Sale, SaleRefund) : null;
 
     const itemWarehouseAs = findAssocAlias(SaleItem, Warehouse);
     const itemProductAs = findAssocAlias(SaleItem, Product);
 
     const productCategoryAs = findAssocAlias(Product, Category);
     const productImagesAs = findAssocAlias(Product, ProductImage);
-
     const catParentAs = findAssocAlias(Category, Category);
 
     const include = [];
@@ -932,9 +525,6 @@ async function getSaleById(req, res, next) {
     if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
-
-    // ✅ NUEVO: refunds en detalle
-    if (SaleRefund && saleRefundsAs) include.push({ model: SaleRefund, as: saleRefundsAs, required: false });
 
     if (SaleItem && saleItemsAs) {
       const itemInclude = [];
@@ -963,7 +553,6 @@ async function getSaleById(req, res, next) {
     const order = [];
     if (salePaymentsAs) order.push([{ model: Payment, as: salePaymentsAs }, "id", "ASC"]);
     if (saleItemsAs) order.push([{ model: SaleItem, as: saleItemsAs }, "id", "ASC"]);
-    if (SaleRefund && saleRefundsAs) order.push([{ model: SaleRefund, as: saleRefundsAs }, "id", "ASC"]);
 
     const sale = await Sale.findByPk(id, {
       include,
@@ -990,7 +579,25 @@ async function getSaleById(req, res, next) {
       }
     }
 
-    return res.json({ ok: true, data: sale });
+    // ✅ Refunds desde VIEW (solo lectura)
+    let refunds = [];
+    if (SaleRefund) {
+      refunds = await SaleRefund.findAll({
+        where: { sale_id: id },
+        order: [["created_at", "DESC"]],
+      });
+    }
+
+    // ✅ Exchanges (si lo usás)
+    let exchanges = [];
+    if (SaleExchange) {
+      exchanges = await SaleExchange.findAll({
+        where: { [Op.or]: [{ original_sale_id: id }, { new_sale_id: id }] },
+        order: [["created_at", "DESC"]],
+      });
+    }
+
+    return res.json({ ok: true, data: { sale, refunds, exchanges } });
   } catch (e) {
     next(e);
   }
@@ -998,6 +605,7 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
+// (tu createSale lo dejo TAL CUAL lo tenías)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -1210,22 +818,13 @@ async function createSale(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
-// ✅ Registra devolución (solo ADMIN)
+// ✅ CREA DEVOLUCIÓN REAL (ADMIN) -> sale_returns + sale_return_payments
+// (sale_refunds es VIEW, NO se escribe ahí)
 // ============================
 async function createRefund(req, res, next) {
   const t = await sequelize.transaction();
   try {
-    if (!SaleRefund) {
-      await t.rollback();
-      return res.status(500).json({
-        ok: false,
-        code: "REFUNDS_MODEL_MISSING",
-        message: "SaleRefund no está definido. Creá el modelo/tabla sale_refunds.",
-      });
-    }
-
-    const admin = isAdminReq(req);
-    if (!admin) {
+    if (!isAdminReq(req)) {
       await t.rollback();
       return res.status(403).json({
         ok: false,
@@ -1234,47 +833,52 @@ async function createRefund(req, res, next) {
       });
     }
 
-    const id = toInt(req.params.id, 0);
-    if (!id) {
+    const sale_id = toInt(req.params.id, 0);
+    if (!sale_id) {
       await t.rollback();
       return res.status(400).json({ ok: false, message: "ID inválido" });
     }
 
-    const amount = toFloat(req.body?.amount, NaN);
-    const reason = String(req.body?.reason || "").trim() || null;
-    const restock = !!req.body?.restock;
-
-    if (!Number.isFinite(amount) || amount <= 0) {
-      await t.rollback();
-      return res.status(400).json({ ok: false, code: "BAD_AMOUNT", message: "Monto inválido" });
-    }
-
-    const sale = await Sale.findByPk(id, { transaction: t });
+    const sale = await Sale.findByPk(sale_id, { transaction: t });
     if (!sale) {
       await t.rollback();
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
     }
 
-    // si querés también evitar cross-branch incluso siendo admin, descomentá:
-    // const requestedBranch = toInt(req.query.branch_id ?? req.query.branchId, 0);
-    // if (requestedBranch > 0 && toInt(sale.branch_id, 0) !== requestedBranch) ...
+    const amount = toFloat(req.body?.amount, NaN);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, code: "BAD_AMOUNT", message: "Monto inválido" });
+    }
 
-    // total ya devuelto
+    const method = upper(req.body?.method || "CASH");
+    const allowed = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
+    if (!allowed.has(method)) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_METHOD",
+        message: `method inválido. Usá: ${Array.from(allowed).join(", ")}`,
+      });
+    }
+
+    const restock = req.body?.restock === false ? 0 : 1;
+    const reason = String(req.body?.reason || "").trim() || null;
+    const note = String(req.body?.note || "").trim() || null;
+    const reference = String(req.body?.reference || "").trim() || null;
+
+    // total ya devuelto (VIEW)
     const refundsTable = getTableName(SaleRefund, "sale_refunds");
-    const salesTable = getTableName(Sale, "sales");
-
-    const sql = `
-      SELECT COALESCE(SUM(r.amount),0) AS refunded_sum
-      FROM ${refundsTable} r
-      WHERE r.sale_id = :sale_id
-    `;
-    const [r] = await sequelize.query(sql, { replacements: { sale_id: id }, transaction: t });
-    const refundedSum = Number(r?.[0]?.refunded_sum || 0);
+    const [rf] = await sequelize.query(
+      `SELECT COALESCE(SUM(r.amount),0) AS refunded_sum FROM ${refundsTable} r WHERE r.sale_id = :sale_id`,
+      { replacements: { sale_id }, transaction: t }
+    );
+    const refundedSum = Number(rf?.[0]?.refunded_sum || 0);
 
     const paidTotal = Number(sale.paid_total || 0);
     const remaining = Math.max(0, paidTotal - refundedSum);
 
-    if (amount > remaining) {
+    if (amount > remaining + 0.00001) {
       await t.rollback();
       return res.status(400).json({
         ok: false,
@@ -1284,46 +888,61 @@ async function createRefund(req, res, next) {
       });
     }
 
-    const user_id = getAuthUserId(req) || null;
+    const created_by = getAuthUserId(req) || null;
 
-    const refund = await SaleRefund.create(
+    // 1) insert sale_returns
+    const [insReturn] = await sequelize.query(
+      `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
+       VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
       {
-        sale_id: id,
-        amount,
-        reason,
-        restock: restock ? 1 : 0,
-        created_by: user_id,
-      },
-      { transaction: t }
+        replacements: { sale_id, amount, restock, reason, note, created_by },
+        transaction: t,
+      }
     );
 
-    // ✅ actualizar estado si quedó totalmente devuelta
-    const newRefunded = refundedSum + amount;
-    const fullyRefunded = newRefunded >= paidTotal - 0.00001;
-
-    if (Sale?.rawAttributes?.status) {
-      await sale.update(
-        { status: fullyRefunded ? "REFUNDED" : sale.status },
-        { transaction: t }
-      );
+    // mysql2: insertId suele venir en insReturn.insertId
+    const return_id = toInt(insReturn?.insertId, 0);
+    if (!return_id) {
+      await t.rollback();
+      return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns" });
     }
 
-    // 🧠 STOCK: por ahora dejamos registro restock=true para procesarlo.
-    // Si ya tenés lógica de stock/movimientos, acá es donde se ejecuta.
-    // (no la implemento a ciegas para no romper tu inventario)
+    // 2) insert sale_return_payments
+    await sequelize.query(
+      `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, created_at)
+       VALUES (:return_id, :method, :amount, :reference, :pnote, NOW())`,
+      {
+        replacements: { return_id, method, amount, reference, pnote: note },
+        transaction: t,
+      }
+    );
+
+    // 3) si quedó totalmente devuelta -> status REFUNDED
+    const newRefunded = refundedSum + amount;
+    const fullyRefunded = newRefunded >= paidTotal - 0.00001;
+    if (fullyRefunded && Sale?.rawAttributes?.status) {
+      await sale.update({ status: "REFUNDED" }, { transaction: t });
+    }
 
     await t.commit();
 
-    // devolver resumen útil
+    // respuesta (la VIEW ya debería reflejarlo)
+    const refundRow = SaleRefund
+      ? await SaleRefund.findOne({ where: { sale_id, amount, created_at: { [Op.ne]: null } }, order: [["created_at", "DESC"]] })
+      : null;
+
     return res.status(201).json({
       ok: true,
       message: "Devolución registrada",
       data: {
-        refund,
-        sale_id: id,
+        sale_id,
+        return_id,
+        amount,
+        method,
         refunded_sum: newRefunded,
         remaining: Math.max(0, paidTotal - newRefunded),
         status: fullyRefunded ? "REFUNDED" : sale.status,
+        refund_view: refundRow,
       },
     });
   } catch (e) {
@@ -1334,6 +953,8 @@ async function createRefund(req, res, next) {
 
 // ============================
 // DELETE /api/v1/pos/sales/:id
+// ✅ NO toca sale_refunds (VIEW)
+// Si hay devoluciones/exchanges, por defecto BLOQUEA (a menos que force=1)
 // ============================
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -1371,12 +992,42 @@ async function deleteSale(req, res, next) {
       });
     }
 
-    // ✅ si hay devoluciones, también se limpian (si existe modelo)
-    if (SaleRefund) await SaleRefund.destroy({ where: { sale_id: id }, transaction: t });
+    const force = String(req.query.force || "0") === "1";
+
+    // Si existen devoluciones, bloquear (salvo force=1)
+    const [rr] = await sequelize.query(
+      `SELECT COUNT(*) AS c FROM sale_returns WHERE sale_id = :sale_id`,
+      { replacements: { sale_id: id }, transaction: t }
+    );
+    const returnsCount = toInt(rr?.[0]?.c, 0);
+
+    if (returnsCount > 0 && !force) {
+      await t.rollback();
+      return res.status(409).json({
+        ok: false,
+        code: "SALE_HAS_RETURNS",
+        message: "La venta tiene devoluciones. No se elimina por seguridad. Usá ?force=1 si realmente querés borrar todo.",
+        data: { returnsCount },
+      });
+    }
+
+    if (force && returnsCount > 0) {
+      // borrar exchanges primero si referencian returns (por FK)
+      await sequelize.query(
+        `DELETE FROM sale_exchanges
+         WHERE original_sale_id = :sale_id OR new_sale_id = :sale_id OR return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`,
+        { replacements: { sale_id: id }, transaction: t }
+      );
+
+      // borrar returns (cascade debería borrar sale_return_payments/items)
+      await sequelize.query(
+        `DELETE FROM sale_returns WHERE sale_id = :sale_id`,
+        { replacements: { sale_id: id }, transaction: t }
+      );
+    }
 
     await Payment.destroy({ where: { sale_id: id }, transaction: t });
     await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
-
     await sale.destroy({ transaction: t });
 
     await t.commit();
@@ -1390,13 +1041,8 @@ async function deleteSale(req, res, next) {
 module.exports = {
   listSales,
   statsSales,
-  optionsSellers,
-  optionsCustomers,
-  optionsProducts,
   getSaleById,
   createSale,
   deleteSale,
-
-  // ✅ NUEVO
   createRefund,
 };
