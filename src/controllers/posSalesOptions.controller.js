@@ -8,9 +8,11 @@
 //
 // Devuelve: { ok:true, data:[ { title, value } ] }
 //
-// FIX:
-// - optionsSellers ya NO usa columnas que no existan (ej: full_name).
-// - Evita 500 al filtrar con q.
+// FIXES IMPORTANTES:
+// ✅ Sellers filtra por branch_id aunque User NO tenga branch_id (usa UserBranch si existe)
+// ✅ Evita 500 con q y columnas inexistentes
+// ✅ Customers: usa Customer si existe, sino fallback desde Sale
+// ✅ Products: filtra por branch_id si existe
 
 const { Op } = require("sequelize");
 const models = require("../models");
@@ -47,9 +49,19 @@ function likeWhereDynamic(q, cols) {
   const term = normStr(q);
   if (!term) return null;
   const like = `%${term}%`;
-  return {
-    [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })),
-  };
+  return { [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })) };
+}
+
+function findAssocAlias(sourceModel, targetModel) {
+  try {
+    const assocs = sourceModel?.associations || {};
+    for (const [alias, a] of Object.entries(assocs)) {
+      if (a?.target === targetModel) return alias;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -65,6 +77,8 @@ async function optionsSellers(req, res) {
     const User = pickModel("User", "Users", "Usuario", "Usuarios");
     if (!User) return fail(res, 501, "Modelo User no disponible para optionsSellers");
 
+    const UserBranch = pickModel("UserBranch", "UserBranches", "UsuarioSucursal", "UsuariosSucursales");
+
     // ✅ SOLO columnas existentes
     const cols = [];
     if (hasAttr(User, "full_name")) cols.push("full_name");
@@ -73,10 +87,6 @@ async function optionsSellers(req, res) {
     if (hasAttr(User, "email")) cols.push("email");
 
     const where = {};
-
-    // branch_id si existe el campo
-    if (branchId && hasAttr(User, "branch_id")) where.branch_id = branchId;
-
     const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
     if (qWhere) Object.assign(where, qWhere);
 
@@ -91,11 +101,37 @@ async function optionsSellers(req, res) {
     else if (hasAttr(User, "name")) order.push(["name", "ASC"]);
     order.push(["id", "DESC"]);
 
+    // ✅ branch filter (2 caminos):
+    // 1) User.branch_id si existe
+    // 2) UserBranch (tabla puente) si existe y hay asociación
+    const include = [];
+    if (branchId) {
+      if (hasAttr(User, "branch_id")) {
+        where.branch_id = branchId;
+      } else if (UserBranch) {
+        const asUB = findAssocAlias(User, UserBranch);
+        if (asUB) {
+          include.push({
+            model: UserBranch,
+            as: asUB,
+            required: true,
+            where: {
+              ...(hasAttr(UserBranch, "branch_id") ? { branch_id: branchId } : {}),
+            },
+            attributes: [],
+          });
+        }
+      }
+    }
+
     const rows = await User.findAll({
       where,
       limit,
       order,
       attributes: attrs,
+      include: include.length ? include : undefined,
+      subQuery: false,
+      distinct: true,
     });
 
     const data = rows.map((u) => {
@@ -128,7 +164,7 @@ async function optionsCustomers(req, res) {
     const Customer = pickModel("Customer", "Customers", "Client", "Clients", "Cliente", "Clientes");
     const Sale = pickModel("Sale", "Sales", "PosSale", "PosSales");
 
-    // 1) Si existe modelo Customer/Client
+    // 1) Si existe Customer/Client
     if (Customer) {
       const where = {};
       const cols = [];
