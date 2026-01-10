@@ -12,7 +12,7 @@
 // ✅ Sellers filtra por branch_id aunque User NO tenga branch_id (usa UserBranch si existe)
 // ✅ Evita 500 con q y columnas inexistentes
 // ✅ Customers: usa Customer si existe, sino fallback desde Sale
-// ✅ Products: filtra por branch_id si existe
+// ✅ Products: NO devuelve inactivos / soft-deleted (si existen esas columnas)
 
 const { Op } = require("sequelize");
 const models = require("../models");
@@ -64,6 +64,27 @@ function findAssocAlias(sourceModel, targetModel) {
   }
 }
 
+function applyActiveNotDeletedWhere(Model, where) {
+  // Activo (según columnas disponibles)
+  if (hasAttr(Model, "is_active")) where.is_active = 1;
+  else if (hasAttr(Model, "active")) where.active = 1;
+  else if (hasAttr(Model, "enabled")) where.enabled = 1;
+  else if (hasAttr(Model, "is_enabled")) where.is_enabled = 1;
+
+  // Soft delete (si existe)
+  if (hasAttr(Model, "deleted_at")) where.deleted_at = null;
+  else if (hasAttr(Model, "deletedAt")) where.deletedAt = null;
+
+  // Estado/string común
+  if (hasAttr(Model, "status")) {
+    // si usan status tipo ACTIVE/INACTIVE, esto ayuda
+    // (si no aplica, no rompe, solo filtra si coincide)
+    where.status = { [Op.notIn]: ["DELETED", "INACTIVE", "DISABLED"] };
+  }
+
+  return where;
+}
+
 /**
  * SELLERS: busca usuarios
  * query: q, limit, branch_id (opcional)
@@ -79,7 +100,6 @@ async function optionsSellers(req, res) {
 
     const UserBranch = pickModel("UserBranch", "UserBranches", "UsuarioSucursal", "UsuariosSucursales");
 
-    // ✅ SOLO columnas existentes
     const cols = [];
     if (hasAttr(User, "full_name")) cols.push("full_name");
     if (hasAttr(User, "name")) cols.push("name");
@@ -101,9 +121,6 @@ async function optionsSellers(req, res) {
     else if (hasAttr(User, "name")) order.push(["name", "ASC"]);
     order.push(["id", "DESC"]);
 
-    // ✅ branch filter (2 caminos):
-    // 1) User.branch_id si existe
-    // 2) UserBranch (tabla puente) si existe y hay asociación
     const include = [];
     if (branchId) {
       if (hasAttr(User, "branch_id")) {
@@ -148,12 +165,7 @@ async function optionsSellers(req, res) {
 }
 
 /**
- * CUSTOMERS: busca clientes
- * query: q, limit, branch_id (opcional)
- *
- * Prioridad:
- * 1) Model Customer/Client si existe
- * 2) Fallback: Sale agrupando por customer_name/doc/phone
+ * CUSTOMERS
  */
 async function optionsCustomers(req, res) {
   try {
@@ -164,7 +176,6 @@ async function optionsCustomers(req, res) {
     const Customer = pickModel("Customer", "Customers", "Client", "Clients", "Cliente", "Clientes");
     const Sale = pickModel("Sale", "Sales", "PosSale", "PosSales");
 
-    // 1) Si existe Customer/Client
     if (Customer) {
       const where = {};
       const cols = [];
@@ -207,7 +218,6 @@ async function optionsCustomers(req, res) {
       return ok(res, data);
     }
 
-    // 2) Fallback desde Sale (si no hay Customer)
     if (!Sale) return fail(res, 501, "No existe modelo Customer/Client y tampoco Sale para optionsCustomers");
 
     const colName = hasAttr(Sale, "customer_name") ? "customer_name" : null;
@@ -287,6 +297,8 @@ async function optionsProducts(req, res) {
     if (!Product) return fail(res, 501, "Modelo Product no disponible para optionsProducts");
 
     const where = {};
+    applyActiveNotDeletedWhere(Product, where);
+
     const cols = [];
     if (hasAttr(Product, "name")) cols.push("name");
     if (hasAttr(Product, "title")) cols.push("title");
@@ -306,10 +318,15 @@ async function optionsProducts(req, res) {
     if (hasAttr(Product, "code")) attrs.push("code");
     if (hasAttr(Product, "barcode")) attrs.push("barcode");
 
+    const order = [];
+    if (hasAttr(Product, "name")) order.push(["name", "ASC"]);
+    else if (hasAttr(Product, "title")) order.push(["title", "ASC"]);
+    order.push(["id", "DESC"]);
+
     const rows = await Product.findAll({
       where,
       limit,
-      order: [["id", "DESC"]],
+      order,
       attributes: attrs,
     });
 
