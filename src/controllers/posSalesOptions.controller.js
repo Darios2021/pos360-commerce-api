@@ -8,11 +8,11 @@
 //
 // Devuelve: { ok:true, data:[ { title, value } ] }
 //
-// FIXES IMPORTANTES:
-// ✅ Sellers filtra por branch_id aunque User NO tenga branch_id (usa UserBranch si existe)
-// ✅ Evita 500 con q y columnas inexistentes
-// ✅ Customers: usa Customer si existe, sino fallback desde Sale
-// ✅ Products: NO devuelve inactivos / soft-deleted (si existen esas columnas)
+// FIX IMPORTANTE:
+// - ✅ /products: filtra SIEMPRE products.is_active=1
+// - ✅ /products: intenta usar v_stock_by_branch_product(branch_id, product_id, qty)
+//   para no mostrar productos sin stock (si track_stock=1)
+//   (fallback automático a Product.findAll si la view no está o cambia)
 
 const { Op } = require("sequelize");
 const models = require("../models");
@@ -49,40 +49,9 @@ function likeWhereDynamic(q, cols) {
   const term = normStr(q);
   if (!term) return null;
   const like = `%${term}%`;
-  return { [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })) };
-}
-
-function findAssocAlias(sourceModel, targetModel) {
-  try {
-    const assocs = sourceModel?.associations || {};
-    for (const [alias, a] of Object.entries(assocs)) {
-      if (a?.target === targetModel) return alias;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function applyActiveNotDeletedWhere(Model, where) {
-  // Activo (según columnas disponibles)
-  if (hasAttr(Model, "is_active")) where.is_active = 1;
-  else if (hasAttr(Model, "active")) where.active = 1;
-  else if (hasAttr(Model, "enabled")) where.enabled = 1;
-  else if (hasAttr(Model, "is_enabled")) where.is_enabled = 1;
-
-  // Soft delete (si existe)
-  if (hasAttr(Model, "deleted_at")) where.deleted_at = null;
-  else if (hasAttr(Model, "deletedAt")) where.deletedAt = null;
-
-  // Estado/string común
-  if (hasAttr(Model, "status")) {
-    // si usan status tipo ACTIVE/INACTIVE, esto ayuda
-    // (si no aplica, no rompe, solo filtra si coincide)
-    where.status = { [Op.notIn]: ["DELETED", "INACTIVE", "DISABLED"] };
-  }
-
-  return where;
+  return {
+    [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })),
+  };
 }
 
 /**
@@ -98,8 +67,6 @@ async function optionsSellers(req, res) {
     const User = pickModel("User", "Users", "Usuario", "Usuarios");
     if (!User) return fail(res, 501, "Modelo User no disponible para optionsSellers");
 
-    const UserBranch = pickModel("UserBranch", "UserBranches", "UsuarioSucursal", "UsuariosSucursales");
-
     const cols = [];
     if (hasAttr(User, "full_name")) cols.push("full_name");
     if (hasAttr(User, "name")) cols.push("name");
@@ -107,6 +74,8 @@ async function optionsSellers(req, res) {
     if (hasAttr(User, "email")) cols.push("email");
 
     const where = {};
+    if (branchId && hasAttr(User, "branch_id")) where.branch_id = branchId;
+
     const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
     if (qWhere) Object.assign(where, qWhere);
 
@@ -121,34 +90,11 @@ async function optionsSellers(req, res) {
     else if (hasAttr(User, "name")) order.push(["name", "ASC"]);
     order.push(["id", "DESC"]);
 
-    const include = [];
-    if (branchId) {
-      if (hasAttr(User, "branch_id")) {
-        where.branch_id = branchId;
-      } else if (UserBranch) {
-        const asUB = findAssocAlias(User, UserBranch);
-        if (asUB) {
-          include.push({
-            model: UserBranch,
-            as: asUB,
-            required: true,
-            where: {
-              ...(hasAttr(UserBranch, "branch_id") ? { branch_id: branchId } : {}),
-            },
-            attributes: [],
-          });
-        }
-      }
-    }
-
     const rows = await User.findAll({
       where,
       limit,
       order,
       attributes: attrs,
-      include: include.length ? include : undefined,
-      subQuery: false,
-      distinct: true,
     });
 
     const data = rows.map((u) => {
@@ -165,7 +111,12 @@ async function optionsSellers(req, res) {
 }
 
 /**
- * CUSTOMERS
+ * CUSTOMERS: busca clientes
+ * query: q, limit, branch_id (opcional)
+ *
+ * Prioridad:
+ * 1) Model Customer/Client si existe
+ * 2) Fallback: Sale agrupando por customer_name/doc/phone
  */
 async function optionsCustomers(req, res) {
   try {
@@ -286,6 +237,12 @@ async function optionsCustomers(req, res) {
 /**
  * PRODUCTS: busca productos
  * query: q, limit, branch_id (opcional)
+ *
+ * ✅ FIX:
+ * - SIEMPRE filtra products.is_active=1
+ * - Intenta usar v_stock_by_branch_product(branch_id, product_id, qty)
+ *   para no listar sin stock si track_stock=1 (si existe)
+ *   (fallback automático)
  */
 async function optionsProducts(req, res) {
   try {
@@ -294,10 +251,104 @@ async function optionsProducts(req, res) {
     const branchId = toInt(req.query.branch_id, 0) || null;
 
     const Product = pickModel("Product", "Products", "Producto", "Productos");
+    const sequelize = models?.sequelize || models?.Sequelize?.sequelize;
+
     if (!Product) return fail(res, 501, "Modelo Product no disponible para optionsProducts");
 
+    // ✅ Primero: VIEW de stock (mejor UX)
+    if (sequelize && branchId) {
+      try {
+        const term = normStr(q);
+        const like = `%${term}%`;
+
+        // TU VIEW REAL: v_stock_by_branch_product(branch_id, product_id, qty)
+        // Si track_stock existe:
+        //  - track_stock=1 => exigir qty>0
+        //  - track_stock=0 => permitir aunque qty sea 0
+        // Si track_stock NO existe: exigir qty>0 (conservador)
+        const hasTrack = hasAttr(Product, "track_stock");
+
+        const sql = hasTrack
+          ? `
+            SELECT
+              p.id AS id,
+              p.name AS name,
+              p.sku AS sku,
+              p.code AS code,
+              p.barcode AS barcode,
+              p.track_stock AS track_stock,
+              v.qty AS qty
+            FROM v_stock_by_branch_product v
+            INNER JOIN products p ON p.id = v.product_id
+            WHERE
+              v.branch_id = :branch_id
+              AND p.is_active = 1
+              AND (p.track_stock = 0 OR COALESCE(v.qty,0) > 0)
+              AND (
+                :term = '' OR
+                p.name LIKE :like OR
+                p.sku LIKE :like OR
+                p.code LIKE :like OR
+                p.barcode LIKE :like
+              )
+            ORDER BY p.name ASC, p.id DESC
+            LIMIT :limit
+          `
+          : `
+            SELECT
+              p.id AS id,
+              p.name AS name,
+              p.sku AS sku,
+              p.code AS code,
+              p.barcode AS barcode,
+              v.qty AS qty
+            FROM v_stock_by_branch_product v
+            INNER JOIN products p ON p.id = v.product_id
+            WHERE
+              v.branch_id = :branch_id
+              AND p.is_active = 1
+              AND COALESCE(v.qty,0) > 0
+              AND (
+                :term = '' OR
+                p.name LIKE :like OR
+                p.sku LIKE :like OR
+                p.code LIKE :like OR
+                p.barcode LIKE :like
+              )
+            ORDER BY p.name ASC, p.id DESC
+            LIMIT :limit
+          `;
+
+        const [rows] = await sequelize.query(sql, {
+          replacements: { branch_id: branchId, term, like, limit },
+        });
+
+        const data = (rows || []).map((p) => {
+          const name = p.name || `Producto #${p.id}`;
+          const sku = p.sku || p.code || "";
+          const bc = p.barcode || "";
+          const parts = [name, sku ? `SKU: ${sku}` : "", bc ? `BAR: ${bc}` : ""].filter(Boolean);
+          return { title: parts.join(" · "), value: Number(p.id) };
+        });
+
+        return ok(res, data);
+      } catch (e) {
+        // si la view no existe o no coincide el schema => fallback silencioso
+        // eslint-disable-next-line no-console
+        console.warn(
+          "⚠️ optionsProducts: no pude usar v_stock_by_branch_product, hago fallback. Motivo:",
+          e?.message || e
+        );
+      }
+    }
+
+    // ✅ Fallback: Product directo, PERO filtrando is_active=1
     const where = {};
-    applyActiveNotDeletedWhere(Product, where);
+
+    if (branchId && hasAttr(Product, "branch_id")) where.branch_id = branchId;
+
+    // ✅ CRÍTICO: NO listar desactivados
+    if (hasAttr(Product, "is_active")) where.is_active = 1;
 
     const cols = [];
     if (hasAttr(Product, "name")) cols.push("name");
@@ -309,8 +360,6 @@ async function optionsProducts(req, res) {
     const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
     if (qWhere) Object.assign(where, qWhere);
 
-    if (branchId && hasAttr(Product, "branch_id")) where.branch_id = branchId;
-
     const attrs = ["id"];
     if (hasAttr(Product, "name")) attrs.push("name");
     if (hasAttr(Product, "title")) attrs.push("title");
@@ -320,7 +369,6 @@ async function optionsProducts(req, res) {
 
     const order = [];
     if (hasAttr(Product, "name")) order.push(["name", "ASC"]);
-    else if (hasAttr(Product, "title")) order.push(["title", "ASC"]);
     order.push(["id", "DESC"]);
 
     const rows = await Product.findAll({
