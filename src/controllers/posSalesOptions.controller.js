@@ -8,10 +8,11 @@
 //
 // Devuelve: { ok:true, data:[ { title, value } ] }
 //
-// NOTA: Es "robusto" por nombres de modelos (Customer/Client, etc).
-// Si no existe Customer, cae a extraer clientes desde Sale (customer_name/doc/phone).
+// FIX:
+// - optionsSellers ya NO usa columnas que no existan (ej: full_name).
+// - Evita 500 al filtrar con q.
 
-const { Op, Sequelize } = require("sequelize");
+const { Op } = require("sequelize");
 const models = require("../models");
 
 function toInt(v, d = 0) {
@@ -19,30 +20,36 @@ function toInt(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
-function pickModel(...names) {
-  for (const n of names) if (models?.[n]) return models[n];
-  return null;
-}
-
 function normStr(s) {
   return String(s || "").trim();
 }
 
-function likeWhere(q, cols) {
-  const term = normStr(q);
-  if (!term) return null;
-  const like = `%${term}%`;
-  return {
-    [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })),
-  };
+function pickModel(...names) {
+  for (const n of names) if (models?.[n]) return models[n];
+  return null;
 }
 
 function ok(res, data) {
   return res.json({ ok: true, data });
 }
 
-function fail(res, status, message) {
+function fail(res, status, message, e = null) {
+  // eslint-disable-next-line no-console
+  console.error("❌ [posSalesOptions]", message, e?.message || e || "");
   return res.status(status).json({ ok: false, message });
+}
+
+function hasAttr(Model, col) {
+  return !!Model?.rawAttributes?.[col];
+}
+
+function likeWhereDynamic(q, cols) {
+  const term = normStr(q);
+  if (!term) return null;
+  const like = `%${term}%`;
+  return {
+    [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })),
+  };
 }
 
 /**
@@ -58,27 +65,37 @@ async function optionsSellers(req, res) {
     const User = pickModel("User", "Users", "Usuario", "Usuarios");
     if (!User) return fail(res, 501, "Modelo User no disponible para optionsSellers");
 
+    // ✅ SOLO columnas existentes
+    const cols = [];
+    if (hasAttr(User, "full_name")) cols.push("full_name");
+    if (hasAttr(User, "name")) cols.push("name");
+    if (hasAttr(User, "username")) cols.push("username");
+    if (hasAttr(User, "email")) cols.push("email");
+
     const where = {};
-    const qWhere = likeWhere(q, ["name", "full_name", "username", "email"]);
-    if (qWhere) Object.assign(where, qWhere);
 
     // branch_id si existe el campo
-    if (branchId && User?.rawAttributes?.branch_id) where.branch_id = branchId;
+    if (branchId && hasAttr(User, "branch_id")) where.branch_id = branchId;
+
+    const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
+    if (qWhere) Object.assign(where, qWhere);
+
+    const attrs = ["id"];
+    if (hasAttr(User, "full_name")) attrs.push("full_name");
+    if (hasAttr(User, "name")) attrs.push("name");
+    if (hasAttr(User, "username")) attrs.push("username");
+    if (hasAttr(User, "email")) attrs.push("email");
+
+    const order = [];
+    if (hasAttr(User, "full_name")) order.push(["full_name", "ASC"]);
+    else if (hasAttr(User, "name")) order.push(["name", "ASC"]);
+    order.push(["id", "DESC"]);
 
     const rows = await User.findAll({
       where,
       limit,
-      order: [
-        User?.rawAttributes?.full_name ? ["full_name", "ASC"] : ["id", "DESC"],
-        ["id", "DESC"],
-      ],
-      attributes: [
-        "id",
-        ...(User?.rawAttributes?.full_name ? ["full_name"] : []),
-        ...(User?.rawAttributes?.name ? ["name"] : []),
-        ...(User?.rawAttributes?.username ? ["username"] : []),
-        ...(User?.rawAttributes?.email ? ["email"] : []),
-      ],
+      order,
+      attributes: attrs,
     });
 
     const data = rows.map((u) => {
@@ -90,7 +107,7 @@ async function optionsSellers(req, res) {
 
     return ok(res, data);
   } catch (e) {
-    return fail(res, 500, e?.message || "Error optionsSellers");
+    return fail(res, 500, e?.message || "Error optionsSellers", e);
   }
 }
 
@@ -115,24 +132,32 @@ async function optionsCustomers(req, res) {
     if (Customer) {
       const where = {};
       const cols = [];
-      if (Customer?.rawAttributes?.name) cols.push("name");
-      if (Customer?.rawAttributes?.full_name) cols.push("full_name");
-      if (Customer?.rawAttributes?.document) cols.push("document");
-      if (Customer?.rawAttributes?.doc) cols.push("doc");
-      if (Customer?.rawAttributes?.dni) cols.push("dni");
-      if (Customer?.rawAttributes?.phone) cols.push("phone");
-      if (Customer?.rawAttributes?.email) cols.push("email");
+      if (hasAttr(Customer, "name")) cols.push("name");
+      if (hasAttr(Customer, "full_name")) cols.push("full_name");
+      if (hasAttr(Customer, "document")) cols.push("document");
+      if (hasAttr(Customer, "doc")) cols.push("doc");
+      if (hasAttr(Customer, "dni")) cols.push("dni");
+      if (hasAttr(Customer, "phone")) cols.push("phone");
+      if (hasAttr(Customer, "email")) cols.push("email");
 
-      const qWhere = cols.length ? likeWhere(q, cols) : null;
+      const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
       if (qWhere) Object.assign(where, qWhere);
 
-      if (branchId && Customer?.rawAttributes?.branch_id) where.branch_id = branchId;
+      if (branchId && hasAttr(Customer, "branch_id")) where.branch_id = branchId;
+
+      const attrs = ["id"];
+      if (hasAttr(Customer, "full_name")) attrs.push("full_name");
+      if (hasAttr(Customer, "name")) attrs.push("name");
+      if (hasAttr(Customer, "document")) attrs.push("document");
+      if (hasAttr(Customer, "doc")) attrs.push("doc");
+      if (hasAttr(Customer, "dni")) attrs.push("dni");
+      if (hasAttr(Customer, "phone")) attrs.push("phone");
 
       const rows = await Customer.findAll({
         where,
         limit,
         order: [["id", "DESC"]],
-        attributes: Object.keys(Customer.rawAttributes),
+        attributes: attrs,
       });
 
       const data = rows.map((c) => {
@@ -149,20 +174,17 @@ async function optionsCustomers(req, res) {
     // 2) Fallback desde Sale (si no hay Customer)
     if (!Sale) return fail(res, 501, "No existe modelo Customer/Client y tampoco Sale para optionsCustomers");
 
-    // columnas típicas en Sale
-    const has = (col) => !!Sale?.rawAttributes?.[col];
-    const colName = has("customer_name") ? "customer_name" : null;
-    const colDoc = has("customer_doc") ? "customer_doc" : null;
-    const colPhone = has("customer_phone") ? "customer_phone" : null;
-    const colCustomerId = has("customer_id") ? "customer_id" : null;
-    const colBranch = has("branch_id") ? "branch_id" : null;
+    const colName = hasAttr(Sale, "customer_name") ? "customer_name" : null;
+    const colDoc = hasAttr(Sale, "customer_doc") ? "customer_doc" : null;
+    const colPhone = hasAttr(Sale, "customer_phone") ? "customer_phone" : null;
+    const colCustomerId = hasAttr(Sale, "customer_id") ? "customer_id" : null;
 
     if (!colName && !colDoc && !colPhone) {
       return fail(res, 501, "Sale no tiene columnas customer_name/doc/phone para optionsCustomers (fallback)");
     }
 
     const where = {};
-    if (branchId && colBranch) where.branch_id = branchId;
+    if (branchId && hasAttr(Sale, "branch_id")) where.branch_id = branchId;
 
     const term = normStr(q);
     if (term) {
@@ -174,21 +196,22 @@ async function optionsCustomers(req, res) {
       where[Op.or] = ors;
     }
 
-    // DISTINCT "light": traemos filas y armamos set en JS (rápido y simple)
+    const attrs = [];
+    if (colCustomerId) attrs.push(colCustomerId);
+    if (colName) attrs.push(colName);
+    if (colDoc) attrs.push(colDoc);
+    if (colPhone) attrs.push(colPhone);
+
     const rows = await Sale.findAll({
       where,
-      limit: Math.max(limit * 3, limit), // traemos un poco más para deduplicar
+      limit: Math.max(limit * 3, limit),
       order: [["id", "DESC"]],
-      attributes: [
-        ...(colCustomerId ? [colCustomerId] : []),
-        ...(colName ? [colName] : []),
-        ...(colDoc ? [colDoc] : []),
-        ...(colPhone ? [colPhone] : []),
-      ],
+      attributes: attrs,
     });
 
     const seen = new Set();
     const data = [];
+
     for (const r of rows) {
       const name = colName ? normStr(r[colName]) : "";
       const doc = colDoc ? normStr(r[colDoc]) : "";
@@ -200,15 +223,17 @@ async function optionsCustomers(req, res) {
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const title = [name || "Consumidor Final", doc ? `Doc: ${doc}` : "", phone ? `Tel: ${phone}` : ""].filter(Boolean).join(" · ");
-      data.push({ title, value: id ?? title });
+      const title = [name || "Consumidor Final", doc ? `Doc: ${doc}` : "", phone ? `Tel: ${phone}` : ""]
+        .filter(Boolean)
+        .join(" · ");
 
+      data.push({ title, value: id ?? title });
       if (data.length >= limit) break;
     }
 
     return ok(res, data);
   } catch (e) {
-    return fail(res, 500, e?.message || "Error optionsCustomers");
+    return fail(res, 500, e?.message || "Error optionsCustomers", e);
   }
 }
 
@@ -227,23 +252,29 @@ async function optionsProducts(req, res) {
 
     const where = {};
     const cols = [];
-    if (Product?.rawAttributes?.name) cols.push("name");
-    if (Product?.rawAttributes?.title) cols.push("title");
-    if (Product?.rawAttributes?.sku) cols.push("sku");
-    if (Product?.rawAttributes?.barcode) cols.push("barcode");
-    if (Product?.rawAttributes?.code) cols.push("code");
+    if (hasAttr(Product, "name")) cols.push("name");
+    if (hasAttr(Product, "title")) cols.push("title");
+    if (hasAttr(Product, "sku")) cols.push("sku");
+    if (hasAttr(Product, "barcode")) cols.push("barcode");
+    if (hasAttr(Product, "code")) cols.push("code");
 
-    const qWhere = cols.length ? likeWhere(q, cols) : null;
+    const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
     if (qWhere) Object.assign(where, qWhere);
 
-    // si el producto está asociado a branch_id directamente
-    if (branchId && Product?.rawAttributes?.branch_id) where.branch_id = branchId;
+    if (branchId && hasAttr(Product, "branch_id")) where.branch_id = branchId;
+
+    const attrs = ["id"];
+    if (hasAttr(Product, "name")) attrs.push("name");
+    if (hasAttr(Product, "title")) attrs.push("title");
+    if (hasAttr(Product, "sku")) attrs.push("sku");
+    if (hasAttr(Product, "code")) attrs.push("code");
+    if (hasAttr(Product, "barcode")) attrs.push("barcode");
 
     const rows = await Product.findAll({
       where,
       limit,
       order: [["id", "DESC"]],
-      attributes: Object.keys(Product.rawAttributes),
+      attributes: attrs,
     });
 
     const data = rows.map((p) => {
@@ -256,7 +287,7 @@ async function optionsProducts(req, res) {
 
     return ok(res, data);
   } catch (e) {
-    return fail(res, 500, e?.message || "Error optionsProducts");
+    return fail(res, 500, e?.message || "Error optionsProducts", e);
   }
 }
 
