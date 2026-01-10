@@ -209,6 +209,7 @@ function buildWhereFromQuery(req) {
 
   const where = {};
 
+  // ✅ branch
   if (admin) {
     const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
     if (requested > 0) where.branch_id = requested;
@@ -224,12 +225,25 @@ function buildWhereFromQuery(req) {
     where.branch_id = branch_id;
   }
 
+  // ✅ status
   if (status) where.status = status;
 
+  // ✅ dates
   if (from && to) where.sold_at = { [Op.between]: [from, to] };
   else if (from) where.sold_at = { [Op.gte]: from };
   else if (to) where.sold_at = { [Op.lte]: to };
 
+  // ✅ seller/user filter (ARREGLA desplegable vendedor)
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+  if (seller_id > 0) where.user_id = seller_id;
+
+  // ✅ customer_id filter (si existe en tu modelo Sale)
+  const customer_id = toInt(req.query.customer_id ?? req.query.customerId, 0);
+  if (customer_id > 0 && Sale?.rawAttributes?.customer_id) {
+    where.customer_id = customer_id;
+  }
+
+  // ✅ q search (cliente / nro / doc / tel / números)
   if (q) {
     const qNum = toFloat(q, NaN);
     where[Op.or] = [
@@ -248,6 +262,7 @@ function buildWhereFromQuery(req) {
 
   return { ok: true, where };
 }
+
 
 /**
  * ✅ List filters SIN duplicar por joins:
