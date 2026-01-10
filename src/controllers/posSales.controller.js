@@ -1,6 +1,7 @@
 // src/controllers/posSales.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (RESPETA TU BD REAL)
 // NOTA: sale_refunds es VIEW => SOLO LECTURA
+
 const { Op, fn, col, literal } = require("sequelize");
 const {
   sequelize,
@@ -37,6 +38,15 @@ function nowDate() {
 }
 function upper(v) {
   return String(v || "").trim().toUpperCase();
+}
+
+// ✅ Normaliza métodos para que UI y DB no se peleen
+function normalizePayMethod(v) {
+  const x = String(v || "").trim().toUpperCase();
+  if (!x) return "";
+  // si tu UI manda DEBIT/CREDIT, en DB se usa CARD
+  if (x === "DEBIT" || x === "CREDIT") return "CARD";
+  return x;
 }
 
 /**
@@ -193,10 +203,7 @@ function getTableName(model, fallback) {
 }
 
 /**
- * ✅ Base where: branch/status/from/to/q
- * branch:
- *  - admin: permite branch_id query
- *  - no admin: branch_id desde token/contexto
+ * ✅ Base where: branch/status/from/to/q + seller_id + customer
  */
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
@@ -209,7 +216,7 @@ function buildWhereFromQuery(req) {
 
   const where = {};
 
-  // ✅ branch
+  // branch
   if (admin) {
     const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
     if (requested > 0) where.branch_id = requested;
@@ -225,25 +232,38 @@ function buildWhereFromQuery(req) {
     where.branch_id = branch_id;
   }
 
-  // ✅ status
   if (status) where.status = status;
 
-  // ✅ dates
   if (from && to) where.sold_at = { [Op.between]: [from, to] };
   else if (from) where.sold_at = { [Op.gte]: from };
   else if (to) where.sold_at = { [Op.lte]: to };
 
-  // ✅ seller/user filter (ARREGLA desplegable vendedor)
+  // ✅ seller
   const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   if (seller_id > 0) where.user_id = seller_id;
 
-  // ✅ customer_id filter (si existe en tu modelo Sale)
-  const customer_id = toInt(req.query.customer_id ?? req.query.customerId, 0);
-  if (customer_id > 0 && Sale?.rawAttributes?.customer_id) {
-    where.customer_id = customer_id;
+  // ✅ customer (UI manda customerValue, puede ser id o string)
+  const customer = req.query.customer;
+  if (customer != null && String(customer).trim()) {
+    const cStr = String(customer).trim();
+    const cNum = toInt(cStr, 0);
+
+    if (cNum > 0 && Sale?.rawAttributes?.customer_id) {
+      where.customer_id = cNum;
+    } else {
+      where[Op.and] = (where[Op.and] || []).concat([
+        {
+          [Op.or]: [
+            { customer_name: { [Op.like]: `%${cStr}%` } },
+            { customer_doc: { [Op.like]: `%${cStr}%` } },
+            { customer_phone: { [Op.like]: `%${cStr}%` } },
+          ],
+        },
+      ]);
+    }
   }
 
-  // ✅ q search (cliente / nro / doc / tel / números)
+  // ✅ q (buscador general)
   if (q) {
     const qNum = toFloat(q, NaN);
     where[Op.or] = [
@@ -263,14 +283,13 @@ function buildWhereFromQuery(req) {
   return { ok: true, where };
 }
 
-
 /**
  * ✅ List filters SIN duplicar por joins:
  * - pay_method: EXISTS payments
  * - product: EXISTS sale_items
  */
 function injectExistsFiltersIntoWhere(where, req) {
-  const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
+  const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
   const product = String(req.query.product || "").trim();
 
   const payTable = getTableName(Payment, "payments");
@@ -385,7 +404,6 @@ async function statsSales(req, res, next) {
     const payTable = getTableName(Payment, "payments");
     const refundsTable = getTableName(SaleRefund, "sale_refunds"); // VIEW
 
-    // Reutilizamos mismos filtros EXISTS para stats (en SQL)
     const conds = [];
     const repl = {};
 
@@ -404,21 +422,33 @@ async function statsSales(req, res, next) {
       repl.to = where.sold_at[Op.lte];
     }
 
+    // q
     const q = String(req.query.q || "").trim();
     if (q) {
       repl.qLike = `%${q}%`;
       conds.push("(s.customer_name LIKE :qLike OR s.sale_number LIKE :qLike OR s.customer_phone LIKE :qLike OR s.customer_doc LIKE :qLike)");
     }
 
+    // seller
     const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
     if (seller_id > 0) { conds.push("s.user_id = :seller_id"); repl.seller_id = seller_id; }
 
-    const pay_method = String(req.query.pay_method || req.query.method || "").trim().toUpperCase();
+    // customer (si mandan string, se filtra por LIKE)
+    const customer = req.query.customer;
+    if (customer != null && String(customer).trim()) {
+      const cStr = String(customer).trim();
+      repl.cLike = `%${cStr}%`;
+      conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
+    }
+
+    // pay_method
+    const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
     if (pay_method) {
       conds.push(`EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`);
       repl.pay_method = pay_method;
     }
 
+    // product
     const product = String(req.query.product || "").trim();
     const itemsTable = getTableName(SaleItem, "sale_items");
     if (product) {
@@ -834,7 +864,6 @@ async function createSale(req, res, next) {
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
 // ✅ CREA DEVOLUCIÓN REAL (ADMIN) -> sale_returns + sale_return_payments
-// (sale_refunds es VIEW, NO se escribe ahí)
 // ============================
 async function createRefund(req, res, next) {
   const t = await sequelize.transaction();
@@ -866,7 +895,7 @@ async function createRefund(req, res, next) {
       return res.status(400).json({ ok: false, code: "BAD_AMOUNT", message: "Monto inválido" });
     }
 
-    const method = upper(req.body?.method || "CASH");
+    const method = normalizePayMethod(req.body?.method || req.body?.refund_method || "CASH");
     const allowed = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
     if (!allowed.has(method)) {
       await t.rollback();
@@ -915,7 +944,6 @@ async function createRefund(req, res, next) {
       }
     );
 
-    // mysql2: insertId suele venir en insReturn.insertId
     const return_id = toInt(insReturn?.insertId, 0);
     if (!return_id) {
       await t.rollback();
@@ -941,11 +969,6 @@ async function createRefund(req, res, next) {
 
     await t.commit();
 
-    // respuesta (la VIEW ya debería reflejarlo)
-    const refundRow = SaleRefund
-      ? await SaleRefund.findOne({ where: { sale_id, amount, created_at: { [Op.ne]: null } }, order: [["created_at", "DESC"]] })
-      : null;
-
     return res.status(201).json({
       ok: true,
       message: "Devolución registrada",
@@ -957,7 +980,6 @@ async function createRefund(req, res, next) {
         refunded_sum: newRefunded,
         remaining: Math.max(0, paidTotal - newRefunded),
         status: fullyRefunded ? "REFUNDED" : sale.status,
-        refund_view: refundRow,
       },
     });
   } catch (e) {
@@ -968,8 +990,6 @@ async function createRefund(req, res, next) {
 
 // ============================
 // DELETE /api/v1/pos/sales/:id
-// ✅ NO toca sale_refunds (VIEW)
-// Si hay devoluciones/exchanges, por defecto BLOQUEA (a menos que force=1)
 // ============================
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -1009,7 +1029,6 @@ async function deleteSale(req, res, next) {
 
     const force = String(req.query.force || "0") === "1";
 
-    // Si existen devoluciones, bloquear (salvo force=1)
     const [rr] = await sequelize.query(
       `SELECT COUNT(*) AS c FROM sale_returns WHERE sale_id = :sale_id`,
       { replacements: { sale_id: id }, transaction: t }
@@ -1027,14 +1046,12 @@ async function deleteSale(req, res, next) {
     }
 
     if (force && returnsCount > 0) {
-      // borrar exchanges primero si referencian returns (por FK)
       await sequelize.query(
         `DELETE FROM sale_exchanges
          WHERE original_sale_id = :sale_id OR new_sale_id = :sale_id OR return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`,
         { replacements: { sale_id: id }, transaction: t }
       );
 
-      // borrar returns (cascade debería borrar sale_return_payments/items)
       await sequelize.query(
         `DELETE FROM sale_returns WHERE sale_id = :sale_id`,
         { replacements: { sale_id: id }, transaction: t }
