@@ -2,14 +2,13 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 //
 // FIX CRÍTICO:
-// - Antes: assertFn() tiraba error y CAÍA EL BACKEND si un handler era undefined.
-// - Ahora: NO se cae. Si falta un handler:
-//   - loguea el problema
-//   - responde 501 "Not implemented" (y el resto del server sigue arriba)
+// - NO se cae el backend si un handler es undefined.
+// - Si falta handler: log + 501 Not Implemented.
 //
-// Además:
+// EXTRA:
 // - Soporta exports "named" y "default".
-// - Soporta aliases comunes (statsSales vs salesStats, etc.)
+// - Soporta aliases comunes.
+// - PRIORIDAD: options usan controller separado (posSalesOptions.controller.js) si existe.
 
 const router = require("express").Router();
 
@@ -19,19 +18,26 @@ const router = require("express").Router();
 const posController = require("../controllers/pos.controller");
 
 // Soportar ambos estilos de export (module.exports = {} o exports.named)
-const getContext =
-  posController.getContext || posController?.default?.getContext;
+const getContext = posController.getContext || posController?.default?.getContext;
 
 const listProductsForPos =
   posController.listProductsForPos || posController?.default?.listProductsForPos;
 
-const createPosSale =
-  posController.createSale || posController?.default?.createSale;
+const createPosSale = posController.createSale || posController?.default?.createSale;
 
 // ==============================
-// POS Sales (list/stats/options/etc)
+// POS Sales (list/stats/etc)
 // ==============================
 const posSalesController = require("../controllers/posSales.controller");
+
+// ✅ OPTIONS separados (NO tocar posSales.controller.js)
+let posSalesOptionsController = null;
+try {
+  // si el archivo existe, se usa
+  posSalesOptionsController = require("../controllers/posSalesOptions.controller");
+} catch (e) {
+  posSalesOptionsController = null;
+}
 
 // Aliases robustos (por si tu controller usa otros nombres)
 const listSales =
@@ -40,27 +46,9 @@ const listSales =
   posSalesController.salesList;
 
 const statsSales =
-  posSalesController.statsSales || // tu ruta actual
-  posSalesController.salesStats || // otra convención
+  posSalesController.statsSales ||
+  posSalesController.salesStats ||
   posSalesController.getSalesStats;
-
-const optionsSellers =
-  posSalesController.optionsSellers ||
-  posSalesController.optionsSeller ||
-  posSalesController.getOptionsSellers ||
-  posSalesController.sellersOptions ||
-  posSalesController.optionsVendors;
-
-const optionsCustomers =
-  posSalesController.optionsCustomers ||
-  posSalesController.getOptionsCustomers ||
-  posSalesController.customersOptions ||
-  posSalesController.optionsClients;
-
-const optionsProducts =
-  posSalesController.optionsProducts ||
-  posSalesController.getOptionsProducts ||
-  posSalesController.productsOptions;
 
 const getSaleById =
   posSalesController.getSaleById ||
@@ -76,6 +64,28 @@ const deleteSale =
   posSalesController.deleteSale ||
   posSalesController.removeSale ||
   posSalesController.destroySale;
+
+// ✅ OPTIONS: prioridad a controller nuevo si existe
+const optionsSellers =
+  posSalesOptionsController?.optionsSellers ||
+  posSalesController.optionsSellers ||
+  posSalesController.optionsSeller ||
+  posSalesController.getOptionsSellers ||
+  posSalesController.sellersOptions ||
+  posSalesController.optionsVendors;
+
+const optionsCustomers =
+  posSalesOptionsController?.optionsCustomers ||
+  posSalesController.optionsCustomers ||
+  posSalesController.getOptionsCustomers ||
+  posSalesController.customersOptions ||
+  posSalesController.optionsClients;
+
+const optionsProducts =
+  posSalesOptionsController?.optionsProducts ||
+  posSalesController.optionsProducts ||
+  posSalesController.getOptionsProducts ||
+  posSalesController.productsOptions;
 
 // ✅ Opcionales (no deben tumbar server)
 const createRefund =
@@ -129,10 +139,12 @@ router.post("/sale", safeFn("createPosSale", createPosSale));
 router.get("/sales", safeFn("listSales", listSales));
 router.get("/sales/stats", safeFn("statsSales", statsSales));
 
+// ---- OPTIONS (autocompletes)
 router.get("/sales/options/sellers", safeFn("optionsSellers", optionsSellers));
 router.get("/sales/options/customers", safeFn("optionsCustomers", optionsCustomers));
 router.get("/sales/options/products", safeFn("optionsProducts", optionsProducts));
 
+// ---- SALES CRUD
 router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.post("/sales", safeFn("createSale", createSale));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
@@ -142,9 +154,7 @@ if (typeof createRefund === "function") {
   router.post("/sales/:id/refunds", createRefund);
 } else {
   // eslint-disable-next-line no-console
-  console.warn(
-    "⚠️ [pos.routes] createRefund NO está exportado -> no se registra /sales/:id/refunds"
-  );
+  console.warn("⚠️ [pos.routes] createRefund NO está exportado -> no se registra /sales/:id/refunds");
 }
 
 // ---- CAMBIOS (si existe handler)
@@ -152,9 +162,7 @@ if (typeof createExchange === "function") {
   router.post("/sales/:id/exchanges", createExchange);
 } else {
   // eslint-disable-next-line no-console
-  console.warn(
-    "⚠️ [pos.routes] createExchange NO está exportado -> no se registra /sales/:id/exchanges"
-  );
+  console.warn("⚠️ [pos.routes] createExchange NO está exportado -> no se registra /sales/:id/exchanges");
 }
 
 module.exports = router;
