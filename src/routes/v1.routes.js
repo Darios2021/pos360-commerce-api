@@ -1,11 +1,11 @@
 // src/routes/v1.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
-// + ✅ GET /api/v1/_version (para verificar deploy real)
-// + (opcional) GET /api/v1/_whoami (debug auth rápido)
+// + ✅ GET /api/v1/_version
+// + (opcional) GET /api/v1/_whoami
 //
-// FIX CRÍTICO (sin romper otros servicios):
-// - Montar posRefundsRoutes / posExchangesRoutes ANTES que posRoutes,
-//   porque Express resuelve rutas en orden y posRoutes puede “pisar” /sales/:id/refunds.
+// FIX FINAL:
+// - Ya NO montamos posRefundsRoutes / posExchangesRoutes
+// - Todo refunds/exchanges vive en posRoutes (que llama posSales.controller.js)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -23,7 +23,7 @@ router.get("/_version", (req, res) => {
   });
 });
 
-// (opcional) debug auth rápido: te muestra usuario del token
+// (opcional) debug auth rápido
 router.get("/_whoami", requireAuth, (req, res) => {
   res.json({
     ok: true,
@@ -51,16 +51,10 @@ const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 const dashboardRoutes = require("./dashboard.routes");
 
-// POS
+// POS (UNIFICADO)
 const posRoutes = require("./pos.routes");
 
-// ✅ POS Refunds
-const posRefundsRoutes = require("./posRefunds.routes");
-
-// ✅ POS Exchanges
-const posExchangesRoutes = require("./posExchanges.routes");
-
-// ✅ ME (perfil)
+// ✅ ME
 const meRoutes = require("./me.routes");
 
 // ✅ ADMIN USERS
@@ -104,16 +98,8 @@ safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 
 // =========================
-// ✅ POS (ORDEN IMPORTA)
+// ✅ POS (UNIFICADO)
 // =========================
-
-// ✅ 1) Devoluciones POS -> /api/v1/pos/sales/:id/refunds
-safeUse("/pos", requireAuth, posRefundsRoutes);
-
-// ✅ 2) Cambios POS -> /api/v1/pos/sales/:id/exchanges
-safeUse("/pos", requireAuth, posExchangesRoutes);
-
-// ✅ 3) Ventas POS (listado, detalle, stats, delete)
 safeUse("/pos", requireAuth, posRoutes);
 
 // =========================
@@ -125,8 +111,6 @@ safeUse("/me", requireAuth, meRoutes);
 // Admin
 // =========================
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
-
-// /api/v1/admin/shop/branding
 safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes);
 
 module.exports = router;

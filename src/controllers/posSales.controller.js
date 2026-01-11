@@ -1,15 +1,17 @@
 // src/controllers/posSales.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (ROBUSTO + FIX enum refunds)
+// ✅ COPY-PASTE FINAL COMPLETO (ROBUSTO + DB MATCH)
 // NOTA: sale_refunds es VIEW => SOLO LECTURA
 //
 // Incluye:
 // - GET /pos/sales (listSales) con filtros robustos SIN duplicar
 // - GET /pos/sales/stats (statsSales) neto vs refunds
 // - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
+// - GET /pos/sales/:id/refunds (listRefundsBySale) ✅ desde VIEW
+// - GET /pos/sales/:id/exchanges (listExchangesBySale)
 // - POST /pos/sales (createSale)
 // - DELETE /pos/sales/:id (deleteSale)
-// - POST /pos/sales/:id/refunds (createRefund) ✅ FIX métodos enum reales
-// - POST /pos/sales/:id/exchanges (createExchange) ✅ FIX métodos enum reales
+// - POST /pos/sales/:id/refunds (createRefund) ✅ enum real
+// - POST /pos/sales/:id/exchanges (createExchange) ✅ enum real
 
 const { Op, literal } = require("sequelize");
 const {
@@ -55,19 +57,31 @@ function normalizePayMethod(v) {
 }
 
 /**
- * ✅ Métodos permitidos para PAGOS de venta (payments.method)
- * (acá puede existir DEBIT/CREDIT, etc.)
+ * ✅ Métodos permitidos SEGÚN TU DB REAL:
+ * payments.method enum('CASH','TRANSFER','CARD','QR','OTHER')
  */
 function allowedSalePayMethodsSet() {
-  return new Set(["CASH", "TRANSFER", "DEBIT", "CREDIT", "CARD", "QR", "OTHER"]);
+  return new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
 }
 
 /**
  * ✅ Métodos permitidos para DEVOLUCIONES (sale_return_payments.method)
- * (según tu tabla: enum('CASH','TRANSFER','CARD','QR','OTHER'))
+ * enum('CASH','TRANSFER','CARD','QR','OTHER')
  */
 function allowedRefundPayMethodsSet() {
   return new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
+}
+
+/**
+ * ✅ Mapea método a enum real:
+ * - DEBIT/CREDIT => CARD
+ */
+function normalizeCardMappedMethod(v) {
+  const m = normalizePayMethod(v);
+  if (!m) return "CASH";
+  if (m === "DEBIT" || m === "CREDIT") return "CARD";
+  const allowed = allowedSalePayMethodsSet();
+  return allowed.has(m) ? m : "OTHER";
 }
 
 /**
@@ -102,6 +116,9 @@ function getAuthUserId(req) {
     req?.session?.user?.id,
     req?.session?.userId,
     req?.userId,
+    req?.usuario?.id,
+    req?.usuario?.userId,
+    req?.usuario?.user_id,
   ];
 
   for (const v of candidates) {
@@ -135,7 +152,7 @@ function getAuthUserId(req) {
 }
 
 /**
- * ✅ branch_id desde el usuario/contexto (no del query salvo admin en list/stats)
+ * ✅ branch_id desde el usuario/contexto
  */
 function getAuthBranchId(req) {
   return (
@@ -145,6 +162,8 @@ function getAuthBranchId(req) {
     toInt(req?.user?.branchId, 0) ||
     toInt(req?.auth?.branch_id, 0) ||
     toInt(req?.auth?.branchId, 0) ||
+    toInt(req?.usuario?.branch_id, 0) ||
+    toInt(req?.usuario?.branchId, 0) ||
     toInt(req?.branch?.id, 0) ||
     toInt(req?.branchId, 0) ||
     toInt(req?.branchContext?.branch_id, 0) ||
@@ -154,7 +173,7 @@ function getAuthBranchId(req) {
 }
 
 function isAdminReq(req) {
-  const u = req?.user || req?.auth || {};
+  const u = req?.usuario || req?.user || req?.auth || {};
   const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
   if (email === "admin@360pos.local" || email.includes("admin@360pos.local")) return true;
 
@@ -260,7 +279,11 @@ function buildWhereFromQuery(req) {
   } else {
     const branch_id = getAuthBranchId(req);
     if (!branch_id) {
-      return { ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario (branch_id)." };
+      return {
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      };
     }
     where.branch_id = branch_id;
   }
@@ -331,6 +354,7 @@ function injectExistsFiltersIntoWhere(where, req) {
   const ands = [];
 
   if (pay_method) {
+    // en DB payments.method es enum => UPPER ok
     ands.push(
       literal(`EXISTS (
         SELECT 1 FROM ${payTable} p
@@ -540,8 +564,6 @@ async function statsSales(req, res, next) {
         payments: {
           cash: byMethod.CASH || 0,
           transfer: byMethod.TRANSFER || 0,
-          debit: byMethod.DEBIT || 0,
-          credit: byMethod.CREDIT || 0,
           card: byMethod.CARD || 0,
           qr: byMethod.QR || 0,
           other: byMethod.OTHER || 0,
@@ -608,6 +630,67 @@ async function getSaleById(req, res, next) {
     }
 
     return res.json({ ok: true, data: { sale, refunds, exchanges } });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// ============================
+// GET /api/v1/pos/sales/:id/refunds
+// ============================
+async function listRefundsBySale(req, res, next) {
+  try {
+    const sale_id = toInt(req.params.id, 0);
+    if (!sale_id) return res.status(400).json({ ok: false, code: "BAD_SALE_ID", message: "sale_id inválido" });
+
+    const sale = await Sale.findByPk(sale_id);
+    if (!sale) return res.status(404).json({ ok: false, code: "SALE_NOT_FOUND", message: "Venta no encontrada" });
+
+    if (!isAdminReq(req)) {
+      const branch_id = getAuthBranchId(req);
+      if (!branch_id) return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal." });
+      if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver devoluciones de otra sucursal." });
+      }
+    }
+
+    const data = SaleRefund
+      ? await SaleRefund.findAll({ where: { sale_id }, order: [["created_at", "DESC"]] })
+      : [];
+
+    return res.json({ ok: true, data });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// ============================
+// GET /api/v1/pos/sales/:id/exchanges
+// ============================
+async function listExchangesBySale(req, res, next) {
+  try {
+    const sale_id = toInt(req.params.id, 0);
+    if (!sale_id) return res.status(400).json({ ok: false, code: "BAD_SALE_ID", message: "sale_id inválido" });
+
+    const sale = await Sale.findByPk(sale_id);
+    if (!sale) return res.status(404).json({ ok: false, code: "SALE_NOT_FOUND", message: "Venta no encontrada" });
+
+    if (!isAdminReq(req)) {
+      const branch_id = getAuthBranchId(req);
+      if (!branch_id) return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal." });
+      if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver cambios de otra sucursal." });
+      }
+    }
+
+    const data = SaleExchange
+      ? await SaleExchange.findAll({
+          where: { [Op.or]: [{ original_sale_id: sale_id }, { new_sale_id: sale_id }] },
+          order: [["created_at", "DESC"]],
+        })
+      : [];
+
+    return res.json({ ok: true, data });
   } catch (e) {
     next(e);
   }
@@ -681,30 +764,6 @@ async function createSale(req, res, next) {
       }
     }
 
-    // Branch cross-check de products (si el modelo tiene branch_id)
-    if (Product?.rawAttributes?.branch_id) {
-      const ids = [...new Set(normItems.map((x) => x.product_id))];
-      const prods = await Product.findAll({
-        where: { id: ids },
-        attributes: ["id", "branch_id", ...(Product.rawAttributes.is_active ? ["is_active"] : [])],
-        transaction: t,
-      });
-      const map = new Map(prods.map((p) => [toInt(p.id, 0), p]));
-
-      for (const it of normItems) {
-        const p = map.get(toInt(it.product_id, 0));
-        if (!p) { await t.rollback(); return res.status(400).json({ ok: false, code: "PRODUCT_NOT_FOUND", message: `Producto no existe: product_id=${it.product_id}` }); }
-        if (toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
-          await t.rollback();
-          return res.status(403).json({ ok: false, code: "CROSS_BRANCH_PRODUCT", message: `Producto ${it.product_id} no pertenece a la sucursal del usuario.` });
-        }
-        if (Product.rawAttributes.is_active && String(p.is_active) === "0") {
-          await t.rollback();
-          return res.status(409).json({ ok: false, code: "PRODUCT_INACTIVE", message: `Producto ${it.product_id} está desactivado.` });
-        }
-      }
-    }
-
     const subtotal = normItems.reduce((a, it) => a + it.line_total, 0);
     const discount_total = toFloat(req.body?.discount_total, 0);
     const tax_total = toFloat(req.body?.tax_total, 0);
@@ -764,11 +823,10 @@ async function createSale(req, res, next) {
       const allowed = allowedSalePayMethodsSet();
       await Payment.bulkCreate(
         payments.map((p) => {
-          const m = normalizePayMethod(p?.method) || "OTHER";
-          const method = allowed.has(m) ? m : "OTHER";
+          const method = normalizeCardMappedMethod(p?.method || "OTHER"); // DEBIT/CREDIT => CARD
           return {
             sale_id: sale.id,
-            method,
+            method: allowed.has(method) ? method : "OTHER",
             amount: toFloat(p?.amount, 0),
             paid_at: parseDateTime(p?.paid_at) || sold_at,
             reference: String(p?.reference || "").trim() || null,
@@ -821,10 +879,6 @@ async function insertSaleReturn({ sale_id, amount, restock, reason, note, create
   const sqls = [
     `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
      VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
-    `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, createdAt)
-     VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
-    `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, creator_id, created_at)
-     VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
     `INSERT INTO sale_returns (sale_id, amount, restock, reason, created_by, created_at)
      VALUES (:sale_id, :amount, :restock, :reason, :created_by, NOW())`,
     `INSERT INTO sale_returns (sale_id, amount, restock, created_at)
@@ -846,12 +900,6 @@ async function insertSaleReturnPayment({ return_id, method, amount, reference, n
   const sqls = [
     `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, created_at)
      VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
-    `INSERT INTO sale_return_payments (return_id, refund_method, amount, reference, note, created_at)
-     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
-    `INSERT INTO sale_return_payments (return_id, method, amount, reference, pnote, created_at)
-     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
-    `INSERT INTO sale_return_payments (return_id, refund_method, amount, reference, pnote, created_at)
-     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
     `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, createdAt)
      VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
   ];
@@ -870,8 +918,6 @@ async function insertSaleReturnItem({ return_id, sale_item_id, product_id, wareh
     `INSERT INTO sale_return_items (return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
      VALUES (:return_id, :sale_item_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
     `INSERT INTO sale_return_items (return_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
-     VALUES (:return_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
-    `INSERT INTO sale_return_items (return_id, product_id, warehouse_id, qty, unit_price, line_total, createdAt)
      VALUES (:return_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
   ];
 
@@ -899,10 +945,6 @@ async function insertSaleExchange({
   const sqls = [
     `INSERT INTO sale_exchanges
       (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, created_by, created_at)
-     VALUES
-      (:original_sale_id, :return_id, :new_sale_id, :original_total, :returned_amount, :new_total, :diff, :note, :created_by, NOW())`,
-    `INSERT INTO sale_exchanges
-      (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, creator_id, created_at)
      VALUES
       (:original_sale_id, :return_id, :new_sale_id, :original_total, :returned_amount, :new_total, :diff, :note, :created_by, NOW())`,
     `INSERT INTO sale_exchanges
@@ -943,7 +985,6 @@ async function createRefund(req, res) {
       return res.status(400).json({ ok: false, code: "BAD_AMOUNT", message: "Monto inválido" });
     }
 
-    // ✅ FIX: método para refund (enum real)
     const method = normalizeRefundMethod(req.body?.method || req.body?.refund_method || "CASH");
     const allowedRefund = allowedRefundPayMethodsSet();
     if (!allowedRefund.has(method)) {
@@ -995,7 +1036,7 @@ async function createRefund(req, res) {
       return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (return_id vacío)" });
     }
 
-    // 2) sale_return_payments (method ya mapeado)
+    // 2) sale_return_payments
     await insertSaleReturnPayment({
       return_id,
       method,
@@ -1005,7 +1046,7 @@ async function createRefund(req, res) {
       transaction: t,
     });
 
-    // 3) opcional items devueltos
+    // 3) items opcionales
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length) {
       for (const it of items) {
@@ -1193,10 +1234,8 @@ async function createExchange(req, res) {
 
     const returned_amount = normReturnItems.reduce((a, it) => a + Math.max(0, it.qty * it.unit_price), 0);
     const new_total = normTakeItems.reduce((a, it) => a + Math.max(0, it.qty * it.unit_price), 0);
-
     const diff = Number((new_total - returned_amount).toFixed(2));
 
-    // ✅ FIX: método para exchange payments/refunds (enum real refunds)
     const method = normalizeRefundMethod(req.body?.method || "CASH");
     const allowedRefund = allowedRefundPayMethodsSet();
     if (!allowedRefund.has(method)) {
@@ -1281,8 +1320,11 @@ async function createExchange(req, res) {
 
     // snapshots desde Product
     const takeIds = [...new Set(normTakeItems.map((x) => x.product_id))];
-    const prodAttrs = ["id", "name", "sku", "barcode", ...(Product?.rawAttributes?.is_active ? ["is_active"] : [])];
-    const prods = await Product.findAll({ where: { id: takeIds }, attributes: prodAttrs, transaction: t });
+    const prods = await Product.findAll({
+      where: { id: takeIds },
+      attributes: ["id", "name", "sku", "barcode"],
+      transaction: t,
+    });
     const pMap = new Map(prods.map((p) => [toInt(p.id, 0), p]));
 
     await SaleItem.bulkCreate(
@@ -1303,12 +1345,10 @@ async function createExchange(req, res) {
       { transaction: t }
     );
 
-    // 5) Si diff>0 => payment en nueva sale (usa tabla payments, puede aceptar DEBIT/CREDIT, etc.)
+    // 5) Si diff>0 => payment en nueva sale (DB enum)
     if (diff > 0) {
-      // acá usamos method "refund-safe", pero si querés permitir DEBIT/CREDIT en nueva venta,
-      // mandalo desde frontend y normalizalo con allowedSalePayMethodsSet.
       await Payment.create(
-        { sale_id: newSale.id, method, amount: diff, paid_at: sold_at, reference, note },
+        { sale_id: newSale.id, method: normalizeCardMappedMethod(method), amount: diff, paid_at: sold_at, reference, note },
         { transaction: t }
       );
     }
@@ -1409,6 +1449,8 @@ async function deleteSale(req, res, next) {
          WHERE original_sale_id = :sale_id OR new_sale_id = :sale_id OR return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`,
         { replacements: { sale_id: id }, transaction: t }
       );
+      await sequelize.query(`DELETE FROM sale_return_items WHERE return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`, { replacements: { sale_id: id }, transaction: t });
+      await sequelize.query(`DELETE FROM sale_return_payments WHERE return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`, { replacements: { sale_id: id }, transaction: t });
       await sequelize.query(`DELETE FROM sale_returns WHERE sale_id = :sale_id`, { replacements: { sale_id: id }, transaction: t });
     }
 
@@ -1428,6 +1470,8 @@ module.exports = {
   listSales,
   statsSales,
   getSaleById,
+  listRefundsBySale,
+  listExchangesBySale,
   createSale,
   deleteSale,
   createRefund,

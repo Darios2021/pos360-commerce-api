@@ -1,16 +1,20 @@
 // src/routes/pos.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (SIN RUTAS DUPLICADAS)
 //
-// FIX CRÍTICO:
-// - /sales/:id/refunds y /sales/:id/exchanges NO deben apuntar a pos.controller.js
-//   porque pisan el módulo de ventas (posSales.controller.js) y te da 400/403.
-// - Ahora esas rutas van a posSales.controller.js (createRefund/createExchange)
-// - Se mantiene pos.controller.js para: /context, /products, /sale (crear venta POS rápida)
+// OBJETIVO:
+// - Este router es el ÚNICO que expone /sales/* en /api/v1/pos
+// - Refunds/Exchanges salen del módulo de ventas (posSales.controller.js)
+// - ✅ GET refunds/exchanges TAMBIÉN desde posSales.controller.js (FUENTE DE VERDAD)
+//   para no depender de controllers opcionales que pueden faltar.
+//
+// IMPORTANTE:
+// - NO montes otros routers que definan /sales/:id/refunds o /sales/:id/exchanges
+//   (posRefunds.routes.js y posExchanges.routes.js deben quedar fuera de /pos)
 
 const router = require("express").Router();
 
 // ==============================
-// POS "context / products / createSale"
+// POS "context / products / createSale" (POS rápido)
 // ==============================
 const posController = require("../controllers/pos.controller");
 
@@ -60,6 +64,17 @@ const createExchange =
   posSalesController.createExchange ||
   posSalesController.createSaleExchange ||
   posSalesController.exchangeSale;
+
+// ✅ GET refunds/exchanges: FUENTE DE VERDAD en posSales.controller.js
+const listRefundsBySale =
+  posSalesController.listRefundsBySale ||
+  posSalesController.getRefundsBySale ||
+  null;
+
+const listExchangesBySale =
+  posSalesController.listExchangesBySale ||
+  posSalesController.getExchangesBySale ||
+  null;
 
 // ==============================
 // ✅ POS Sales OPTIONS (AUTOCOMPLETE)
@@ -112,7 +127,7 @@ router.get("/context", safeFn("getContext", getContext));
 // ---- POS PRODUCTS
 router.get("/products", safeFn("listProductsForPos", listProductsForPos));
 
-// ---- POS CREATE SALE (pos.controller.js)
+// ---- POS CREATE SALE (pos.controller.js) - POS rápido
 router.post("/sale", safeFn("createPosSale", createPosSale));
 
 // ---- SALES MODULE (posSales.controller.js)
@@ -123,9 +138,13 @@ router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.post("/sales", safeFn("createSale", createSale));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
 
-// ✅ IMPORTANTE: refunds/exchanges aquí (módulo ventas), NO pos.controller.js
+// ✅ Refunds/Exchanges del módulo de ventas (NO pos.controller.js)
 router.post("/sales/:id/refunds", safeFn("createRefund", createRefund));
 router.post("/sales/:id/exchanges", safeFn("createExchange", createExchange));
+
+// ✅ GET refunds/exchanges garantizado (misma fuente de verdad)
+router.get("/sales/:id/refunds", safeFn("listRefundsBySale", listRefundsBySale));
+router.get("/sales/:id/exchanges", safeFn("listExchangesBySale", listExchangesBySale));
 
 // ---- OPTIONS (posSalesOptions.controller.js)
 router.get("/sales/options/sellers", safeFn("optionsSellers", optionsSellers));
