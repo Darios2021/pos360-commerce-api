@@ -2,6 +2,10 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // + ✅ GET /api/v1/_version (para verificar deploy real)
 // + (opcional) GET /api/v1/_whoami (debug auth rápido)
+//
+// FIX CRÍTICO (sin romper otros servicios):
+// - Montar posRefundsRoutes / posExchangesRoutes ANTES que posRoutes,
+//   porque Express resuelve rutas en orden y posRoutes puede “pisar” /sales/:id/refunds.
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -100,17 +104,17 @@ safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 
 // =========================
-// POS
+// ✅ POS (ORDEN IMPORTA)
 // =========================
 
-// Ventas POS (listado, detalle, stats, delete)
-safeUse("/pos", requireAuth, posRoutes);
-
-// Devoluciones POS -> /api/v1/pos/sales/:id/refunds
+// ✅ 1) Devoluciones POS -> /api/v1/pos/sales/:id/refunds
 safeUse("/pos", requireAuth, posRefundsRoutes);
 
-// Cambios POS -> /api/v1/pos/sales/:id/exchanges
+// ✅ 2) Cambios POS -> /api/v1/pos/sales/:id/exchanges
 safeUse("/pos", requireAuth, posExchangesRoutes);
+
+// ✅ 3) Ventas POS (listado, detalle, stats, delete)
+safeUse("/pos", requireAuth, posRoutes);
 
 // =========================
 // Perfil
