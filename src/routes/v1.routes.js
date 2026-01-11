@@ -27,13 +27,19 @@ const dashboardRoutes = require("./dashboard.routes");
 // POS
 const posRoutes = require("./pos.routes");
 
+// ✅ POS Refunds
+const posRefundsRoutes = require("./posRefunds.routes");
+
+// ✅ POS Exchanges
+const posExchangesRoutes = require("./posExchanges.routes");
+
 // ✅ ME (perfil)
 const meRoutes = require("./me.routes");
 
 // ✅ ADMIN USERS
 const adminUsersRoutes = require("./adminUsers.routes");
 
-// ✅ ADMIN SHOP BRANDING (NUEVO)
+// ✅ ADMIN SHOP BRANDING
 const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
 
 function safeUse(path, ...mws) {
@@ -70,17 +76,30 @@ safeUse("/warehouses", requireAuth, warehousesRoutes);
 safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 
+// =========================
 // POS
+// =========================
+
+// Ventas POS (listado, detalle, stats, delete)
 safeUse("/pos", requireAuth, posRoutes);
 
-// ✅ Perfil
+// Devoluciones POS -> /api/v1/pos/sales/:id/refunds
+safeUse("/pos", requireAuth, posRefundsRoutes);
+
+// Cambios POS -> /api/v1/pos/sales/:id/exchanges
+safeUse("/pos", requireAuth, posExchangesRoutes);
+
+// =========================
+// Perfil
+// =========================
 safeUse("/me", requireAuth, meRoutes);
 
-// ✅ Admin Users
+// =========================
+// Admin
+// =========================
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
 
-// ✅ Admin Shop Branding (NUEVO)
-// Queda así: /api/v1/admin/shop/branding ...
+// /api/v1/admin/shop/branding
 safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes);
 
 module.exports = router;
