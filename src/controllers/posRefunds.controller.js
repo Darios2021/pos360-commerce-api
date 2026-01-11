@@ -1,12 +1,12 @@
 // src/controllers/posRefunds.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// FIX CLAVE REAL:
-// - En sequelize.query (MySQL), el insertId puede venir en metadata (2do retorno)
-// - Por eso tomamos insertId de (meta.insertId || result.insertId)
+// FIX DEFINITIVO (MySQL):
+// - NO depender de result.insertId/meta.insertId (varía según driver/Sequelize)
+// - Luego del INSERT, usar: SELECT LAST_INSERT_ID() dentro de la MISMA transacción
 // - Acepta params :id o :saleId
 // - Transacción atómica
-// - Errores claros
+// - Errores claros + logs útiles
 
 const { sequelize } = require("../models");
 
@@ -46,6 +46,13 @@ async function saleExists(saleId, t) {
   return Array.isArray(rows) ? rows[0] : null;
 }
 
+async function getLastInsertId(transaction) {
+  const [rows] = await sequelize.query("SELECT LAST_INSERT_ID() AS id", { transaction });
+  const id = Array.isArray(rows) ? rows?.[0]?.id : null;
+  const n = Number(id || 0);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 async function insertSaleReturn({
   saleId,
   amount,
@@ -55,7 +62,7 @@ async function insertSaleReturn({
   createdBy,
   transaction,
 }) {
-  // 🔥 FIX: agarrar insertId desde metadata o desde result (según driver/Sequelize)
+  // 1) INSERT
   const [result, meta] = await sequelize.query(
     `
     INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
@@ -74,14 +81,18 @@ async function insertSaleReturn({
     }
   );
 
-  const returnId =
-    meta?.insertId ??
-    result?.insertId ??
-    meta?.[0]?.insertId ??
-    result?.[0]?.insertId ??
-    null;
+  // Log útil para CapRover (si sigue fallando)
+  // OJO: no loguea datos sensibles, solo forma del retorno
+  console.log("🧾 sale_returns INSERT raw:", {
+    resultType: typeof result,
+    metaType: typeof meta,
+    resultKeys: result && typeof result === "object" ? Object.keys(result) : null,
+    metaKeys: meta && typeof meta === "object" ? Object.keys(meta) : null,
+  });
 
-  return returnId ? toInt(returnId, null) : null;
+  // 2) ÚNICA fuente de verdad en MySQL dentro de la misma conexión
+  const returnId = await getLastInsertId(transaction);
+  return returnId;
 }
 
 async function insertReturnPayment({
@@ -154,7 +165,7 @@ async function insertReturnItems({ returnId, items, transaction }) {
 // POST /pos/sales/:id/refunds
 // ============================
 async function createRefund(req, res) {
-  // ✅ FIX: soporta :id y :saleId
+  // soporta :id o :saleId
   const saleId = toInt(req.params.id ?? req.params.saleId ?? req.params.sale_id, 0);
   if (!saleId) {
     return res.status(400).json({ ok: false, code: "BAD_SALE_ID", message: "saleId inválido" });
@@ -178,7 +189,6 @@ async function createRefund(req, res) {
 
   const t = await sequelize.transaction();
   try {
-    // 1) validar venta existe
     const sale = await saleExists(saleId, t);
     if (!sale) {
       await t.rollback();
@@ -189,7 +199,6 @@ async function createRefund(req, res) {
       });
     }
 
-    // 2) insertar sale_returns
     const returnId = await insertSaleReturn({
       saleId,
       amount,
@@ -204,7 +213,6 @@ async function createRefund(req, res) {
       throw new Error("RETURN_ID_EMPTY_AFTER_INSERT");
     }
 
-    // 3) insertar pago (FK obliga return_id NOT NULL)
     await insertReturnPayment({
       returnId,
       method,
@@ -214,7 +222,6 @@ async function createRefund(req, res) {
       transaction: t,
     });
 
-    // 4) opcional items
     if (items) {
       await insertReturnItems({ returnId, items, transaction: t });
     }
@@ -237,8 +244,8 @@ async function createRefund(req, res) {
 
     console.error("❌ createRefund error:", err?.message || err, {
       saleId,
-      body: req.body,
       params: req.params,
+      body: req.body,
     });
 
     const msg =
@@ -247,7 +254,7 @@ async function createRefund(req, res) {
         : err?.message === "ITEM_INVALID_QTY_OR_PRICE"
         ? "Items inválidos: qty debe ser > 0 y unit_price >= 0"
         : err?.message === "RETURN_ID_EMPTY_AFTER_INSERT"
-        ? "No se pudo obtener return_id luego del INSERT (driver/Sequelize)."
+        ? "No se pudo obtener return_id luego del INSERT (LAST_INSERT_ID devolvió NULL)."
         : err?.message || "Error registrando devolución";
 
     return res.status(500).json({
