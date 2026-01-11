@@ -1,125 +1,158 @@
 // src/controllers/posRefunds.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// FIX clave del error "return_id vacío":
-// - SaleReturn.create() devuelve una instancia Sequelize -> usar createdReturn.id (NO destructuring raro)
-// - Transacción atómica: sale_returns + sale_return_payments
-// - Valida amount y method
-// - (Opcional) setea status REFUNDED si devolvió todo lo pagado
+// Crea devolución simple (monto) y registra 1 payment asociado.
+// Tablas (según tu DB):
+// - sale_returns
+// - sale_return_payments
+// - sale_return_items (opcional)
+//
+// ✅ Soporta body del frontend:
+// { amount, restock, reason, note, method, refund_method, reference }
+//
+// ✅ return_id NUNCA queda vacío (si no se genera, falla antes de insertar payment)
 
-const { sequelize, Sale, SaleReturn, SaleReturnPayment } = require("../models");
+const { sequelize, Sale, SaleReturn, SaleReturnPayment, SaleReturnItem } = require("../models");
 
 function toFloat(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
 
-function upper(v, def = "") {
-  const s = String(v ?? def).trim();
-  return s ? s.toUpperCase() : def;
+function toBool(v, d = false) {
+  if (v === true || v === false) return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "y", "si", "sí"].includes(s)) return true;
+  if (["0", "false", "no", "n"].includes(s)) return false;
+  return d;
 }
 
-function pickUserId(req) {
+function normMethod(v) {
+  const m = String(v ?? "").trim().toUpperCase();
+  const allowed = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
+  return allowed.has(m) ? m : "CASH";
+}
+
+function getReqUserId(req) {
+  // compat con tus JWT variantes
   return (
     req?.usuario?.id ||
     req?.user?.id ||
-    req?.auth?.id ||
-    req?.usuario_id ||
     req?.userId ||
-    req?.user_id ||
+    req?.usuario_id ||
+    req?.uid ||
     null
   );
 }
 
-async function createRefund(req, res) {
-  const saleId = Number(req.params.id || 0);
-  if (!saleId) return res.status(400).json({ ok: false, message: "sale_id inválido" });
-
-  const amount = toFloat(req.body?.amount, NaN);
-  const restock = !!req.body?.restock;
-
-  // compat: method o refund_method
-  const method = upper(req.body?.refund_method || req.body?.method || "CASH", "CASH");
-
-  const reference = String(req.body?.reference || "").trim() || null;
-  const reason = String(req.body?.reason || "").trim() || null;
-  const note = String(req.body?.note || "").trim() || null;
-
-  const allowed = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
-
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return res.status(400).json({ ok: false, message: "Monto inválido" });
-  }
-  if (!allowed.has(method)) {
-    return res.status(400).json({ ok: false, message: "Método inválido" });
-  }
-
-  const createdBy = pickUserId(req);
-
+async function createRefund(req, res, next) {
+  const t = await sequelize.transaction();
   try {
-    const out = await sequelize.transaction(async (t) => {
-      const sale = await Sale.findByPk(saleId, { transaction: t });
-      if (!sale) {
-        const err = new Error("Venta no encontrada");
-        err.status = 404;
-        throw err;
+    const saleId = Number(req.params.id || 0);
+    if (!saleId) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: "sale id inválido" });
+    }
+
+    const amount = toFloat(req.body?.amount, 0);
+    if (!(amount > 0)) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: "Monto inválido" });
+    }
+
+    const restock = toBool(req.body?.restock, false);
+    const reason = String(req.body?.reason ?? "").trim();
+    const note = String(req.body?.note ?? "").trim();
+
+    const method = normMethod(req.body?.method ?? req.body?.refund_method);
+    const referenceRaw = req.body?.reference;
+    const reference = referenceRaw == null ? null : String(referenceRaw).trim() || null;
+
+    const createdBy = getReqUserId(req);
+
+    // Validar existencia de venta
+    const sale = await Sale.findByPk(saleId, { transaction: t });
+    if (!sale) {
+      await t.rollback();
+      return res.status(404).json({ ok: false, message: `Venta no encontrada: ${saleId}` });
+    }
+
+    // ✅ Crear return
+    const ret = await SaleReturn.create(
+      {
+        sale_id: saleId,
+        amount,
+        restock,
+        reason: reason || null,
+        note: note || null,
+        created_by: createdBy,
+      },
+      { transaction: t }
+    );
+
+    const returnId = ret?.id ?? ret?.get?.("id") ?? null;
+    if (!returnId) {
+      // 🚨 si esto pasa, NUNCA insertamos payments
+      throw new Error("No se pudo crear sale_returns (return_id vacío)");
+    }
+
+    // ✅ Crear payment asociado (1 registro)
+    await SaleReturnPayment.create(
+      {
+        return_id: returnId,
+        method,
+        amount,
+        reference,
+        note: note || reason || null,
+      },
+      { transaction: t }
+    );
+
+    // ✅ (Opcional) items: si te mandan items, los guardamos
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (items.length) {
+      for (const it of items) {
+        const saleItemId = Number(it.sale_item_id || 0) || null;
+        const productId = Number(it.product_id || 0) || null;
+        const warehouseId = Number(it.warehouse_id || 0) || null;
+        const qty = toFloat(it.qty, 0);
+        const unitPrice = toFloat(it.unit_price, 0);
+        if (!productId || !warehouseId || !(qty > 0)) continue;
+
+        await SaleReturnItem.create(
+          {
+            return_id: returnId,
+            sale_item_id: saleItemId,
+            product_id: productId,
+            warehouse_id: warehouseId,
+            qty,
+            unit_price: unitPrice,
+            line_total: Number((qty * unitPrice).toFixed(2)),
+          },
+          { transaction: t }
+        );
       }
+    }
 
-      const maxPaid = toFloat(sale.paid_total, 0);
-      if (amount > maxPaid + 0.0001) {
-        const err = new Error("El monto excede lo pagado");
-        err.status = 400;
-        throw err;
-      }
+    await t.commit();
 
-      // ✅ 1) Crear sale_returns
-      const createdReturn = await SaleReturn.create(
-        {
-          sale_id: saleId,
-          amount,
-          restock,
-          reason,
-          note,
-          created_by: createdBy,
-        },
-        { transaction: t }
-      );
-
-      // ✅ FIX: id desde la instancia
-      const returnId = createdReturn?.id || null;
-      if (!returnId) {
-        const err = new Error("No se pudo crear sale_returns (return_id vacío)");
-        err.status = 500;
-        throw err;
-      }
-
-      // ✅ 2) Crear sale_return_payments
-      await SaleReturnPayment.create(
-        {
-          return_id: returnId,
-          method,
-          amount,
-          reference,
-          note: reason || note || null,
-        },
-        { transaction: t }
-      );
-
-      // ✅ 3) Si devolvió todo lo pagado -> marcar REFUNDED (opcional)
-      if (amount >= maxPaid - 0.0001) {
-        await sale.update({ status: "REFUNDED" }, { transaction: t });
-      }
-
-      return { return_id: returnId };
+    return res.json({
+      ok: true,
+      message: "Devolución registrada",
+      data: {
+        return_id: returnId,
+        sale_id: saleId,
+        amount,
+        method,
+        reference,
+        restock,
+      },
     });
-
-    return res.json({ ok: true, message: "Devolución registrada", data: out });
-  } catch (e) {
-    const status = Number(e?.status || 500);
-    return res.status(status).json({
-      ok: false,
-      message: e?.message || "Error registrando devolución",
-    });
+  } catch (err) {
+    try {
+      await t.rollback();
+    } catch {}
+    return next(err);
   }
 }
 
