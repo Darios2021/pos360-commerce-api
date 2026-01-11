@@ -1,12 +1,12 @@
 // src/controllers/posRefunds.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// FIX REAL:
-// - No dependemos de meta.insertId / result.insertId (inestable según driver).
-// - Después del INSERT hacemos: SELECT LAST_INSERT_ID() dentro de la MISMA transacción.
-// - Si hay error SQL, devolvemos sqlMessage real (para que sepas por qué).
-// - Soporta params :id o :saleId
+// FIX REAL DEFINITIVO (MySQL + Sequelize):
+// - No dependemos de meta.insertId / result.insertId (varía según driver/Sequelize)
+// - Hacemos INSERT y luego SELECT LAST_INSERT_ID() dentro de la MISMA transacción
 // - Transacción atómica
+// - Soporta params :id | :saleId | :sale_id
+// - Errores claros + log útil SOLO cuando falla
 
 const { sequelize } = require("../models");
 
@@ -38,19 +38,9 @@ function normalizeMethod(m) {
   return ok.has(x) ? x : "CASH";
 }
 
-function pickSqlMessage(err) {
-  return (
-    err?.original?.sqlMessage ||
-    err?.parent?.sqlMessage ||
-    err?.sqlMessage ||
-    err?.message ||
-    null
-  );
-}
-
 async function saleExists(saleId, t) {
   const [rows] = await sequelize.query(
-    "SELECT id, total, paid_total, status, branch_id FROM sales WHERE id = ? LIMIT 1",
+    "SELECT id, branch_id, total, paid_total, status FROM sales WHERE id = ? LIMIT 1",
     { replacements: [saleId], transaction: t }
   );
   return Array.isArray(rows) ? rows[0] : null;
@@ -65,7 +55,7 @@ async function insertSaleReturn({
   createdBy,
   transaction,
 }) {
-  // 1) Insert
+  // 1) INSERT (no asumimos insertId en result/meta)
   await sequelize.query(
     `
     INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
@@ -78,19 +68,20 @@ async function insertSaleReturn({
         restock ? 1 : 0,
         reason || null,
         note || null,
-        createdBy,
+        createdBy ?? null,
       ],
       transaction,
     }
   );
 
-  // 2) Tomar el id REAL desde la conexión de la transacción
+  // 2) LAST_INSERT_ID() (robusto)
   const [rows] = await sequelize.query("SELECT LAST_INSERT_ID() AS id", {
     transaction,
   });
 
-  const rid = Array.isArray(rows) ? rows?.[0]?.id : null;
-  const returnId = toInt(rid, 0);
+  const id = Array.isArray(rows) ? rows?.[0]?.id : null;
+  const returnId = toInt(id, 0);
+
   return returnId > 0 ? returnId : null;
 }
 
@@ -108,7 +99,13 @@ async function insertReturnPayment({
     VALUES (?, ?, ?, ?, ?, NOW())
     `,
     {
-      replacements: [returnId, method, amount, reference || null, note || null],
+      replacements: [
+        returnId,
+        method,
+        amount,
+        reference || null,
+        note || null,
+      ],
       transaction,
     }
   );
@@ -130,7 +127,15 @@ async function insertReturnItems({ returnId, items, transaction }) {
     if (!product_id || !warehouse_id) throw new Error("ITEM_INVALID_PRODUCT_OR_WAREHOUSE");
     if (!(qty > 0) || unit_price < 0) throw new Error("ITEM_INVALID_QTY_OR_PRICE");
 
-    values.push([returnId, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total]);
+    values.push([
+      returnId,
+      sale_item_id,
+      product_id,
+      warehouse_id,
+      qty,
+      unit_price,
+      line_total,
+    ]);
   }
 
   const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", ");
@@ -147,7 +152,7 @@ async function insertReturnItems({ returnId, items, transaction }) {
 }
 
 // ============================
-// POST /pos/sales/:id/refunds
+// POST /api/v1/pos/sales/:id/refunds
 // ============================
 async function createRefund(req, res) {
   const saleId = toInt(req.params.id ?? req.params.saleId ?? req.params.sale_id, 0);
@@ -173,6 +178,7 @@ async function createRefund(req, res) {
 
   const t = await sequelize.transaction();
   try {
+    // 1) validar venta existe
     const sale = await saleExists(saleId, t);
     if (!sale) {
       await t.rollback();
@@ -183,6 +189,7 @@ async function createRefund(req, res) {
       });
     }
 
+    // 2) insertar sale_returns (robusto)
     const returnId = await insertSaleReturn({
       saleId,
       amount,
@@ -197,6 +204,7 @@ async function createRefund(req, res) {
       throw new Error("RETURN_ID_EMPTY_AFTER_INSERT");
     }
 
+    // 3) insertar pago (FK obliga return_id NOT NULL)
     await insertReturnPayment({
       returnId,
       method,
@@ -206,6 +214,7 @@ async function createRefund(req, res) {
       transaction: t,
     });
 
+    // 4) opcional items
     if (items) {
       await insertReturnItems({ returnId, items, transaction: t });
     }
@@ -215,18 +224,23 @@ async function createRefund(req, res) {
     return res.json({
       ok: true,
       message: "Devolución registrada",
-      data: { return_id: returnId, sale_id: saleId, amount, method, reference },
+      data: {
+        return_id: returnId,
+        sale_id: saleId,
+        amount,
+        method,
+        reference,
+      },
     });
   } catch (err) {
     try { await t.rollback(); } catch {}
 
-    const sqlMessage = pickSqlMessage(err);
-
+    // 🔎 Log útil SOLO en error
     console.error("❌ createRefund error:", err?.message || err, {
       saleId,
+      createdBy,
       params: req.params,
       body: req.body,
-      sqlMessage,
     });
 
     const msg =
@@ -236,19 +250,18 @@ async function createRefund(req, res) {
         ? "Items inválidos: qty debe ser > 0 y unit_price >= 0"
         : err?.message === "RETURN_ID_EMPTY_AFTER_INSERT"
         ? "No se pudo obtener return_id luego del INSERT (LAST_INSERT_ID vacío)."
-        : (err?.message || "Error registrando devolución");
+        : err?.message || "Error registrando devolución";
 
     return res.status(500).json({
       ok: false,
-      code: "REFUND_CREATE_FAILED",
+      code: "RETURN_INSERT_FAILED",
       message: msg,
-      db: sqlMessage || undefined, // ✅ clave: te muestra el sqlMessage real
     });
   }
 }
 
 // ============================
-// GET /pos/sales/:id/refunds
+// GET /api/v1/pos/sales/:id/refunds
 // ============================
 async function listRefundsBySale(req, res) {
   const saleId = toInt(req.params.id ?? req.params.saleId ?? req.params.sale_id, 0);
@@ -291,13 +304,11 @@ async function listRefundsBySale(req, res) {
 
     return res.json({ ok: true, data: rows || [] });
   } catch (err) {
-    const sqlMessage = pickSqlMessage(err);
-    console.error("❌ listRefundsBySale error:", err?.message || err, { sqlMessage });
+    console.error("❌ listRefundsBySale error:", err?.message || err);
     return res.status(500).json({
       ok: false,
       code: "REFUND_LIST_FAILED",
       message: "Error listando devoluciones",
-      db: sqlMessage || undefined,
     });
   }
 }
