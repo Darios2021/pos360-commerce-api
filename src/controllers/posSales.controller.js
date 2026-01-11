@@ -1,14 +1,14 @@
 // src/controllers/posSales.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (RESPETA TU BD REAL)
-// NOTA: SaleRefund (sale_refunds) es VIEW => SOLO LECTURA
+// NOTA: sale_refunds es VIEW => SOLO LECTURA
 //
 // Incluye:
-// - GET /pos/sales (listSales) con filtros robustos SIN duplicar por joins
-// - GET /pos/sales/stats (statsSales) neto vs refunds(view)
+// - GET /pos/sales (listSales) con filtros robustos SIN duplicar
+// - GET /pos/sales/stats (statsSales) neto vs refunds
 // - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
-// - POST /pos/sales (createSale) (creación estándar con items requerido)
-// - DELETE /pos/sales/:id (deleteSale) (con force=1 y protección por returns)
-// - POST /pos/sales/:id/refunds (createRefund) ✅ items opcional
+// - POST /pos/sales (createSale)
+// - DELETE /pos/sales/:id (deleteSale)
+// - POST /pos/sales/:id/refunds (createRefund) ✅ items[] opcional
 // - POST /pos/sales/:id/exchanges (createExchange) ✅ cambio completo (return + new sale + diff + stock)
 
 const { Op, literal } = require("sequelize");
@@ -25,9 +25,6 @@ const {
   SaleExchange,
 } = require("../models");
 
-// =========================
-// Helpers base
-// =========================
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
@@ -51,7 +48,6 @@ function upper(v) {
 
 /**
  * ✅ Normaliza métodos (acepta DEBIT/CREDIT/CARD sin romper)
- * Devuelve UPPER sin mapear a CARD (no perdemos granularidad)
  */
 function normalizePayMethod(v) {
   const x = String(v || "").trim().toUpperCase();
@@ -62,7 +58,7 @@ function allowedPayMethodsSet() {
 }
 
 /**
- * 🔐 user_id desde middleware o JWT (fallback)
+ * 🔐 Obtiene user_id desde middleware o JWT (fallback)
  */
 function getAuthUserId(req) {
   const candidates = [
@@ -114,8 +110,7 @@ function getAuthUserId(req) {
 }
 
 /**
- * ✅ branch_id desde el usuario/contexto
- * (no del query salvo admin en list/stats)
+ * ✅ branch_id desde el usuario/contexto (no del query salvo admin en list/stats)
  */
 function getAuthBranchId(req) {
   return (
@@ -156,6 +151,18 @@ function isAdminReq(req) {
 
   const norm = (s) => String(s || "").trim().toLowerCase();
   return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
+}
+
+/**
+ * ✅ Permiso para post-venta:
+ * - admin, o
+ * - el mismo user_id (cajero/vendedor) de la venta
+ */
+function canPostSale(req, sale) {
+  if (isAdminReq(req)) return true;
+  const uid = getAuthUserId(req);
+  if (!uid) return false;
+  return toInt(sale?.user_id, 0) === toInt(uid, 0);
 }
 
 function findAssocAlias(sourceModel, targetModel) {
@@ -207,9 +214,9 @@ function getTableName(model, fallback) {
   }
 }
 
-// ============================
-// Construcción de filtros
-// ============================
+/**
+ * ✅ Base where: branch/status/from/to/q + seller_id + customer
+ */
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
 
@@ -243,7 +250,7 @@ function buildWhereFromQuery(req) {
   const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   if (seller_id > 0) where.user_id = seller_id;
 
-  // customer (id o texto)
+  // customer
   const customer = req.query.customer;
   if (customer != null && String(customer).trim()) {
     const cStr = String(customer).trim();
@@ -285,7 +292,7 @@ function buildWhereFromQuery(req) {
 }
 
 /**
- * ✅ Filtros sin duplicar por joins:
+ * ✅ List filters SIN duplicar por joins:
  * - pay_method: EXISTS payments
  * - product: EXISTS sale_items
  */
@@ -352,7 +359,7 @@ async function listSales(req, res, next) {
     const include = [];
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
-    const salePaymentsAs = findAssocAlias(Sale, Payment);
+    const salePaymentsAs = findAssocAlias(Sale, Payment); // útil para UI
 
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
@@ -379,8 +386,8 @@ async function listSales(req, res, next) {
 
 /**
  * ✅ Stats NETO:
- * - total_sum = SUM(total) - SUM(refunds(view))
- * - paid_sum  = SUM(paid_total) - SUM(refunds(view))
+ * - total vendido NETO (SUM(total) - SUM(refunds))
+ * - total cobrado NETO (SUM(paid_total) - SUM(refunds))
  */
 async function statsSales(req, res, next) {
   try {
@@ -566,7 +573,7 @@ async function getSaleById(req, res, next) {
       refunds = await SaleRefund.findAll({ where: { sale_id: id }, order: [["created_at", "DESC"]] });
     }
 
-    // Exchanges
+    // Exchanges (si existe modelo)
     let exchanges = [];
     if (SaleExchange) {
       exchanges = await SaleExchange.findAll({
@@ -583,6 +590,7 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
+// (createSale base)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -699,11 +707,6 @@ async function createSale(req, res, next) {
       salePayload.sale_number = req.body.sale_number.trim();
     }
 
-    // extra campos si existen
-    if (Sale?.rawAttributes?.customer_doc && req.body?.customer_doc != null) salePayload.customer_doc = String(req.body.customer_doc || "").trim() || null;
-    if (Sale?.rawAttributes?.customer_phone && req.body?.customer_phone != null) salePayload.customer_phone = String(req.body.customer_phone || "").trim() || null;
-    if (Sale?.rawAttributes?.note && req.body?.note != null) salePayload.note = String(req.body.note || "").trim() || null;
-
     const sale = await Sale.create(salePayload, { transaction: t });
 
     // snapshots desde Product
@@ -766,7 +769,7 @@ async function createSale(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
-// ✅ Devolución de dinero (items opcional)
+// ✅ Devuelve dinero (items[] opcional para stock/auditoría)
 //
 // Body:
 // {
@@ -782,16 +785,17 @@ async function createSale(req, res, next) {
 async function createRefund(req, res, next) {
   const t = await sequelize.transaction();
   try {
-    if (!isAdminReq(req)) {
-      await t.rollback();
-      return res.status(403).json({ ok: false, code: "ADMIN_ONLY", message: "Solo administrador puede registrar devoluciones." });
-    }
-
     const sale_id = toInt(req.params.id, 0);
     if (!sale_id) { await t.rollback(); return res.status(400).json({ ok: false, message: "ID inválido" }); }
 
     const sale = await Sale.findByPk(sale_id, { transaction: t });
     if (!sale) { await t.rollback(); return res.status(404).json({ ok: false, message: "Venta no encontrada" }); }
+
+    // ✅ permiso: admin o dueño de la venta
+    if (!canPostSale(req, sale)) {
+      await t.rollback();
+      return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "No tenés permisos para registrar devoluciones de esta venta." });
+    }
 
     const amount = toFloat(req.body?.amount, NaN);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -855,7 +859,7 @@ async function createRefund(req, res, next) {
       { replacements: { return_id, method, amount, reference, pnote: note }, transaction: t }
     );
 
-    // 3) opcional: items devueltos
+    // 3) opcional: items devueltos (NO obligatorio)
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length) {
       for (const it of items) {
@@ -917,7 +921,7 @@ async function createRefund(req, res, next) {
 
 /**
  * ✅ Util: stock check vía v_stock_by_branch_product (columna qty)
- * Solo cuando product.track_stock=1 (si existe)
+ * Solo cuando product.track_stock=1 (si existe la columna)
  */
 async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
   if (!items.length) return;
@@ -969,21 +973,22 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
 
 // ============================
 // POST /api/v1/pos/sales/:id/exchanges
-// ✅ CAMBIO COMPLETO (return + new sale + diff + stock)
+// ✅ CAMBIO COMPLETO (diff + stock)
 // ============================
 async function createExchange(req, res) {
   const t = await sequelize.transaction();
   try {
-    if (!isAdminReq(req)) {
-      await t.rollback();
-      return res.status(403).json({ ok: false, code: "ADMIN_ONLY", message: "Solo administrador puede registrar cambios." });
-    }
-
     const original_sale_id = toInt(req.params.id, 0);
     if (!original_sale_id) { await t.rollback(); return res.status(400).json({ ok: false, message: "ID inválido" }); }
 
     const originalSale = await Sale.findByPk(original_sale_id, { transaction: t });
     if (!originalSale) { await t.rollback(); return res.status(404).json({ ok: false, message: "Venta original no encontrada" }); }
+
+    // ✅ permiso: admin o dueño de la venta
+    if (!canPostSale(req, originalSale)) {
+      await t.rollback();
+      return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "No tenés permisos para registrar cambios de esta venta." });
+    }
 
     const restock = req.body?.restock === false ? 0 : 1;
     const returns = Array.isArray(req.body?.returns) ? req.body.returns : [];
@@ -1049,7 +1054,7 @@ async function createExchange(req, res) {
     // Reintegro del cambio (solo si diff < 0)
     const refund_amount = diff < 0 ? Math.abs(diff) : 0;
 
-    // 1) sale_returns (siempre lo creamos para auditar el cambio)
+    // 1) sale_returns (auditoría del cambio)
     const [insReturn] = await sequelize.query(
       `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
        VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
@@ -1110,26 +1115,25 @@ async function createExchange(req, res) {
     const paid_total = diff > 0 ? diff : 0;
     const change_total = 0;
 
-    const newSalePayload = {
-      branch_id: originalSale.branch_id,
-      user_id: created_by || originalSale.user_id,
-      customer_name: originalSale.customer_name || null,
-      status,
-      sold_at,
-      subtotal: new_total,
-      discount_total: 0,
-      tax_total: 0,
-      total: new_total,
-      paid_total,
-      change_total,
-    };
-
-    // Campos opcionales si existen
-    if (Sale?.rawAttributes?.customer_doc) newSalePayload.customer_doc = originalSale.customer_doc || null;
-    if (Sale?.rawAttributes?.customer_phone) newSalePayload.customer_phone = originalSale.customer_phone || null;
-    if (Sale?.rawAttributes?.note) newSalePayload.note = note || "Cambio";
-
-    const newSale = await Sale.create(newSalePayload, { transaction: t });
+    const newSale = await Sale.create(
+      {
+        branch_id: originalSale.branch_id,
+        user_id: created_by || originalSale.user_id,
+        customer_name: originalSale.customer_name || null,
+        customer_doc: originalSale.customer_doc || null,
+        customer_phone: originalSale.customer_phone || null,
+        status,
+        sold_at,
+        subtotal: new_total,
+        discount_total: 0,
+        tax_total: 0,
+        total: new_total,
+        paid_total,
+        change_total,
+        note: note || "Cambio",
+      },
+      { transaction: t }
+    );
 
     // snapshots desde Product
     const takeIds = [...new Set(normTakeItems.map((x) => x.product_id))];

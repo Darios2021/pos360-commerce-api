@@ -1,48 +1,82 @@
 // src/routes/pos.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// FIXES:
-// - NO se cae el backend si falta un handler
-// - /sales/options/* -> posSalesOptions.controller.js
-// - ✅ /sales/:id/refunds y /sales/:id/exchanges -> posSales.controller.js (NO pos.controller.js)
-//   (esto evita que caiga en createSale y tire "items requerido")
+// FIX CRÍTICO:
+// - /sales/:id/refunds y /sales/:id/exchanges NO deben apuntar a pos.controller.js
+//   porque pisan el módulo de ventas (posSales.controller.js) y te da 400/403.
+// - Ahora esas rutas van a posSales.controller.js (createRefund/createExchange)
+// - Se mantiene pos.controller.js para: /context, /products, /sale (crear venta POS rápida)
 
 const router = require("express").Router();
 
 // ==============================
-// POS "context / products / POS create sale" (pantalla POS)
+// POS "context / products / createSale"
 // ==============================
 const posController = require("../controllers/pos.controller");
 
 // Soportar ambos estilos de export (module.exports = {} o exports.named)
 const getContext = posController.getContext || posController?.default?.getContext;
-const listProductsForPos = posController.listProductsForPos || posController?.default?.listProductsForPos;
+const listProductsForPos =
+  posController.listProductsForPos || posController?.default?.listProductsForPos;
 const createPosSale = posController.createSale || posController?.default?.createSale;
 
 // ==============================
-// POS Sales (list/stats/detail/create/delete/refunds/exchanges)
+// POS Sales (list/stats/detail/delete/refunds/exchanges)
 // ==============================
 const posSalesController = require("../controllers/posSales.controller");
 
 // Aliases robustos (por si tu controller usa otros nombres)
-const listSales = posSalesController.listSales || posSalesController.getSales || posSalesController.salesList;
-const statsSales = posSalesController.statsSales || posSalesController.salesStats || posSalesController.getSalesStats;
-const getSaleById = posSalesController.getSaleById || posSalesController.getSale || posSalesController.saleById;
-const createSale = posSalesController.createSale || posSalesController.createSales || posSalesController.newSale;
-const deleteSale = posSalesController.deleteSale || posSalesController.removeSale || posSalesController.destroySale;
+const listSales =
+  posSalesController.listSales ||
+  posSalesController.getSales ||
+  posSalesController.salesList;
 
-// ✅ CLAVE: refunds/exchanges salen de posSales.controller.js
-const createRefund = posSalesController.createRefund || posSalesController.refundSale;
-const createExchange = posSalesController.createExchange || posSalesController.exchangeSale;
+const statsSales =
+  posSalesController.statsSales ||
+  posSalesController.salesStats ||
+  posSalesController.getSalesStats;
+
+const getSaleById =
+  posSalesController.getSaleById ||
+  posSalesController.getSale ||
+  posSalesController.saleById;
+
+const createSale =
+  posSalesController.createSale ||
+  posSalesController.createSales ||
+  posSalesController.newSale;
+
+const deleteSale =
+  posSalesController.deleteSale ||
+  posSalesController.removeSale ||
+  posSalesController.destroySale;
+
+const createRefund =
+  posSalesController.createRefund ||
+  posSalesController.createSaleRefund ||
+  posSalesController.refundSale;
+
+const createExchange =
+  posSalesController.createExchange ||
+  posSalesController.createSaleExchange ||
+  posSalesController.exchangeSale;
 
 // ==============================
 // ✅ POS Sales OPTIONS (AUTOCOMPLETE)
 // ==============================
 const posSalesOptionsController = require("../controllers/posSalesOptions.controller");
 
-const optionsSellers = posSalesOptionsController.optionsSellers || posSalesOptionsController?.default?.optionsSellers;
-const optionsCustomers = posSalesOptionsController.optionsCustomers || posSalesOptionsController?.default?.optionsCustomers;
-const optionsProducts = posSalesOptionsController.optionsProducts || posSalesOptionsController?.default?.optionsProducts;
+const optionsSellers =
+  posSalesOptionsController.optionsSellers ||
+  posSalesOptionsController?.default?.optionsSellers;
+
+const optionsCustomers =
+  posSalesOptionsController.optionsCustomers ||
+  posSalesOptionsController?.default?.optionsCustomers;
+
+const optionsProducts =
+  posSalesOptionsController.optionsProducts ||
+  posSalesOptionsController?.default?.optionsProducts;
 
 // ==============================
 // Guards SAFE (NO CRASH)
@@ -58,10 +92,13 @@ function notImplemented(name) {
     });
   };
 }
+
 function safeFn(name, fn) {
   if (typeof fn === "function") return fn;
+
   // eslint-disable-next-line no-console
   console.error(`❌ [pos.routes] Handler inválido: ${name} ->`, typeof fn);
+
   return notImplemented(name);
 }
 
@@ -75,7 +112,7 @@ router.get("/context", safeFn("getContext", getContext));
 // ---- POS PRODUCTS
 router.get("/products", safeFn("listProductsForPos", listProductsForPos));
 
-// ---- POS CREATE SALE (pantalla POS clásica)
+// ---- POS CREATE SALE (pos.controller.js)
 router.post("/sale", safeFn("createPosSale", createPosSale));
 
 // ---- SALES MODULE (posSales.controller.js)
@@ -86,7 +123,7 @@ router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.post("/sales", safeFn("createSale", createSale));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
 
-// ---- ✅ REFUNDS / EXCHANGES (posSales.controller.js)  <<<<< CLAVE
+// ✅ IMPORTANTE: refunds/exchanges aquí (módulo ventas), NO pos.controller.js
 router.post("/sales/:id/refunds", safeFn("createRefund", createRefund));
 router.post("/sales/:id/exchanges", safeFn("createExchange", createExchange));
 
