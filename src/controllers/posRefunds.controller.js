@@ -1,15 +1,12 @@
 // src/controllers/posRefunds.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// FIX CLAVE:
-// - Si saleId no existe => 404 (no intenta insertar pagos/items)
-// - INSERT sale_returns => toma insertId real (MySQL)
-// - INSERT sale_return_payments SIEMPRE con return_id válido
+// FIX CLAVE REAL:
+// - En sequelize.query (MySQL), el insertId puede venir en metadata (2do retorno)
+// - Por eso tomamos insertId de (meta.insertId || result.insertId)
+// - Acepta params :id o :saleId
 // - Transacción atómica
-// - Errores claros (sin "return_id vacío" silencioso)
-//
-// Requiere: models/index exporte sequelize (ya lo tenés)
-// const { sequelize } = require("../models");
+// - Errores claros
 
 const { sequelize } = require("../models");
 
@@ -22,7 +19,6 @@ function toFloat(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 function pickUserId(req) {
-  // compat con tus JWTs (id/userId/user_id/uid/etc.)
   const u = req.usuario || req.user || req.auth || null;
   const id =
     u?.id ??
@@ -36,20 +32,18 @@ function pickUserId(req) {
   const n = Number(id || 0);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
-
 function normalizeMethod(m) {
   const x = String(m || "CASH").trim().toUpperCase();
   const ok = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
   return ok.has(x) ? x : "CASH";
 }
 
-async function saleExistsOrThrow(saleId, t) {
+async function saleExists(saleId, t) {
   const [rows] = await sequelize.query(
     "SELECT id, total, paid_total, status FROM sales WHERE id = ? LIMIT 1",
     { replacements: [saleId], transaction: t }
   );
-  const sale = Array.isArray(rows) ? rows[0] : null;
-  return sale || null;
+  return Array.isArray(rows) ? rows[0] : null;
 }
 
 async function insertSaleReturn({
@@ -61,20 +55,33 @@ async function insertSaleReturn({
   createdBy,
   transaction,
 }) {
-  // MySQL -> result.insertId
-  const [result] = await sequelize.query(
+  // 🔥 FIX: agarrar insertId desde metadata o desde result (según driver/Sequelize)
+  const [result, meta] = await sequelize.query(
     `
     INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
     VALUES (?, ?, ?, ?, ?, ?, NOW())
     `,
     {
-      replacements: [saleId, amount, restock ? 1 : 0, reason || null, note || null, createdBy],
+      replacements: [
+        saleId,
+        amount,
+        restock ? 1 : 0,
+        reason || null,
+        note || null,
+        createdBy,
+      ],
       transaction,
     }
   );
 
-  const returnId = result?.insertId || null;
-  return returnId;
+  const returnId =
+    meta?.insertId ??
+    result?.insertId ??
+    meta?.[0]?.insertId ??
+    result?.[0]?.insertId ??
+    null;
+
+  return returnId ? toInt(returnId, null) : null;
 }
 
 async function insertReturnPayment({
@@ -91,7 +98,13 @@ async function insertReturnPayment({
     VALUES (?, ?, ?, ?, ?, NOW())
     `,
     {
-      replacements: [returnId, method, amount, reference || null, note || null],
+      replacements: [
+        returnId,
+        method,
+        amount,
+        reference || null,
+        note || null,
+      ],
       transaction,
     }
   );
@@ -101,7 +114,6 @@ async function insertReturnItems({ returnId, items, transaction }) {
   const arr = Array.isArray(items) ? items : [];
   if (!arr.length) return;
 
-  // valida + normaliza
   const values = [];
   for (const it of arr) {
     const sale_item_id = it?.sale_item_id ? toInt(it.sale_item_id, 0) : null;
@@ -111,17 +123,20 @@ async function insertReturnItems({ returnId, items, transaction }) {
     const unit_price = toFloat(it?.unit_price, 0);
     const line_total = Number((qty * unit_price).toFixed(2));
 
-    if (!product_id || !warehouse_id) {
-      throw new Error("ITEM_INVALID_PRODUCT_OR_WAREHOUSE");
-    }
-    if (!(qty > 0) || unit_price < 0) {
-      throw new Error("ITEM_INVALID_QTY_OR_PRICE");
-    }
+    if (!product_id || !warehouse_id) throw new Error("ITEM_INVALID_PRODUCT_OR_WAREHOUSE");
+    if (!(qty > 0) || unit_price < 0) throw new Error("ITEM_INVALID_QTY_OR_PRICE");
 
-    values.push([returnId, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total]);
+    values.push([
+      returnId,
+      sale_item_id,
+      product_id,
+      warehouse_id,
+      qty,
+      unit_price,
+      line_total,
+    ]);
   }
 
-  // bulk insert
   const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", ");
   const flat = values.flat();
 
@@ -136,24 +151,23 @@ async function insertReturnItems({ returnId, items, transaction }) {
 }
 
 // ============================
-// POST /pos/sales/:saleId/refunds
+// POST /pos/sales/:id/refunds
 // ============================
-async function createRefund(req, res, next) {
-  const saleId = toInt(req.params.saleId, 0);
+async function createRefund(req, res) {
+  // ✅ FIX: soporta :id y :saleId
+  const saleId = toInt(req.params.id ?? req.params.saleId ?? req.params.sale_id, 0);
   if (!saleId) {
     return res.status(400).json({ ok: false, code: "BAD_SALE_ID", message: "saleId inválido" });
   }
 
   const amount = toFloat(req.body?.amount, 0);
-  const restock = !!req.body?.restock;
+  const restock = req.body?.restock === false ? false : true;
   const reason = String(req.body?.reason || "").trim() || null;
   const note = String(req.body?.note || "").trim() || null;
 
-  // aceptar method o refund_method
   const method = normalizeMethod(req.body?.method || req.body?.refund_method || "CASH");
   const reference = String(req.body?.reference || "").trim() || null;
 
-  // opcional: items (si querés registrar items devueltos)
   const items = req.body?.items || req.body?.return_items || req.body?.returnItems || null;
 
   if (!(amount > 0)) {
@@ -165,7 +179,7 @@ async function createRefund(req, res, next) {
   const t = await sequelize.transaction();
   try {
     // 1) validar venta existe
-    const sale = await saleExistsOrThrow(saleId, t);
+    const sale = await saleExists(saleId, t);
     if (!sale) {
       await t.rollback();
       return res.status(404).json({
@@ -190,7 +204,7 @@ async function createRefund(req, res, next) {
       throw new Error("RETURN_ID_EMPTY_AFTER_INSERT");
     }
 
-    // 3) insertar pago de reintegro (FK: return_id NOT NULL)
+    // 3) insertar pago (FK obliga return_id NOT NULL)
     await insertReturnPayment({
       returnId,
       method,
@@ -200,7 +214,7 @@ async function createRefund(req, res, next) {
       transaction: t,
     });
 
-    // 4) opcional: items
+    // 4) opcional items
     if (items) {
       await insertReturnItems({ returnId, items, transaction: t });
     }
@@ -215,24 +229,25 @@ async function createRefund(req, res, next) {
         sale_id: saleId,
         amount,
         method,
+        reference,
       },
     });
   } catch (err) {
-    try {
-      await t.rollback();
-    } catch {}
+    try { await t.rollback(); } catch {}
 
-    // si querés ver el error real en logs:
-    console.error("❌ createRefund error:", err?.message || err);
+    console.error("❌ createRefund error:", err?.message || err, {
+      saleId,
+      body: req.body,
+      params: req.params,
+    });
 
-    // Mensajes más útiles al front
     const msg =
       err?.message === "ITEM_INVALID_PRODUCT_OR_WAREHOUSE"
         ? "Items inválidos: falta product_id o warehouse_id"
         : err?.message === "ITEM_INVALID_QTY_OR_PRICE"
         ? "Items inválidos: qty debe ser > 0 y unit_price >= 0"
         : err?.message === "RETURN_ID_EMPTY_AFTER_INSERT"
-        ? "No se pudo obtener return_id luego del INSERT (revisar DB/driver)"
+        ? "No se pudo obtener return_id luego del INSERT (driver/Sequelize)."
         : err?.message || "Error registrando devolución";
 
     return res.status(500).json({
@@ -244,10 +259,10 @@ async function createRefund(req, res, next) {
 }
 
 // ============================
-// GET /pos/sales/:saleId/refunds
+// GET /pos/sales/:id/refunds
 // ============================
-async function listRefundsBySale(req, res, next) {
-  const saleId = toInt(req.params.saleId, 0);
+async function listRefundsBySale(req, res) {
+  const saleId = toInt(req.params.id ?? req.params.saleId ?? req.params.sale_id, 0);
   if (!saleId) {
     return res.status(400).json({ ok: false, code: "BAD_SALE_ID", message: "saleId inválido" });
   }
@@ -264,7 +279,6 @@ async function listRefundsBySale(req, res, next) {
         sr.note,
         sr.created_by,
         sr.created_at,
-        -- payment “principal” (si hay varios, trae el de mayor amount)
         (
           SELECT srp.method
           FROM sale_return_payments srp
@@ -289,7 +303,11 @@ async function listRefundsBySale(req, res, next) {
     return res.json({ ok: true, data: rows || [] });
   } catch (err) {
     console.error("❌ listRefundsBySale error:", err?.message || err);
-    return res.status(500).json({ ok: false, code: "REFUND_LIST_FAILED", message: "Error listando devoluciones" });
+    return res.status(500).json({
+      ok: false,
+      code: "REFUND_LIST_FAILED",
+      message: "Error listando devoluciones",
+    });
   }
 }
 
