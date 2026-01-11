@@ -1,8 +1,31 @@
 // src/routes/v1.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
+// + ✅ GET /api/v1/_version (para verificar deploy real)
+// + (opcional) GET /api/v1/_whoami (debug auth rápido)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
+
+// =========================
+// ✅ VERSION (SIN AUTH)
+// =========================
+router.get("/_version", (req, res) => {
+  res.json({
+    ok: true,
+    service: process.env.SERVICE_NAME || "pos360-commerce-api",
+    build: process.env.BUILD_ID || "dev",
+    env: process.env.NODE_ENV || "unknown",
+    time: new Date().toISOString(),
+  });
+});
+
+// (opcional) debug auth rápido: te muestra usuario del token
+router.get("/_whoami", requireAuth, (req, res) => {
+  res.json({
+    ok: true,
+    usuario: req.usuario || req.user || req.auth || null,
+  });
+});
 
 // =========================
 // Public

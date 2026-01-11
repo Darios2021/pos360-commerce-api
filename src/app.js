@@ -3,11 +3,11 @@
 // - Mantiene tu estructura: module.exports = { createApp }
 // - CORS robusto + X-Branch-Id
 // - Request logger
-// - Root con build/version
-// - ✅ /api/v1/_version (para verificar deploy)
-// - ✅ /api/v1/public (ecommerce)
+// - Root
+// - ✅ /api/v1 (routes)
 // - 404
 // - ✅ Error handler con sqlMessage real (db)
+// - ✅ Headers globales: X-Service-Name / X-Build-Id (para verificar deploy real)
 
 const express = require("express");
 const cors = require("cors");
@@ -21,14 +21,6 @@ function isMiddleware(fn) {
 function createApp() {
   const app = express();
 
-  // ✅ Build/version visibles para verificar si estás pegando al servicio nuevo
-  const BUILD_ID =
-    process.env.BUILD_ID ||
-    process.env.CAPROVER_GIT_COMMIT_SHA ||
-    process.env.GIT_SHA ||
-    "dev";
-  const SERVICE_NAME = process.env.SERVICE_NAME || "pos360-commerce-api";
-
   // =====================
   // CORS
   // =====================
@@ -40,14 +32,9 @@ function createApp() {
   const corsOptions = {
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
-        return callback(null, true);
-      }
-      if (
-        allowedOrigins.length === 0 ||
-        allowedOrigins.includes("*") ||
-        allowedOrigins.includes(origin)
-      ) {
+      if (origin.includes("localhost") || origin.includes("127.0.0.1")) return callback(null, true);
+
+      if (allowedOrigins.length === 0 || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
       return callback(new Error(`CORS blocked by pos360: ${origin}`));
@@ -61,15 +48,19 @@ function createApp() {
   app.options("*", cors(corsOptions));
 
   // =====================
-  // Parsers (primero)
+  // Parsers
   // =====================
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-  // ✅ Header global para identificar el build
+  // =====================
+  // ✅ Headers globales (verificación deploy)
+  // =====================
   app.use((req, res, next) => {
-    res.setHeader("X-Service-Name", SERVICE_NAME);
-    res.setHeader("X-Build-Id", BUILD_ID);
+    const serviceName = process.env.SERVICE_NAME || "pos360-commerce-api";
+    const buildId = process.env.BUILD_ID || "dev";
+    res.setHeader("X-Service-Name", serviceName);
+    res.setHeader("X-Build-Id", buildId);
     next();
   });
 
@@ -88,9 +79,7 @@ function createApp() {
 
     res.on("finish", () => {
       const ms = Date.now() - started;
-      console.log(
-        `✅ ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`
-      );
+      console.log(`✅ ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`);
     });
 
     next();
@@ -101,39 +90,24 @@ function createApp() {
   // =====================
   app.get("/", (req, res) => {
     res.json({
-      name: SERVICE_NAME,
+      name: process.env.SERVICE_NAME || "pos360-commerce-api",
       status: "online",
       env: process.env.NODE_ENV || "unknown",
-      build: BUILD_ID,
-      time: new Date().toISOString(),
-    });
-  });
-
-  // ✅ Endpoint para verificar deploy sin auth
-  app.get("/api/v1/_version", (req, res) => {
-    res.json({
-      ok: true,
-      service: SERVICE_NAME,
-      build: BUILD_ID,
-      env: process.env.NODE_ENV || "unknown",
+      build: process.env.BUILD_ID || "dev",
       time: new Date().toISOString(),
     });
   });
 
   // =====================
-  // API v1 (validación)
+  // API v1
   // =====================
   if (!isMiddleware(v1Routes)) {
     console.error("❌ v1Routes inválido. Debe exportar un router middleware.");
     console.error("   typeof:", typeof v1Routes);
-    console.error(
-      "   keys:",
-      v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null
-    );
+    console.error("   keys:", v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null);
     throw new Error("INVALID_V1_ROUTES_EXPORT");
   }
 
-  // ✅ Todo el API va por /api/v1
   app.use("/api/v1", v1Routes);
 
   // =====================
@@ -148,7 +122,7 @@ function createApp() {
   });
 
   // =====================
-  // ✅ Error handler FINAL (incluye sqlMessage real)
+  // Error handler FINAL
   // =====================
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
