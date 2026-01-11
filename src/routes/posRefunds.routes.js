@@ -1,11 +1,20 @@
 // src/routes/posRefunds.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
+//
+// Endpoints:
+// POST   /pos/sales/:saleId/refunds
+// GET    /pos/sales/:saleId/refunds
+//
+// Se monta en v1.routes como:
+// safeUse("/pos", requireAuth, posRefundsRoutes);
 
 const router = require("express").Router();
-const { createRefund } = require("../controllers/posRefunds.controller");
+const { createRefund, listRefundsBySale } = require("../controllers/posRefunds.controller");
 
-// OJO: este router se monta en v1.routes.js bajo "/pos"
-// Queda: /api/v1/pos/sales/:id/refunds
-router.post("/sales/:id/refunds", createRefund);
+// POST /api/v1/pos/sales/:saleId/refunds
+router.post("/sales/:saleId/refunds", createRefund);
+
+// GET /api/v1/pos/sales/:saleId/refunds
+router.get("/sales/:saleId/refunds", listRefundsBySale);
 
 module.exports = router;
