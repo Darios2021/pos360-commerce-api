@@ -1,5 +1,5 @@
 // src/controllers/posSales.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (RESPETA TU BD REAL)
+// ✅ COPY-PASTE FINAL COMPLETO (ROBUSTO contra columnas distintas)
 // NOTA: sale_refunds es VIEW => SOLO LECTURA
 //
 // Incluye:
@@ -8,8 +8,8 @@
 // - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
 // - POST /pos/sales (createSale)
 // - DELETE /pos/sales/:id (deleteSale)
-// - POST /pos/sales/:id/refunds (createRefund) ✅ items[] opcional
-// - POST /pos/sales/:id/exchanges (createExchange) ✅ cambio completo (return + new sale + diff + stock)
+// - POST /pos/sales/:id/refunds (createRefund) ✅ BLINDADO a columnas reales
+// - POST /pos/sales/:id/exchanges (createExchange) ✅ BLINDADO a columnas reales
 
 const { Op, literal } = require("sequelize");
 const {
@@ -359,7 +359,7 @@ async function listSales(req, res, next) {
     const include = [];
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
-    const salePaymentsAs = findAssocAlias(Sale, Payment); // útil para UI
+    const salePaymentsAs = findAssocAlias(Sale, Payment);
 
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
@@ -397,7 +397,7 @@ async function statsSales(req, res, next) {
     const where = base.where;
     const salesTable = getTableName(Sale, "sales");
     const payTable = getTableName(Payment, "payments");
-    const refundsTable = getTableName(SaleRefund, "sale_refunds"); // VIEW
+    const refundsTable = getTableName(SaleRefund, "sale_refunds");
     const itemsTable = getTableName(SaleItem, "sale_items");
 
     const conds = [];
@@ -590,7 +590,6 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
-// (createSale base)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -767,20 +766,165 @@ async function createSale(req, res, next) {
   }
 }
 
+/* ============================================================
+   ✅ HELPERS BLINDADOS para INSERT según columnas reales
+   (evita 500 por "Unknown column ..." en MySQL)
+   ============================================================ */
+
+async function tryQuery(sql, options) {
+  try {
+    return await sequelize.query(sql, options);
+  } catch (e) {
+    e.__sql = sql;
+    throw e;
+  }
+}
+
+async function tryInsertMany(sqlList, optionsBase) {
+  let lastErr = null;
+  for (const sql of sqlList) {
+    try {
+      const res = await tryQuery(sql, optionsBase);
+      return { ok: true, res, sql };
+    } catch (e) {
+      lastErr = e;
+      // seguimos probando alternativas
+    }
+  }
+  return { ok: false, err: lastErr };
+}
+
+function isBadFieldError(e) {
+  const msg = String(e?.original?.sqlMessage || e?.parent?.sqlMessage || e?.message || "");
+  return msg.includes("Unknown column") || msg.includes("doesn't have a default value");
+}
+
+async function insertSaleReturn({ sale_id, amount, restock, reason, note, created_by, transaction }) {
+  // variantes por si tu tabla usa createdAt o user_id etc.
+  const sqls = [
+    // (tu versión)
+    `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
+     VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
+
+    // createdAt camel
+    `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, createdAt)
+     VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
+
+    // creator_id en vez de created_by
+    `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, creator_id, created_at)
+     VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
+
+    // sin note
+    `INSERT INTO sale_returns (sale_id, amount, restock, reason, created_by, created_at)
+     VALUES (:sale_id, :amount, :restock, :reason, :created_by, NOW())`,
+
+    // mínimo
+    `INSERT INTO sale_returns (sale_id, amount, restock, created_at)
+     VALUES (:sale_id, :amount, :restock, NOW())`,
+  ];
+
+  const out = await tryInsertMany(sqls, {
+    replacements: { sale_id, amount, restock, reason, note, created_by },
+    transaction,
+  });
+
+  if (!out.ok) throw out.err;
+
+  const ins = out.res?.[0];
+  const insertId = toInt(ins?.insertId, 0);
+  return insertId;
+}
+
+async function insertSaleReturnPayment({ return_id, method, amount, reference, note, transaction }) {
+  // variantes típicas: method vs refund_method; note vs pnote; createdAt camel
+  const sqls = [
+    `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, created_at)
+     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
+
+    `INSERT INTO sale_return_payments (return_id, refund_method, amount, reference, note, created_at)
+     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
+
+    `INSERT INTO sale_return_payments (return_id, method, amount, reference, pnote, created_at)
+     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
+
+    `INSERT INTO sale_return_payments (return_id, refund_method, amount, reference, pnote, created_at)
+     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
+
+    `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, createdAt)
+     VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
+  ];
+
+  const out = await tryInsertMany(sqls, {
+    replacements: { return_id, method, amount, reference, note },
+    transaction,
+  });
+
+  if (!out.ok) throw out.err;
+  return true;
+}
+
+async function insertSaleReturnItem({ return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total, transaction }) {
+  const sqls = [
+    `INSERT INTO sale_return_items (return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
+     VALUES (:return_id, :sale_item_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
+
+    `INSERT INTO sale_return_items (return_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
+     VALUES (:return_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
+
+    `INSERT INTO sale_return_items (return_id, product_id, warehouse_id, qty, unit_price, line_total, createdAt)
+     VALUES (:return_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
+  ];
+
+  const out = await tryInsertMany(sqls, {
+    replacements: { return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total },
+    transaction,
+  });
+
+  if (!out.ok) throw out.err;
+  return true;
+}
+
+async function insertSaleExchange({
+  original_sale_id,
+  return_id,
+  new_sale_id,
+  original_total,
+  returned_amount,
+  new_total,
+  diff,
+  note,
+  created_by,
+  transaction,
+}) {
+  const sqls = [
+    `INSERT INTO sale_exchanges
+      (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, created_by, created_at)
+     VALUES
+      (:original_sale_id, :return_id, :new_sale_id, :original_total, :returned_amount, :new_total, :diff, :note, :created_by, NOW())`,
+
+    `INSERT INTO sale_exchanges
+      (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, creator_id, created_at)
+     VALUES
+      (:original_sale_id, :return_id, :new_sale_id, :original_total, :returned_amount, :new_total, :diff, :note, :created_by, NOW())`,
+
+    `INSERT INTO sale_exchanges
+      (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, created_at)
+     VALUES
+      (:original_sale_id, :return_id, :new_sale_id, :original_total, :returned_amount, :new_total, :diff, NOW())`,
+  ];
+
+  const out = await tryInsertMany(sqls, {
+    replacements: { original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, created_by },
+    transaction,
+  });
+
+  if (!out.ok) throw out.err;
+  return true;
+}
+
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
-// ✅ Devuelve dinero (items[] opcional para stock/auditoría)
-//
-// Body:
-// {
-//   amount,
-//   refund_method|method,
-//   restock,
-//   reason,
-//   note,
-//   reference,
-//   items?: [{ sale_item_id?, product_id, warehouse_id, qty, unit_price }]
-// }
+// ✅ BLINDADO
 // ============================
 async function createRefund(req, res, next) {
   const t = await sequelize.transaction();
@@ -791,7 +935,6 @@ async function createRefund(req, res, next) {
     const sale = await Sale.findByPk(sale_id, { transaction: t });
     if (!sale) { await t.rollback(); return res.status(404).json({ ok: false, message: "Venta no encontrada" }); }
 
-    // ✅ permiso: admin o dueño de la venta
     if (!canPostSale(req, sale)) {
       await t.rollback();
       return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "No tenés permisos para registrar devoluciones de esta venta." });
@@ -839,27 +982,33 @@ async function createRefund(req, res, next) {
 
     const created_by = getAuthUserId(req) || null;
 
-    // 1) sale_returns
-    const [insReturn] = await sequelize.query(
-      `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
-       VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
-      { replacements: { sale_id, amount, restock, reason, note, created_by }, transaction: t }
-    );
+    // ✅ 1) sale_returns (blindado)
+    let return_id = await insertSaleReturn({
+      sale_id,
+      amount,
+      restock,
+      reason,
+      note,
+      created_by,
+      transaction: t,
+    });
 
-    const return_id = toInt(insReturn?.insertId, 0);
     if (!return_id) {
       await t.rollback();
-      return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns" });
+      return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (return_id vacío)" });
     }
 
-    // 2) sale_return_payments
-    await sequelize.query(
-      `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, created_at)
-       VALUES (:return_id, :method, :amount, :reference, :pnote, NOW())`,
-      { replacements: { return_id, method, amount, reference, pnote: note }, transaction: t }
-    );
+    // ✅ 2) sale_return_payments (blindado)
+    await insertSaleReturnPayment({
+      return_id,
+      method,
+      amount,
+      reference,
+      note,
+      transaction: t,
+    });
 
-    // 3) opcional: items devueltos (NO obligatorio)
+    // ✅ 3) opcional: items devueltos
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length) {
       for (const it of items) {
@@ -883,15 +1032,20 @@ async function createRefund(req, res, next) {
 
         const line_total = Math.max(0, qty * unit_price);
 
-        await sequelize.query(
-          `INSERT INTO sale_return_items (return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
-           VALUES (:return_id, :sale_item_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
-          { replacements: { return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total }, transaction: t }
-        );
+        await insertSaleReturnItem({
+          return_id,
+          sale_item_id,
+          product_id,
+          warehouse_id,
+          qty,
+          unit_price,
+          line_total,
+          transaction: t,
+        });
       }
     }
 
-    // 4) status REFUNDED si quedó total
+    // ✅ 4) status REFUNDED si quedó total
     const newRefunded = refundedSum + amount;
     const fullyRefunded = newRefunded >= paidTotal - 0.00001;
     if (fullyRefunded && Sale?.rawAttributes?.status) {
@@ -915,7 +1069,18 @@ async function createRefund(req, res, next) {
     });
   } catch (e) {
     try { await t.rollback(); } catch {}
-    next(e);
+
+    // 👇 si es error de columnas, lo exponemos más claro para debug
+    const msg = String(e?.original?.sqlMessage || e?.parent?.sqlMessage || e?.message || "Error devolución");
+    const code = String(e?.original?.code || e?.parent?.code || "REFUND_ERROR");
+
+    console.error("[POS SALES] createRefund error:", msg);
+
+    return res.status(500).json({
+      ok: false,
+      code,
+      message: msg,
+    });
   }
 }
 
@@ -973,7 +1138,7 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
 
 // ============================
 // POST /api/v1/pos/sales/:id/exchanges
-// ✅ CAMBIO COMPLETO (diff + stock)
+// ✅ BLINDADO
 // ============================
 async function createExchange(req, res) {
   const t = await sequelize.transaction();
@@ -984,7 +1149,6 @@ async function createExchange(req, res) {
     const originalSale = await Sale.findByPk(original_sale_id, { transaction: t });
     if (!originalSale) { await t.rollback(); return res.status(404).json({ ok: false, message: "Venta original no encontrada" }); }
 
-    // ✅ permiso: admin o dueño de la venta
     if (!canPostSale(req, originalSale)) {
       await t.rollback();
       return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "No tenés permisos para registrar cambios de esta venta." });
@@ -1027,7 +1191,6 @@ async function createExchange(req, res) {
       }
     }
 
-    // ✅ Chequeo stock para takes
     await assertStockAvailableOrThrow({
       branch_id: toInt(originalSale.branch_id, 0),
       items: normTakeItems,
@@ -1037,8 +1200,6 @@ async function createExchange(req, res) {
     const returned_amount = normReturnItems.reduce((a, it) => a + Math.max(0, it.qty * it.unit_price), 0);
     const new_total = normTakeItems.reduce((a, it) => a + Math.max(0, it.qty * it.unit_price), 0);
 
-    // diff > 0 => cliente paga
-    // diff < 0 => reintegro
     const diff = Number((new_total - returned_amount).toFixed(2));
 
     const methodRaw = req.body?.method || "CASH";
@@ -1054,24 +1215,17 @@ async function createExchange(req, res) {
     // Reintegro del cambio (solo si diff < 0)
     const refund_amount = diff < 0 ? Math.abs(diff) : 0;
 
-    // 1) sale_returns (auditoría del cambio)
-    const [insReturn] = await sequelize.query(
-      `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
-       VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
-      {
-        replacements: {
-          sale_id: original_sale_id,
-          amount: refund_amount,
-          restock,
-          reason: "Cambio",
-          note,
-          created_by,
-        },
-        transaction: t,
-      }
-    );
+    // 1) sale_returns (auditoría del cambio) - blindado
+    const return_id = await insertSaleReturn({
+      sale_id: original_sale_id,
+      amount: refund_amount,
+      restock,
+      reason: "Cambio",
+      note,
+      created_by,
+      transaction: t,
+    });
 
-    const return_id = toInt(insReturn?.insertId, 0);
     if (!return_id) {
       await t.rollback();
       return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (cambio)" });
@@ -1080,38 +1234,34 @@ async function createExchange(req, res) {
     // 2) sale_return_items (lo que vuelve)
     for (const it of normReturnItems) {
       const line_total = Math.max(0, it.qty * it.unit_price);
-      await sequelize.query(
-        `INSERT INTO sale_return_items (return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
-         VALUES (:return_id, :sale_item_id, :product_id, :warehouse_id, :qty, :unit_price, :line_total, NOW())`,
-        {
-          replacements: {
-            return_id,
-            sale_item_id: it.sale_item_id,
-            product_id: it.product_id,
-            warehouse_id: it.warehouse_id,
-            qty: it.qty,
-            unit_price: it.unit_price,
-            line_total,
-          },
-          transaction: t,
-        }
-      );
+      await insertSaleReturnItem({
+        return_id,
+        sale_item_id: it.sale_item_id,
+        product_id: it.product_id,
+        warehouse_id: it.warehouse_id,
+        qty: it.qty,
+        unit_price: it.unit_price,
+        line_total,
+        transaction: t,
+      });
     }
 
     // 3) sale_return_payments (solo si hay reintegro)
     if (refund_amount > 0) {
-      await sequelize.query(
-        `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, created_at)
-         VALUES (:return_id, :method, :amount, :reference, :note, NOW())`,
-        { replacements: { return_id, method, amount: refund_amount, reference, note }, transaction: t }
-      );
+      await insertSaleReturnPayment({
+        return_id,
+        method,
+        amount: refund_amount,
+        reference,
+        note,
+        transaction: t,
+      });
     }
 
     // 4) Nueva venta por lo que se lleva
     const sold_at = nowDate();
     const status = "PAID";
 
-    // pagado en la nueva sale = diferencia si diff>0, sino 0
     const paid_total = diff > 0 ? diff : 0;
     const change_total = 0;
 
@@ -1167,27 +1317,19 @@ async function createExchange(req, res) {
       );
     }
 
-    // 6) sale_exchanges (tabla)
-    await sequelize.query(
-      `INSERT INTO sale_exchanges
-        (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, created_by, created_at)
-       VALUES
-        (:original_sale_id, :return_id, :new_sale_id, :original_total, :returned_amount, :new_total, :diff, :note, :created_by, NOW())`,
-      {
-        replacements: {
-          original_sale_id,
-          return_id,
-          new_sale_id: newSale.id,
-          original_total: Number(originalSale.total || 0),
-          returned_amount: Number(returned_amount || 0),
-          new_total: Number(new_total || 0),
-          diff: Number(diff || 0),
-          note,
-          created_by,
-        },
-        transaction: t,
-      }
-    );
+    // 6) sale_exchanges (blindado)
+    await insertSaleExchange({
+      original_sale_id,
+      return_id,
+      new_sale_id: newSale.id,
+      original_total: Number(originalSale.total || 0),
+      returned_amount: Number(returned_amount || 0),
+      new_total: Number(new_total || 0),
+      diff: Number(diff || 0),
+      note,
+      created_by,
+      transaction: t,
+    });
 
     await t.commit();
 
@@ -1208,10 +1350,15 @@ async function createExchange(req, res) {
   } catch (e) {
     try { await t.rollback(); } catch {}
     const status = e?.status || 500;
+    const msg = String(e?.original?.sqlMessage || e?.parent?.sqlMessage || e?.message || "Error cambio");
+    const code = String(e?.original?.code || e?.parent?.code || e?.code || "EXCHANGE_ERROR");
+
+    console.error("[POS SALES] createExchange error:", msg);
+
     return res.status(status).json({
       ok: false,
-      code: e?.code || "EXCHANGE_ERROR",
-      message: e?.message || "Error cambio",
+      code,
+      message: msg,
       data: e?.data || null,
     });
   }
