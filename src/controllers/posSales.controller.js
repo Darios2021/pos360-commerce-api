@@ -3,8 +3,8 @@
 // NOTA: sale_refunds es VIEW => SOLO LECTURA
 //
 // Incluye:
-// - GET /pos/sales (listSales) con filtros robustos SIN duplicar
-// - GET /pos/sales/stats (statsSales) neto vs refunds
+// - GET /pos/sales (listSales) con filtros robustos SIN duplicar (payments separate)
+// - GET /pos/sales/stats (statsSales) bruto/neto + refunds + net_by_method ✅
 // - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
 // - GET /pos/sales/:id/refunds (listRefundsBySale) ✅ desde VIEW
 // - GET /pos/sales/:id/exchanges (listExchangesBySale)
@@ -49,11 +49,26 @@ function upper(v) {
 }
 
 /**
- * ✅ Normaliza métodos genéricos
+ * ✅ Normaliza métodos (acepta enum DB + labels UI)
+ * DB:
+ * - CASH, TRANSFER, CARD, QR, OTHER
+ * UI (posible):
+ * - EFECTIVO, TRANSFERENCIA, TARJETA, QR, OTRO
  */
 function normalizePayMethod(v) {
   const x = String(v || "").trim().toUpperCase();
-  return x || "";
+  if (!x) return "";
+
+  // Mapeos UI ES -> enum DB
+  if (x === "EFECTIVO") return "CASH";
+  if (x === "TRANSFERENCIA") return "TRANSFER";
+  if (x === "TARJETA") return "CARD";
+  if (x === "OTRO" || x === "OTROS") return "OTHER";
+
+  // Mapeos comunes
+  if (x === "DEBIT" || x === "CREDIT") return "CARD";
+
+  return x;
 }
 
 /**
@@ -354,7 +369,6 @@ function injectExistsFiltersIntoWhere(where, req) {
   const ands = [];
 
   if (pay_method) {
-    // en DB payments.method es enum => UPPER ok
     ands.push(
       literal(`EXISTS (
         SELECT 1 FROM ${payTable} p
@@ -410,9 +424,23 @@ async function listSales(req, res, next) {
     const saleUserAs = findAssocAlias(Sale, User);
     const salePaymentsAs = findAssocAlias(Sale, Payment);
 
-    if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
-    if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
-    if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
+    if (Branch && saleBranchAs) {
+      include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
+    }
+    if (User && saleUserAs) {
+      include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
+    }
+
+    // ✅ CRÍTICO: payments hasMany => usar separate para NO duplicar filas ni romper paginado
+    if (Payment && salePaymentsAs) {
+      include.push({
+        model: Payment,
+        as: salePaymentsAs,
+        required: false,
+        separate: true,
+        order: [["id", "ASC"]],
+      });
+    }
 
     const total = await Sale.count({ where });
 
@@ -434,9 +462,12 @@ async function listSales(req, res, next) {
 }
 
 /**
- * ✅ Stats NETO:
+ * ✅ Stats:
  * - total vendido NETO (SUM(total) - SUM(refunds))
  * - total cobrado NETO (SUM(paid_total) - SUM(refunds))
+ * - payments_by_method BRUTO (payments)
+ * - refunds_by_method (sale_refunds.refund_method)
+ * - net_by_method = payments_by_method - refunds_by_method ✅
  */
 async function statsSales(req, res, next) {
   try {
@@ -444,6 +475,7 @@ async function statsSales(req, res, next) {
     if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
 
     const where = base.where;
+
     const salesTable = getTableName(Sale, "sales");
     const payTable = getTableName(Payment, "payments");
     const refundsTable = getTableName(SaleRefund, "sale_refunds");
@@ -485,8 +517,8 @@ async function statsSales(req, res, next) {
 
     const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
     if (pay_method) {
-      conds.push(`EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`);
       repl.pay_method = pay_method;
+      conds.push(`EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`);
     }
 
     const product = String(req.query.product || "").trim();
@@ -510,6 +542,7 @@ async function statsSales(req, res, next) {
 
     const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
+    // refunds agregados por sale_id (para netear totals)
     const refundsJoin = `
       LEFT JOIN (
         SELECT r.sale_id, COALESCE(SUM(r.amount),0) AS refunds_sum
@@ -531,6 +564,7 @@ async function statsSales(req, res, next) {
       ${whereSql}
     `;
 
+    // payments by method (BRUTO)
     const sqlPayments = `
       SELECT
         UPPER(p.method) AS method,
@@ -542,32 +576,90 @@ async function statsSales(req, res, next) {
       ORDER BY UPPER(p.method) ASC
     `;
 
+    // refunds by method (sale_refunds VIEW)
+    // Nota: la VIEW trae refund_method ya en uppercase por tu CREATE VIEW (coalesce(upper(...)))
+    const sqlRefundsByMethod = `
+      SELECT
+        COALESCE(UPPER(r.refund_method), 'OTHER') AS method,
+        COALESCE(SUM(r.amount),0) AS amount_sum
+      FROM ${refundsTable} r
+      INNER JOIN ${salesTable} s ON s.id = r.sale_id
+      ${whereSql}
+      GROUP BY COALESCE(UPPER(r.refund_method), 'OTHER')
+      ORDER BY COALESCE(UPPER(r.refund_method), 'OTHER') ASC
+    `;
+
     const [rowsTotals] = await sequelize.query(sqlTotals, { replacements: repl });
     const [rowsPay] = await sequelize.query(sqlPayments, { replacements: repl });
+    const [rowsRefundsMeth] = await sequelize.query(sqlRefundsByMethod, { replacements: repl });
 
     const t = rowsTotals?.[0] || {};
-    const byMethod = {};
+
+    const paymentsByMethod = {};
     for (const r of rowsPay || []) {
       const k = String(r.method || "").trim().toUpperCase() || "OTHER";
-      byMethod[k] = Number(r.amount_sum || 0);
+      paymentsByMethod[k] = Number(r.amount_sum || 0);
+    }
+
+    const refundsByMethod = {};
+    for (const r of rowsRefundsMeth || []) {
+      const k = String(r.method || "").trim().toUpperCase() || "OTHER";
+      refundsByMethod[k] = Number(r.amount_sum || 0);
+    }
+
+    // net_by_method = payments - refunds
+    const allKeys = new Set([
+      ...Object.keys(paymentsByMethod),
+      ...Object.keys(refundsByMethod),
+      "CASH","TRANSFER","CARD","QR","OTHER",
+    ]);
+
+    const netByMethod = {};
+    for (const k of allKeys) {
+      const p = Number(paymentsByMethod[k] || 0);
+      const r = Number(refundsByMethod[k] || 0);
+      netByMethod[k] = Number((p - r).toFixed(2));
     }
 
     return res.json({
       ok: true,
       data: {
         sales_count: toInt(t.sales_count, 0),
+
+        // NETOS
         total_sum: Number(t.total_sum || 0),
         paid_sum: Number(t.paid_sum || 0),
         refunds_sum: Number(t.refunds_sum || 0),
+
+        // BRUTOS
         gross_total_sum: Number(t.gross_total_sum || 0),
         gross_paid_sum: Number(t.gross_paid_sum || 0),
-        payments: {
-          cash: byMethod.CASH || 0,
-          transfer: byMethod.TRANSFER || 0,
-          card: byMethod.CARD || 0,
-          qr: byMethod.QR || 0,
-          other: byMethod.OTHER || 0,
-          raw_by_method: byMethod,
+
+        payments_by_method: {
+          cash: paymentsByMethod.CASH || 0,
+          transfer: paymentsByMethod.TRANSFER || 0,
+          card: paymentsByMethod.CARD || 0,
+          qr: paymentsByMethod.QR || 0,
+          other: paymentsByMethod.OTHER || 0,
+          raw_by_method: paymentsByMethod,
+        },
+
+        refunds_by_method: {
+          cash: refundsByMethod.CASH || 0,
+          transfer: refundsByMethod.TRANSFER || 0,
+          card: refundsByMethod.CARD || 0,
+          qr: refundsByMethod.QR || 0,
+          other: refundsByMethod.OTHER || 0,
+          raw_by_method: refundsByMethod,
+        },
+
+        net_by_method: {
+          cash: netByMethod.CASH || 0,
+          transfer: netByMethod.TRANSFER || 0,
+          card: netByMethod.CARD || 0,
+          qr: netByMethod.QR || 0,
+          other: netByMethod.OTHER || 0,
+          raw_by_method: netByMethod,
         },
       },
     });
@@ -592,10 +684,12 @@ async function getSaleById(req, res, next) {
     const saleUserAs = findAssocAlias(Sale, User);
 
     const include = [];
-    if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
     if (SaleItem && saleItemsAs) include.push({ model: SaleItem, as: saleItemsAs, required: false });
+
+    // ✅ get by id: acá no rompe paginado, puede ir normal + order
+    if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
 
     const order = [];
     if (salePaymentsAs) order.push([{ model: Payment, as: salePaymentsAs }, "id", "ASC"]);
@@ -823,7 +917,7 @@ async function createSale(req, res, next) {
       const allowed = allowedSalePayMethodsSet();
       await Payment.bulkCreate(
         payments.map((p) => {
-          const method = normalizeCardMappedMethod(p?.method || "OTHER"); // DEBIT/CREDIT => CARD
+          const method = normalizeCardMappedMethod(p?.method || "OTHER");
           return {
             sale_id: sale.id,
             method: allowed.has(method) ? method : "OTHER",
