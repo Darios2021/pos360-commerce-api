@@ -1,16 +1,10 @@
 // src/controllers/posRefunds.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (FIX return_id vacío)
 //
-// Crea devolución simple (monto) y registra 1 payment asociado.
-// Tablas (según tu DB):
-// - sale_returns
-// - sale_return_payments
-// - sale_return_items (opcional)
-//
-// ✅ Soporta body del frontend:
-// { amount, restock, reason, note, method, refund_method, reference }
-//
-// ✅ return_id NUNCA queda vacío (si no se genera, falla antes de insertar payment)
+// FIX:
+// - Obtiene el PK real del modelo con SaleReturn.primaryKeyAttribute
+// - Soporta PK = "id" o "return_id" o lo que sea
+// - Si sigue sin PK, hace fallback a dataValues y si no, revienta ANTES de insertar payments
 
 const { sequelize, Sale, SaleReturn, SaleReturnPayment, SaleReturnItem } = require("../models");
 
@@ -34,7 +28,6 @@ function normMethod(v) {
 }
 
 function getReqUserId(req) {
-  // compat con tus JWT variantes
   return (
     req?.usuario?.id ||
     req?.user?.id ||
@@ -43,6 +36,41 @@ function getReqUserId(req) {
     req?.uid ||
     null
   );
+}
+
+function getPkValue(instance, Model) {
+  if (!instance) return null;
+
+  const pkAttr =
+    Model?.primaryKeyAttribute ||
+    (Array.isArray(Model?.primaryKeyAttributes) ? Model.primaryKeyAttributes[0] : null) ||
+    "id";
+
+  // Intentar por getters/prop directo
+  let v =
+    instance?.get?.(pkAttr) ??
+    instance?.[pkAttr] ??
+    instance?.dataValues?.[pkAttr] ??
+    null;
+
+  // Fallbacks comunes
+  if (v == null) {
+    v =
+      instance?.get?.("id") ??
+      instance?.id ??
+      instance?.dataValues?.id ??
+      instance?.get?.("return_id") ??
+      instance?.return_id ??
+      instance?.dataValues?.return_id ??
+      null;
+  }
+
+  // Normalizar a número si aplica
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) return n;
+
+  // Si no es numérico, igual devolver (por si PK es UUID)
+  return v || null;
 }
 
 async function createRefund(req, res, next) {
@@ -70,14 +98,13 @@ async function createRefund(req, res, next) {
 
     const createdBy = getReqUserId(req);
 
-    // Validar existencia de venta
     const sale = await Sale.findByPk(saleId, { transaction: t });
     if (!sale) {
       await t.rollback();
       return res.status(404).json({ ok: false, message: `Venta no encontrada: ${saleId}` });
     }
 
-    // ✅ Crear return
+    // ✅ Crear devolución
     const ret = await SaleReturn.create(
       {
         sale_id: saleId,
@@ -90,16 +117,25 @@ async function createRefund(req, res, next) {
       { transaction: t }
     );
 
-    const returnId = ret?.id ?? ret?.get?.("id") ?? null;
+    // ✅ PK real del modelo (NO asumir "id")
+    const returnId = getPkValue(ret, SaleReturn);
+
     if (!returnId) {
-      // 🚨 si esto pasa, NUNCA insertamos payments
+      // Debug útil (sale en logs de CapRover)
+      console.error("❌ SaleReturn creado pero sin PK detectable", {
+        pkAttr: SaleReturn?.primaryKeyAttribute,
+        pkAttrs: SaleReturn?.primaryKeyAttributes,
+        dataValuesKeys: ret?.dataValues ? Object.keys(ret.dataValues) : null,
+        dataValues: ret?.dataValues,
+      });
+
       throw new Error("No se pudo crear sale_returns (return_id vacío)");
     }
 
-    // ✅ Crear payment asociado (1 registro)
+    // ✅ Payment asociado
     await SaleReturnPayment.create(
       {
-        return_id: returnId,
+        return_id: returnId, // <- clave
         method,
         amount,
         reference,
@@ -108,7 +144,7 @@ async function createRefund(req, res, next) {
       { transaction: t }
     );
 
-    // ✅ (Opcional) items: si te mandan items, los guardamos
+    // ✅ (Opcional) items
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length) {
       for (const it of items) {
