@@ -3,13 +3,13 @@
 // NOTA: sale_refunds es VIEW => SOLO LECTURA
 //
 // Incluye:
-// - GET /pos/sales (listSales) con filtros robustos
+// - GET /pos/sales (listSales) con filtros robustos SIN duplicar
 // - GET /pos/sales/stats (statsSales) neto vs refunds
-// - GET /pos/sales/:id (getSaleById) con sale + refunds(view) + exchanges
-// - POST /pos/sales (createSale) (lo dejo como estaba)
+// - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
+// - POST /pos/sales (createSale)
 // - DELETE /pos/sales/:id (deleteSale)
 // - POST /pos/sales/:id/refunds (createRefund) ✅ con opcional items[] -> sale_return_items
-// - POST /pos/sales/:id/exchanges (createExchange) ✅ cambio completo (return + new sale + diff)
+// - POST /pos/sales/:id/exchanges (createExchange) ✅ cambio completo (return + new sale + diff + stock)
 
 const { Op, literal } = require("sequelize");
 const {
@@ -46,13 +46,17 @@ function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
-// ✅ Normaliza métodos para que UI y DB no se peleen
+/**
+ * ✅ Normaliza métodos (acepta DEBIT/CREDIT/CARD sin romper)
+ * Devolvemos el método en UPPER, sin mapear a CARD para no perder granularidad
+ */
 function normalizePayMethod(v) {
   const x = String(v || "").trim().toUpperCase();
-  if (!x) return "";
-  // UI manda DEBIT/CREDIT => DB usa CARD
-  if (x === "DEBIT" || x === "CREDIT") return "CARD";
-  return x;
+  return x || "";
+}
+
+function allowedPayMethodsSet() {
+  return new Set(["CASH", "TRANSFER", "DEBIT", "CREDIT", "CARD", "QR", "OTHER"]);
 }
 
 /**
@@ -108,7 +112,7 @@ function getAuthUserId(req) {
 }
 
 /**
- * ✅ branch_id SIEMPRE desde el usuario/contexto (no del query salvo admin en list)
+ * ✅ branch_id desde el usuario/contexto (no del query salvo admin en list/stats)
  */
 function getAuthBranchId(req) {
   return (
@@ -257,7 +261,7 @@ function buildWhereFromQuery(req) {
     }
   }
 
-  // q (buscador)
+  // q (buscador general)
   if (q) {
     const qNum = toFloat(q, NaN);
     where[Op.or] = [
@@ -324,9 +328,7 @@ function injectExistsFiltersIntoWhere(where, req) {
     }
   }
 
-  if (ands.length) {
-    where[Op.and] = (where[Op.and] || []).concat(ands);
-  }
+  if (ands.length) where[Op.and] = (where[Op.and] || []).concat(ands);
 }
 
 // ============================
@@ -347,9 +349,11 @@ async function listSales(req, res, next) {
     const include = [];
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
+    const salePaymentsAs = findAssocAlias(Sale, Payment); // útil para UI
 
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
+    if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
 
     const total = await Sale.count({ where });
 
@@ -363,7 +367,6 @@ async function listSales(req, res, next) {
     });
 
     const pages = Math.max(1, Math.ceil(total / limit));
-
     return res.json({ ok: true, data: rows, meta: { page, limit, total, pages } });
   } catch (e) {
     console.error("[POS SALES] listSales error:", e?.message || e);
@@ -385,6 +388,7 @@ async function statsSales(req, res, next) {
     const salesTable = getTableName(Sale, "sales");
     const payTable = getTableName(Payment, "payments");
     const refundsTable = getTableName(SaleRefund, "sale_refunds"); // VIEW
+    const itemsTable = getTableName(SaleItem, "sale_items");
 
     const conds = [];
     const repl = {};
@@ -427,7 +431,6 @@ async function statsSales(req, res, next) {
     }
 
     const product = String(req.query.product || "").trim();
-    const itemsTable = getTableName(SaleItem, "sale_items");
     if (product) {
       const pNum = toInt(product, 0);
       if (pNum > 0) {
@@ -484,7 +487,6 @@ async function statsSales(req, res, next) {
     const [rowsPay] = await sequelize.query(sqlPayments, { replacements: repl });
 
     const t = rowsTotals?.[0] || {};
-
     const byMethod = {};
     for (const r of rowsPay || []) {
       const k = String(r.method || "").trim().toUpperCase() || "OTHER";
@@ -503,6 +505,8 @@ async function statsSales(req, res, next) {
         payments: {
           cash: byMethod.CASH || 0,
           transfer: byMethod.TRANSFER || 0,
+          debit: byMethod.DEBIT || 0,
+          credit: byMethod.CREDIT || 0,
           card: byMethod.CARD || 0,
           qr: byMethod.QR || 0,
           other: byMethod.OTHER || 0,
@@ -576,7 +580,7 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
-// (createSale tal cual tu lógica base)
+// (createSale base)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -646,8 +650,13 @@ async function createSale(req, res, next) {
     // Branch cross-check de products (si el modelo tiene branch_id)
     if (Product?.rawAttributes?.branch_id) {
       const ids = [...new Set(normItems.map((x) => x.product_id))];
-      const prods = await Product.findAll({ where: { id: ids }, attributes: ["id", "branch_id", ...(Product.rawAttributes.is_active ? ["is_active"] : [])], transaction: t });
+      const prods = await Product.findAll({
+        where: { id: ids },
+        attributes: ["id", "branch_id", ...(Product.rawAttributes.is_active ? ["is_active"] : [])],
+        transaction: t,
+      });
       const map = new Map(prods.map((p) => [toInt(p.id, 0), p]));
+
       for (const it of normItems) {
         const p = map.get(toInt(it.product_id, 0));
         if (!p) { await t.rollback(); return res.status(400).json({ ok: false, code: "PRODUCT_NOT_FOUND", message: `Producto no existe: product_id=${it.product_id}` }); }
@@ -690,7 +699,7 @@ async function createSale(req, res, next) {
 
     const sale = await Sale.create(salePayload, { transaction: t });
 
-    // snapshots desde Product (si existe)
+    // snapshots desde Product
     const ids = [...new Set(normItems.map((x) => x.product_id))];
     const prods = await Product.findAll({
       where: { id: ids },
@@ -718,15 +727,20 @@ async function createSale(req, res, next) {
     );
 
     if (payments.length) {
+      const allowed = allowedPayMethodsSet();
       await Payment.bulkCreate(
-        payments.map((p) => ({
-          sale_id: sale.id,
-          method: normalizePayMethod(p?.method) || "OTHER",
-          amount: toFloat(p?.amount, 0),
-          paid_at: parseDateTime(p?.paid_at) || sold_at,
-          reference: String(p?.reference || "").trim() || null,
-          note: String(p?.note || "").trim() || null,
-        })),
+        payments.map((p) => {
+          const m = normalizePayMethod(p?.method) || "OTHER";
+          const method = allowed.has(m) ? m : "OTHER";
+          return {
+            sale_id: sale.id,
+            method,
+            amount: toFloat(p?.amount, 0),
+            paid_at: parseDateTime(p?.paid_at) || sold_at,
+            reference: String(p?.reference || "").trim() || null,
+            note: String(p?.note || "").trim() || null,
+          };
+        }),
         { transaction: t }
       );
     }
@@ -746,9 +760,15 @@ async function createSale(req, res, next) {
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
 // ✅ Devuelve dinero (y opcional items[] para stock/auditoría)
+//
 // Body:
 // {
-//   amount, refund_method|method, restock, reason, note, reference,
+//   amount,
+//   refund_method|method,
+//   restock,
+//   reason,
+//   note,
+//   reference,
 //   items?: [{ sale_item_id?, product_id, warehouse_id, qty, unit_price }]
 // }
 // ============================
@@ -772,8 +792,9 @@ async function createRefund(req, res, next) {
       return res.status(400).json({ ok: false, code: "BAD_AMOUNT", message: "Monto inválido" });
     }
 
-    const method = normalizePayMethod(req.body?.method || req.body?.refund_method || "CASH");
-    const allowed = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
+    const methodRaw = req.body?.method || req.body?.refund_method || "CASH";
+    const method = normalizePayMethod(methodRaw) || "CASH";
+    const allowed = allowedPayMethodsSet();
     if (!allowed.has(method)) {
       await t.rollback();
       return res.status(400).json({ ok: false, code: "BAD_METHOD", message: `method inválido. Usá: ${Array.from(allowed).join(", ")}` });
@@ -815,7 +836,10 @@ async function createRefund(req, res, next) {
     );
 
     const return_id = toInt(insReturn?.insertId, 0);
-    if (!return_id) { await t.rollback(); return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns" }); }
+    if (!return_id) {
+      await t.rollback();
+      return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns" });
+    }
 
     // 2) sale_return_payments
     await sequelize.query(
@@ -824,7 +848,7 @@ async function createRefund(req, res, next) {
       { replacements: { return_id, method, amount, reference, pnote: note }, transaction: t }
     );
 
-    // 3) opcional: items devueltos (para auditoría y futuro stock movements)
+    // 3) opcional: items devueltos
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length) {
       for (const it of items) {
@@ -839,7 +863,6 @@ async function createRefund(req, res, next) {
           return res.status(400).json({ ok: false, code: "BAD_RETURN_ITEM", message: "Item devolución inválido (product_id, warehouse_id, qty>0)" });
         }
 
-        // cross-branch warehouse
         const wh = await Warehouse.findByPk(warehouse_id, { transaction: t });
         if (!wh) { await t.rollback(); return res.status(404).json({ ok: false, code: "WAREHOUSE_NOT_FOUND", message: "Depósito inexistente." }); }
         if (toInt(wh.branch_id, 0) !== toInt(sale.branch_id, 0)) {
@@ -886,13 +909,12 @@ async function createRefund(req, res, next) {
 }
 
 /**
- * ✅ Util: stock check vía v_stock_by_branch_product
+ * ✅ Util: stock check vía v_stock_by_branch_product (columna qty)
  * Solo cuando product.track_stock=1 (si existe la columna)
  */
 async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
   if (!items.length) return;
 
-  // Cargar productos para saber track_stock
   const ids = [...new Set(items.map((x) => toInt(x.product_id, 0)).filter(Boolean))];
   const attrs = ["id"];
   if (Product?.rawAttributes?.track_stock) attrs.push("track_stock");
@@ -927,31 +949,32 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
        LIMIT 1`,
       { replacements: { branch_id, product_id }, transaction }
     );
+
     const available = Number(rows?.[0]?.qty || 0);
     if (available + 0.00001 < qty) {
-      throw Object.assign(new Error(`Stock insuficiente para producto ${product_id}. Disponible: ${available}, requerido: ${qty}`), {
-        status: 409,
-        code: "NO_STOCK",
-        data: { product_id, available, required: qty },
-      });
+      throw Object.assign(
+        new Error(`Stock insuficiente para producto ${product_id}. Disponible: ${available}, requerido: ${qty}`),
+        { status: 409, code: "NO_STOCK", data: { product_id, available, required: qty } }
+      );
     }
   }
 }
 
 // ============================
 // POST /api/v1/pos/sales/:id/exchanges
-// ✅ CAMBIO COMPLETO (con diferencia + chequeo stock)
+// ✅ CAMBIO COMPLETO (diff + stock)
+//
 // Body esperado:
 // {
 //   restock: true|false,
 //   returns: [{ sale_item_id?, product_id, warehouse_id, qty, unit_price }],
 //   takes:   [{ product_id, warehouse_id, qty, unit_price }],
-//   method: "CASH|DEBIT|CREDIT|TRANSFER|QR|OTHER", // para diferencia (pago o reintegro)
+//   method: "CASH|TRANSFER|DEBIT|CREDIT|CARD|QR|OTHER", // medio de diferencia (cobro o reintegro)
 //   reference?: string,
 //   note?: string
 // }
 // ============================
-async function createExchange(req, res, next) {
+async function createExchange(req, res) {
   const t = await sequelize.transaction();
   try {
     if (!isAdminReq(req)) {
@@ -974,7 +997,6 @@ async function createExchange(req, res, next) {
     if (!returns.length) { await t.rollback(); return res.status(400).json({ ok: false, code: "RETURNS_REQUIRED", message: "returns requerido (array no vacío)" }); }
     if (!takes.length) { await t.rollback(); return res.status(400).json({ ok: false, code: "TAKES_REQUIRED", message: "takes requerido (array no vacío)" }); }
 
-    // Validar warehouses y normalizar
     const normReturnItems = returns.map((it) => ({
       sale_item_id: toInt(it?.sale_item_id, 0) || null,
       product_id: toInt(it?.product_id, 0),
@@ -982,6 +1004,7 @@ async function createExchange(req, res, next) {
       qty: toFloat(it?.qty ?? it?.quantity, 0),
       unit_price: toFloat(it?.unit_price ?? it?.unitPrice ?? it?.price, 0),
     }));
+
     const normTakeItems = takes.map((it) => ({
       product_id: toInt(it?.product_id, 0),
       warehouse_id: toInt(it?.warehouse_id, 0),
@@ -1002,18 +1025,23 @@ async function createExchange(req, res, next) {
       }
     }
 
-    // ✅ Chequeo stock para los "takes" (solo si track_stock=1)
-    await assertStockAvailableOrThrow({ branch_id: toInt(originalSale.branch_id, 0), items: normTakeItems, transaction: t });
+    // ✅ Chequeo stock para takes
+    await assertStockAvailableOrThrow({
+      branch_id: toInt(originalSale.branch_id, 0),
+      items: normTakeItems,
+      transaction: t,
+    });
 
     const returned_amount = normReturnItems.reduce((a, it) => a + Math.max(0, it.qty * it.unit_price), 0);
     const new_total = normTakeItems.reduce((a, it) => a + Math.max(0, it.qty * it.unit_price), 0);
 
-    // diff > 0 => cliente paga diferencia
-    // diff < 0 => se devuelve diferencia
+    // diff > 0 => cliente paga
+    // diff < 0 => reintegro
     const diff = Number((new_total - returned_amount).toFixed(2));
 
-    const method = normalizePayMethod(req.body?.method || "CASH");
-    const allowed = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
+    const methodRaw = req.body?.method || "CASH";
+    const method = normalizePayMethod(methodRaw) || "CASH";
+    const allowed = allowedPayMethodsSet();
     if (!allowed.has(method)) {
       await t.rollback();
       return res.status(400).json({ ok: false, code: "BAD_METHOD", message: `method inválido. Usá: ${Array.from(allowed).join(", ")}` });
@@ -1021,10 +1049,10 @@ async function createExchange(req, res, next) {
 
     const created_by = getAuthUserId(req) || null;
 
-    // 🔁 1) Crear sale_returns SOLO si hay reintegro (diff < 0) o si querés registrar la devolución igual
-    // Para auditoría: siempre creamos sale_returns, con amount = max(0, -diff)
+    // Reintegro del cambio (solo si diff < 0)
     const refund_amount = diff < 0 ? Math.abs(diff) : 0;
 
+    // 1) sale_returns (siempre lo creamos para auditar el cambio)
     const [insReturn] = await sequelize.query(
       `INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
        VALUES (:sale_id, :amount, :restock, :reason, :note, :created_by, NOW())`,
@@ -1040,8 +1068,12 @@ async function createExchange(req, res, next) {
         transaction: t,
       }
     );
+
     const return_id = toInt(insReturn?.insertId, 0);
-    if (!return_id) { await t.rollback(); return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (cambio)" }); }
+    if (!return_id) {
+      await t.rollback();
+      return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (cambio)" });
+    }
 
     // 2) sale_return_items (lo que vuelve)
     for (const it of normReturnItems) {
@@ -1064,7 +1096,7 @@ async function createExchange(req, res, next) {
       );
     }
 
-    // 3) Si hay reintegro (diff < 0) registrar pago de devolución en sale_return_payments
+    // 3) sale_return_payments (solo si hay reintegro)
     if (refund_amount > 0) {
       await sequelize.query(
         `INSERT INTO sale_return_payments (return_id, method, amount, reference, note, created_at)
@@ -1073,7 +1105,7 @@ async function createExchange(req, res, next) {
       );
     }
 
-    // 4) Crear nueva venta (sale) por los productos que se llevan
+    // 4) Nueva venta por lo que se lleva
     const sold_at = nowDate();
     const status = "PAID";
 
@@ -1084,7 +1116,7 @@ async function createExchange(req, res, next) {
     const newSale = await Sale.create(
       {
         branch_id: originalSale.branch_id,
-        user_id: originalSale.user_id, // o created_by si querés que quede quien hizo el cambio
+        user_id: created_by || originalSale.user_id, // queda auditado quien lo hizo si existe
         customer_name: originalSale.customer_name || null,
         customer_doc: originalSale.customer_doc || null,
         customer_phone: originalSale.customer_phone || null,
@@ -1125,22 +1157,15 @@ async function createExchange(req, res, next) {
       { transaction: t }
     );
 
-    // 5) Si diff>0 => registrar payment en la nueva sale
+    // 5) Si diff>0 => payment en nueva sale
     if (diff > 0) {
       await Payment.create(
-        {
-          sale_id: newSale.id,
-          method,
-          amount: diff,
-          paid_at: sold_at,
-          reference,
-          note,
-        },
+        { sale_id: newSale.id, method, amount: diff, paid_at: sold_at, reference, note },
         { transaction: t }
       );
     }
 
-    // 6) sale_exchanges
+    // 6) sale_exchanges (tabla)
     await sequelize.query(
       `INSERT INTO sale_exchanges
         (original_sale_id, return_id, new_sale_id, original_total, returned_amount, new_total, diff, note, created_by, created_at)
@@ -1181,7 +1206,12 @@ async function createExchange(req, res, next) {
   } catch (e) {
     try { await t.rollback(); } catch {}
     const status = e?.status || 500;
-    return res.status(status).json({ ok: false, code: e?.code || "EXCHANGE_ERROR", message: e?.message || "Error cambio", data: e?.data || null });
+    return res.status(status).json({
+      ok: false,
+      code: e?.code || "EXCHANGE_ERROR",
+      message: e?.message || "Error cambio",
+      data: e?.data || null,
+    });
   }
 }
 
@@ -1212,7 +1242,10 @@ async function deleteSale(req, res, next) {
 
     const force = String(req.query.force || "0") === "1";
 
-    const [rr] = await sequelize.query(`SELECT COUNT(*) AS c FROM sale_returns WHERE sale_id = :sale_id`, { replacements: { sale_id: id }, transaction: t });
+    const [rr] = await sequelize.query(
+      `SELECT COUNT(*) AS c FROM sale_returns WHERE sale_id = :sale_id`,
+      { replacements: { sale_id: id }, transaction: t }
+    );
     const returnsCount = toInt(rr?.[0]?.c, 0);
 
     if (returnsCount > 0 && !force) {
@@ -1231,7 +1264,6 @@ async function deleteSale(req, res, next) {
          WHERE original_sale_id = :sale_id OR new_sale_id = :sale_id OR return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`,
         { replacements: { sale_id: id }, transaction: t }
       );
-
       await sequelize.query(`DELETE FROM sale_returns WHERE sale_id = :sale_id`, { replacements: { sale_id: id }, transaction: t });
     }
 
