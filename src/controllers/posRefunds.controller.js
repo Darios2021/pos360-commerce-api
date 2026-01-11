@@ -1,14 +1,16 @@
 // src/controllers/posRefunds.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (FIX DEFINITIVO return_id vacío)
 //
-// FIX DEFINITIVO (MySQL):
-// - NO depender de result.insertId/meta.insertId (varía según driver/Sequelize)
-// - Luego del INSERT, usar: SELECT LAST_INSERT_ID() dentro de la MISMA transacción
+// FIX CLAVE REAL:
+// - En MySQL + Sequelize, insertId puede NO venir en result/meta según versión.
+// - Solución robusta: luego del INSERT, leer SIEMPRE `SELECT LAST_INSERT_ID()`
+//   dentro de la MISMA transacción (misma conexión).
 // - Acepta params :id o :saleId
 // - Transacción atómica
-// - Errores claros + logs útiles
+// - Errores claros
 
 const { sequelize } = require("../models");
+const { QueryTypes } = require("sequelize");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -18,6 +20,7 @@ function toFloat(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
+
 function pickUserId(req) {
   const u = req.usuario || req.user || req.auth || null;
   const id =
@@ -32,6 +35,7 @@ function pickUserId(req) {
   const n = Number(id || 0);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
+
 function normalizeMethod(m) {
   const x = String(m || "CASH").trim().toUpperCase();
   const ok = new Set(["CASH", "TRANSFER", "CARD", "QR", "OTHER"]);
@@ -40,19 +44,13 @@ function normalizeMethod(m) {
 
 async function saleExists(saleId, t) {
   const [rows] = await sequelize.query(
-    "SELECT id, total, paid_total, status FROM sales WHERE id = ? LIMIT 1",
+    "SELECT id, branch_id, total, paid_total, status FROM sales WHERE id = ? LIMIT 1",
     { replacements: [saleId], transaction: t }
   );
   return Array.isArray(rows) ? rows[0] : null;
 }
 
-async function getLastInsertId(transaction) {
-  const [rows] = await sequelize.query("SELECT LAST_INSERT_ID() AS id", { transaction });
-  const id = Array.isArray(rows) ? rows?.[0]?.id : null;
-  const n = Number(id || 0);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
+// 🔥 FIX DEFINITIVO: INSERT + LAST_INSERT_ID()
 async function insertSaleReturn({
   saleId,
   amount,
@@ -62,8 +60,8 @@ async function insertSaleReturn({
   createdBy,
   transaction,
 }) {
-  // 1) INSERT
-  const [result, meta] = await sequelize.query(
+  // 1) Insert
+  await sequelize.query(
     `
     INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
     VALUES (?, ?, ?, ?, ?, ?, NOW())
@@ -75,24 +73,24 @@ async function insertSaleReturn({
         restock ? 1 : 0,
         reason || null,
         note || null,
-        createdBy,
+        createdBy ?? null,
       ],
       transaction,
+      // ayuda a algunos dialectos/versions
+      type: QueryTypes.INSERT,
     }
   );
 
-  // Log útil para CapRover (si sigue fallando)
-  // OJO: no loguea datos sensibles, solo forma del retorno
-  console.log("🧾 sale_returns INSERT raw:", {
-    resultType: typeof result,
-    metaType: typeof meta,
-    resultKeys: result && typeof result === "object" ? Object.keys(result) : null,
-    metaKeys: meta && typeof meta === "object" ? Object.keys(meta) : null,
+  // 2) Leer SIEMPRE el id real generado en esa conexión
+  const [rows] = await sequelize.query("SELECT LAST_INSERT_ID() AS id", {
+    transaction,
+    type: QueryTypes.SELECT,
   });
 
-  // 2) ÚNICA fuente de verdad en MySQL dentro de la misma conexión
-  const returnId = await getLastInsertId(transaction);
-  return returnId;
+  const id = Array.isArray(rows) ? rows[0]?.id : rows?.id;
+  const returnId = toInt(id, 0);
+
+  return returnId > 0 ? returnId : null;
 }
 
 async function insertReturnPayment({
@@ -117,6 +115,7 @@ async function insertReturnPayment({
         note || null,
       ],
       transaction,
+      type: QueryTypes.INSERT,
     }
   );
 }
@@ -157,7 +156,7 @@ async function insertReturnItems({ returnId, items, transaction }) {
       (return_id, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total, created_at)
     VALUES ${placeholders}
     `,
-    { replacements: flat, transaction }
+    { replacements: flat, transaction, type: QueryTypes.INSERT }
   );
 }
 
@@ -165,7 +164,6 @@ async function insertReturnItems({ returnId, items, transaction }) {
 // POST /pos/sales/:id/refunds
 // ============================
 async function createRefund(req, res) {
-  // soporta :id o :saleId
   const saleId = toInt(req.params.id ?? req.params.saleId ?? req.params.sale_id, 0);
   if (!saleId) {
     return res.status(400).json({ ok: false, code: "BAD_SALE_ID", message: "saleId inválido" });
@@ -173,6 +171,7 @@ async function createRefund(req, res) {
 
   const amount = toFloat(req.body?.amount, 0);
   const restock = req.body?.restock === false ? false : true;
+
   const reason = String(req.body?.reason || "").trim() || null;
   const note = String(req.body?.note || "").trim() || null;
 
@@ -231,13 +230,7 @@ async function createRefund(req, res) {
     return res.json({
       ok: true,
       message: "Devolución registrada",
-      data: {
-        return_id: returnId,
-        sale_id: saleId,
-        amount,
-        method,
-        reference,
-      },
+      data: { return_id: returnId, sale_id: saleId, amount, method, reference },
     });
   } catch (err) {
     try { await t.rollback(); } catch {}
@@ -254,12 +247,12 @@ async function createRefund(req, res) {
         : err?.message === "ITEM_INVALID_QTY_OR_PRICE"
         ? "Items inválidos: qty debe ser > 0 y unit_price >= 0"
         : err?.message === "RETURN_ID_EMPTY_AFTER_INSERT"
-        ? "No se pudo obtener return_id luego del INSERT (LAST_INSERT_ID devolvió NULL)."
+        ? "No se pudo obtener return_id luego del INSERT (LAST_INSERT_ID devolvió vacío)."
         : err?.message || "Error registrando devolución";
 
     return res.status(500).json({
       ok: false,
-      code: "REFUND_CREATE_FAILED",
+      code: "RETURN_INSERT_FAILED",
       message: msg,
     });
   }
@@ -304,7 +297,7 @@ async function listRefundsBySale(req, res) {
       WHERE sr.sale_id = ?
       ORDER BY sr.id DESC
       `,
-      { replacements: [saleId] }
+      { replacements: [saleId], type: QueryTypes.SELECT }
     );
 
     return res.json({ ok: true, data: rows || [] });
