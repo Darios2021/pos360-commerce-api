@@ -258,11 +258,6 @@ async function optionsCustomers(req, res) {
 /**
  * PRODUCTS: busca productos
  * query: q, limit, branch_id (opcional)
- *
- * ✅ FIX:
- * - SIEMPRE filtra products.is_active=1
- * - View v_stock_by_branch_product para mostrar stock y filtrar sin stock si track_stock=1
- * - Devuelve stock
  */
 async function optionsProducts(req, res) {
   try {
