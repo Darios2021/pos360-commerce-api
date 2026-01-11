@@ -271,12 +271,12 @@ async function optionsProducts(req, res) {
     const branchId = toInt(req.query.branch_id, 0) || null;
 
     const Product = pickModel("Product", "Products", "Producto", "Productos");
-    const sequelize = models?.sequelize || models?.Sequelize?.sequelize;
+    const seq = models?.sequelize || models?.Sequelize?.sequelize;
 
     if (!Product) return fail(res, 501, "Modelo Product no disponible para optionsProducts");
 
     // ✅ Preferimos VIEW si hay branch
-    if (sequelize && branchId) {
+    if (seq && branchId) {
       try {
         const term = normStr(q);
         const like = `%${term}%`;
@@ -337,7 +337,7 @@ async function optionsProducts(req, res) {
             LIMIT :limit
           `;
 
-        const [rows] = await sequelize.query(sql, {
+        const [rows] = await seq.query(sql, {
           replacements: { branch_id: branchId, term, like, limit },
         });
 

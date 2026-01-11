@@ -1,14 +1,14 @@
 // src/controllers/posSales.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (RESPETA TU BD REAL)
-// NOTA: sale_refunds es VIEW => SOLO LECTURA
+// NOTA: SaleRefund (sale_refunds) es VIEW => SOLO LECTURA
 //
 // Incluye:
-// - GET /pos/sales (listSales) con filtros robustos SIN duplicar
-// - GET /pos/sales/stats (statsSales) neto vs refunds
+// - GET /pos/sales (listSales) con filtros robustos SIN duplicar por joins
+// - GET /pos/sales/stats (statsSales) neto vs refunds(view)
 // - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
-// - POST /pos/sales (createSale)
-// - DELETE /pos/sales/:id (deleteSale)
-// - POST /pos/sales/:id/refunds (createRefund) ✅ con opcional items[] -> sale_return_items
+// - POST /pos/sales (createSale) (creación estándar con items requerido)
+// - DELETE /pos/sales/:id (deleteSale) (con force=1 y protección por returns)
+// - POST /pos/sales/:id/refunds (createRefund) ✅ items opcional
 // - POST /pos/sales/:id/exchanges (createExchange) ✅ cambio completo (return + new sale + diff + stock)
 
 const { Op, literal } = require("sequelize");
@@ -25,6 +25,9 @@ const {
   SaleExchange,
 } = require("../models");
 
+// =========================
+// Helpers base
+// =========================
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
@@ -48,19 +51,18 @@ function upper(v) {
 
 /**
  * ✅ Normaliza métodos (acepta DEBIT/CREDIT/CARD sin romper)
- * Devolvemos el método en UPPER, sin mapear a CARD para no perder granularidad
+ * Devuelve UPPER sin mapear a CARD (no perdemos granularidad)
  */
 function normalizePayMethod(v) {
   const x = String(v || "").trim().toUpperCase();
   return x || "";
 }
-
 function allowedPayMethodsSet() {
   return new Set(["CASH", "TRANSFER", "DEBIT", "CREDIT", "CARD", "QR", "OTHER"]);
 }
 
 /**
- * 🔐 Obtiene user_id desde middleware o JWT (fallback)
+ * 🔐 user_id desde middleware o JWT (fallback)
  */
 function getAuthUserId(req) {
   const candidates = [
@@ -112,7 +114,8 @@ function getAuthUserId(req) {
 }
 
 /**
- * ✅ branch_id desde el usuario/contexto (no del query salvo admin en list/stats)
+ * ✅ branch_id desde el usuario/contexto
+ * (no del query salvo admin en list/stats)
  */
 function getAuthBranchId(req) {
   return (
@@ -204,9 +207,9 @@ function getTableName(model, fallback) {
   }
 }
 
-/**
- * ✅ Base where: branch/status/from/to/q + seller_id + customer
- */
+// ============================
+// Construcción de filtros
+// ============================
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
 
@@ -240,7 +243,7 @@ function buildWhereFromQuery(req) {
   const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   if (seller_id > 0) where.user_id = seller_id;
 
-  // customer
+  // customer (id o texto)
   const customer = req.query.customer;
   if (customer != null && String(customer).trim()) {
     const cStr = String(customer).trim();
@@ -282,7 +285,7 @@ function buildWhereFromQuery(req) {
 }
 
 /**
- * ✅ List filters SIN duplicar por joins:
+ * ✅ Filtros sin duplicar por joins:
  * - pay_method: EXISTS payments
  * - product: EXISTS sale_items
  */
@@ -349,7 +352,7 @@ async function listSales(req, res, next) {
     const include = [];
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
-    const salePaymentsAs = findAssocAlias(Sale, Payment); // útil para UI
+    const salePaymentsAs = findAssocAlias(Sale, Payment);
 
     if (Branch && saleBranchAs) include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
     if (User && saleUserAs) include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
@@ -376,8 +379,8 @@ async function listSales(req, res, next) {
 
 /**
  * ✅ Stats NETO:
- * - total vendido NETO (SUM(total) - SUM(refunds))
- * - total cobrado NETO (SUM(paid_total) - SUM(refunds))
+ * - total_sum = SUM(total) - SUM(refunds(view))
+ * - paid_sum  = SUM(paid_total) - SUM(refunds(view))
  */
 async function statsSales(req, res, next) {
   try {
@@ -563,7 +566,7 @@ async function getSaleById(req, res, next) {
       refunds = await SaleRefund.findAll({ where: { sale_id: id }, order: [["created_at", "DESC"]] });
     }
 
-    // Exchanges (si existe modelo)
+    // Exchanges
     let exchanges = [];
     if (SaleExchange) {
       exchanges = await SaleExchange.findAll({
@@ -580,7 +583,6 @@ async function getSaleById(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales
-// (createSale base)
 // ============================
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
@@ -697,6 +699,11 @@ async function createSale(req, res, next) {
       salePayload.sale_number = req.body.sale_number.trim();
     }
 
+    // extra campos si existen
+    if (Sale?.rawAttributes?.customer_doc && req.body?.customer_doc != null) salePayload.customer_doc = String(req.body.customer_doc || "").trim() || null;
+    if (Sale?.rawAttributes?.customer_phone && req.body?.customer_phone != null) salePayload.customer_phone = String(req.body.customer_phone || "").trim() || null;
+    if (Sale?.rawAttributes?.note && req.body?.note != null) salePayload.note = String(req.body.note || "").trim() || null;
+
     const sale = await Sale.create(salePayload, { transaction: t });
 
     // snapshots desde Product
@@ -759,7 +766,7 @@ async function createSale(req, res, next) {
 
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
-// ✅ Devuelve dinero (y opcional items[] para stock/auditoría)
+// ✅ Devolución de dinero (items opcional)
 //
 // Body:
 // {
@@ -910,7 +917,7 @@ async function createRefund(req, res, next) {
 
 /**
  * ✅ Util: stock check vía v_stock_by_branch_product (columna qty)
- * Solo cuando product.track_stock=1 (si existe la columna)
+ * Solo cuando product.track_stock=1 (si existe)
  */
 async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
   if (!items.length) return;
@@ -962,17 +969,7 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
 
 // ============================
 // POST /api/v1/pos/sales/:id/exchanges
-// ✅ CAMBIO COMPLETO (diff + stock)
-//
-// Body esperado:
-// {
-//   restock: true|false,
-//   returns: [{ sale_item_id?, product_id, warehouse_id, qty, unit_price }],
-//   takes:   [{ product_id, warehouse_id, qty, unit_price }],
-//   method: "CASH|TRANSFER|DEBIT|CREDIT|CARD|QR|OTHER", // medio de diferencia (cobro o reintegro)
-//   reference?: string,
-//   note?: string
-// }
+// ✅ CAMBIO COMPLETO (return + new sale + diff + stock)
 // ============================
 async function createExchange(req, res) {
   const t = await sequelize.transaction();
@@ -1113,25 +1110,26 @@ async function createExchange(req, res) {
     const paid_total = diff > 0 ? diff : 0;
     const change_total = 0;
 
-    const newSale = await Sale.create(
-      {
-        branch_id: originalSale.branch_id,
-        user_id: created_by || originalSale.user_id, // queda auditado quien lo hizo si existe
-        customer_name: originalSale.customer_name || null,
-        customer_doc: originalSale.customer_doc || null,
-        customer_phone: originalSale.customer_phone || null,
-        status,
-        sold_at,
-        subtotal: new_total,
-        discount_total: 0,
-        tax_total: 0,
-        total: new_total,
-        paid_total,
-        change_total,
-        note: note || "Cambio",
-      },
-      { transaction: t }
-    );
+    const newSalePayload = {
+      branch_id: originalSale.branch_id,
+      user_id: created_by || originalSale.user_id,
+      customer_name: originalSale.customer_name || null,
+      status,
+      sold_at,
+      subtotal: new_total,
+      discount_total: 0,
+      tax_total: 0,
+      total: new_total,
+      paid_total,
+      change_total,
+    };
+
+    // Campos opcionales si existen
+    if (Sale?.rawAttributes?.customer_doc) newSalePayload.customer_doc = originalSale.customer_doc || null;
+    if (Sale?.rawAttributes?.customer_phone) newSalePayload.customer_phone = originalSale.customer_phone || null;
+    if (Sale?.rawAttributes?.note) newSalePayload.note = note || "Cambio";
+
+    const newSale = await Sale.create(newSalePayload, { transaction: t });
 
     // snapshots desde Product
     const takeIds = [...new Set(normTakeItems.map((x) => x.product_id))];
