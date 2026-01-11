@@ -1,13 +1,12 @@
 // src/controllers/posRefunds.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FIX DEFINITIVO return_id vacío)
+// ✅ COPY-PASTE FINAL COMPLETO (FIX REAL return_id vacío)
 //
-// FIX CLAVE REAL:
-// - En MySQL + Sequelize, insertId puede NO venir en result/meta según versión.
-// - Solución robusta: luego del INSERT, leer SIEMPRE `SELECT LAST_INSERT_ID()`
-//   dentro de la MISMA transacción (misma conexión).
-// - Acepta params :id o :saleId
-// - Transacción atómica
-// - Errores claros
+// FIX CLAVE:
+// - Con QueryTypes.SELECT, sequelize.query() devuelve DIRECTO un array (rows),
+//   NO [rows, meta]. No hay que destructurar.
+// - LAST_INSERT_ID() se lee como rows[0].id.
+// - Transacción atómica.
+// - Soporta params :id / :saleId.
 
 const { sequelize } = require("../models");
 const { QueryTypes } = require("sequelize");
@@ -50,7 +49,6 @@ async function saleExists(saleId, t) {
   return Array.isArray(rows) ? rows[0] : null;
 }
 
-// 🔥 FIX DEFINITIVO: INSERT + LAST_INSERT_ID()
 async function insertSaleReturn({
   saleId,
   amount,
@@ -60,7 +58,7 @@ async function insertSaleReturn({
   createdBy,
   transaction,
 }) {
-  // 1) Insert
+  // 1) Insert (si falla, lanza error)
   await sequelize.query(
     `
     INSERT INTO sale_returns (sale_id, amount, restock, reason, note, created_by, created_at)
@@ -76,19 +74,29 @@ async function insertSaleReturn({
         createdBy ?? null,
       ],
       transaction,
-      // ayuda a algunos dialectos/versions
       type: QueryTypes.INSERT,
     }
   );
 
-  // 2) Leer SIEMPRE el id real generado en esa conexión
-  const [rows] = await sequelize.query("SELECT LAST_INSERT_ID() AS id", {
+  // 2) 🔥 FIX REAL: con QueryTypes.SELECT NO se destructura
+  const rows = await sequelize.query("SELECT LAST_INSERT_ID() AS id", {
     transaction,
     type: QueryTypes.SELECT,
   });
 
-  const id = Array.isArray(rows) ? rows[0]?.id : rows?.id;
+  const id = Array.isArray(rows) ? rows[0]?.id : null;
   const returnId = toInt(id, 0);
+
+  // debug útil por si vuelve a pasar
+  if (!returnId) {
+    console.error("❌ LAST_INSERT_ID() devolvió vacío", {
+      saleId,
+      amount,
+      restock,
+      createdBy,
+      rows,
+    });
+  }
 
   return returnId > 0 ? returnId : null;
 }
@@ -136,15 +144,7 @@ async function insertReturnItems({ returnId, items, transaction }) {
     if (!product_id || !warehouse_id) throw new Error("ITEM_INVALID_PRODUCT_OR_WAREHOUSE");
     if (!(qty > 0) || unit_price < 0) throw new Error("ITEM_INVALID_QTY_OR_PRICE");
 
-    values.push([
-      returnId,
-      sale_item_id,
-      product_id,
-      warehouse_id,
-      qty,
-      unit_price,
-      line_total,
-    ]);
+    values.push([returnId, sale_item_id, product_id, warehouse_id, qty, unit_price, line_total]);
   }
 
   const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", ");
@@ -268,7 +268,7 @@ async function listRefundsBySale(req, res) {
   }
 
   try {
-    const [rows] = await sequelize.query(
+    const rows = await sequelize.query(
       `
       SELECT
         sr.id,
