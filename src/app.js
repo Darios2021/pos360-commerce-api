@@ -3,7 +3,8 @@
 // - Mantiene tu estructura: module.exports = { createApp }
 // - CORS robusto + X-Branch-Id
 // - Request logger
-// - Root
+// - Root con build/version
+// - ✅ /api/v1/_version (para verificar deploy)
 // - ✅ /api/v1/public (ecommerce)
 // - 404
 // - ✅ Error handler con sqlMessage real (db)
@@ -19,6 +20,14 @@ function isMiddleware(fn) {
 
 function createApp() {
   const app = express();
+
+  // ✅ Build/version visibles para verificar si estás pegando al servicio nuevo
+  const BUILD_ID =
+    process.env.BUILD_ID ||
+    process.env.CAPROVER_GIT_COMMIT_SHA ||
+    process.env.GIT_SHA ||
+    "dev";
+  const SERVICE_NAME = process.env.SERVICE_NAME || "pos360-commerce-api";
 
   // =====================
   // CORS
@@ -57,6 +66,13 @@ function createApp() {
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+  // ✅ Header global para identificar el build
+  app.use((req, res, next) => {
+    res.setHeader("X-Service-Name", SERVICE_NAME);
+    res.setHeader("X-Build-Id", BUILD_ID);
+    next();
+  });
+
   // =====================
   // ✅ Request logger (DEBUG)
   // =====================
@@ -72,7 +88,9 @@ function createApp() {
 
     res.on("finish", () => {
       const ms = Date.now() - started;
-      console.log(`✅ ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`);
+      console.log(
+        `✅ ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`
+      );
     });
 
     next();
@@ -83,8 +101,20 @@ function createApp() {
   // =====================
   app.get("/", (req, res) => {
     res.json({
-      name: "pos360-api",
+      name: SERVICE_NAME,
       status: "online",
+      env: process.env.NODE_ENV || "unknown",
+      build: BUILD_ID,
+      time: new Date().toISOString(),
+    });
+  });
+
+  // ✅ Endpoint para verificar deploy sin auth
+  app.get("/api/v1/_version", (req, res) => {
+    res.json({
+      ok: true,
+      service: SERVICE_NAME,
+      build: BUILD_ID,
       env: process.env.NODE_ENV || "unknown",
       time: new Date().toISOString(),
     });
@@ -96,7 +126,10 @@ function createApp() {
   if (!isMiddleware(v1Routes)) {
     console.error("❌ v1Routes inválido. Debe exportar un router middleware.");
     console.error("   typeof:", typeof v1Routes);
-    console.error("   keys:", v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null);
+    console.error(
+      "   keys:",
+      v1Routes && typeof v1Routes === "object" ? Object.keys(v1Routes) : null
+    );
     throw new Error("INVALID_V1_ROUTES_EXPORT");
   }
 
