@@ -1,237 +1,149 @@
 // src/services/mercadopago.service.js
-// ✅ COPY-PASTE FINAL COMPLETO (SIN AXIOS) - Node 20+
-// - Usa fetch nativo
-// - Errores claros
-// - createPreference REDIRECT robusto
-// - Sanitiza back_urls / notification_url (https only)
-// - Evita "PolicyAgent UNAUTHORIZED" por URLs inválidas
+// ✅ COPY-PASTE FINAL (SIN AXIOS) - Node 18+ usa fetch nativo
 //
-// ENV recomendados:
-//   SHOP_PUBLIC_URL=https://sanjuantecnologia.com
-//   SHOP_MP_WEBHOOK_URL=https://TU_API/api/v1/ecom/mercadopago/webhook (opcional)
-//   MP_INTEGRATOR_ID=... (opcional)
+// - Evita crash por "Cannot find module 'axios'"
+// - Maneja errores MP con payload claro
+// - Soporta modo REDIRECT (init_point / sandbox_init_point)
 
-const MP_API = "https://api.mercadopago.com";
-
-// =====================
-// Utils
-// =====================
-function isHttpUrl(u) {
-  if (!u) return false;
-  try {
-    const url = new URL(String(u));
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
+function getAccessToken() {
+  const tok = process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "";
+  return String(tok || "").trim();
 }
 
-function toHttpsUrl(u) {
-  if (!u) return "";
-  if (!isHttpUrl(u)) return "";
-  try {
-    const url = new URL(String(u));
-
-    const isLocal =
-      url.hostname === "localhost" ||
-      url.hostname === "127.0.0.1" ||
-      url.hostname.endsWith(".local");
-
-    if (!isLocal) url.protocol = "https:";
-    return url.toString();
-  } catch {
-    return "";
-  }
+function mpIsEnabled() {
+  const token = getAccessToken();
+  return !!token;
 }
 
-function joinUrl(base, path) {
-  const b = String(base || "").replace(/\/+$/, "");
-  const p = String(path || "").replace(/^\/+/, "");
-  return `${b}/${p}`;
-}
-
-function cleanObj(o) {
-  const out = {};
-  Object.keys(o || {}).forEach((k) => {
-    const v = o[k];
-    if (v === undefined || v === null || v === "") return;
-    out[k] = v;
-  });
-  return out;
-}
-
-function pickPublicShopUrl() {
-  const envUrl = String(process.env.SHOP_PUBLIC_URL || "").trim();
-  if (envUrl && isHttpUrl(envUrl)) return envUrl.replace(/\/+$/, "");
-  return "";
-}
-
-function buildRedirectUrls() {
-  const base = pickPublicShopUrl();
-  const success = base ? joinUrl(base, "shop/checkout/success") : "";
-  const pending = base ? joinUrl(base, "shop/checkout/pending") : "";
-  const failure = base ? joinUrl(base, "shop/checkout/failure") : "";
+function buildMpHeaders() {
+  const token = getAccessToken();
+  if (!token) return null;
 
   return {
-    success: toHttpsUrl(success),
-    pending: toHttpsUrl(pending),
-    failure: toHttpsUrl(failure),
-  };
-}
-
-function buildWebhookUrl() {
-  const w = String(process.env.SHOP_MP_WEBHOOK_URL || "").trim();
-  const https = toHttpsUrl(w);
-  return https; // si no es válida -> ""
-}
-
-async function readJsonSafe(res) {
-  const text = await res.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
-  }
-}
-
-// =====================
-// Fetch MP
-// =====================
-async function mpFetch(method, path, accessToken, data) {
-  const token = String(accessToken || "").trim();
-  if (!token) {
-    const err = new Error("MercadoPago access token missing");
-    err.code = "MP_TOKEN_MISSING";
-    err.statusCode = 500;
-    throw err;
-  }
-
-  const headers = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-
-  if (process.env.MP_INTEGRATOR_ID) {
-    headers["x-integrator-id"] = String(process.env.MP_INTEGRATOR_ID).trim();
-  }
-
-  let res;
-  try {
-    res = await fetch(`${MP_API}${path}`, {
-      method: String(method || "GET").toUpperCase(),
-      headers,
-      body: data ? JSON.stringify(data) : undefined,
-    });
-  } catch (e) {
-    const err = new Error(`MercadoPago network/unknown error: ${e?.message || e}`);
-    err.code = "MP_NETWORK_ERROR";
-    err.statusCode = 502;
-    err.payload = { message: e?.message || String(e) };
-    throw err;
-  }
-
-  const payload = await readJsonSafe(res);
-
-  if (res.ok) return payload;
-
-  const err = new Error(`MercadoPago API error (${res.status})`);
-  err.code = "MP_API_ERROR";
-  err.statusCode = res.status;
-  err.payload = payload;
-  throw err;
 }
 
-// =====================
-// Public API
-// =====================
-async function createPreference({
-  accessToken,
-  orderId,
-  items = [],
-  payer = null,
-  shippingCost = 0,
-  metadata = {},
-  statementDescriptor = null,
-} = {}) {
-  const back = buildRedirectUrls();
-  const webhook = buildWebhookUrl();
-
-  // ✅ Esto evita policy por URL base vacía
-  if (!back.success || !back.pending || !back.failure) {
-    const err = new Error(
-      "SHOP_PUBLIC_URL inválido o ausente. Definí SHOP_PUBLIC_URL=https://tudominio para MercadoPago."
-    );
-    err.code = "MP_BAD_PUBLIC_URL";
-    err.statusCode = 500;
-    throw err;
+async function mpFetch(path, { method = "GET", body = null, params = null } = {}) {
+  const headers = buildMpHeaders();
+  if (!headers) {
+    const e = new Error("MercadoPago no configurado: falta MERCADOPAGO_ACCESS_TOKEN / MP_ACCESS_TOKEN");
+    e.code = "MP_NOT_CONFIGURED";
+    e.statusCode = 400;
+    e.payload = { message: e.message };
+    throw e;
   }
 
-  const pref = {
-    items: (items || [])
-      .filter(Boolean)
-      .map((it) => ({
-        title: String(it.title || it.name || "Producto").slice(0, 256),
-        quantity: Math.max(1, parseInt(it.quantity ?? it.qty ?? 1, 10) || 1),
-        currency_id: String(it.currency_id || "ARS"),
-        unit_price: Number(it.unit_price ?? it.price ?? 0) || 0,
-      })),
+  // Base URL oficial MP
+  const base = "https://api.mercadopago.com";
+  const url = new URL(base + path);
 
-    payer: payer
-      ? cleanObj({
-          name: payer.name ? String(payer.name).slice(0, 128) : undefined,
-          surname: payer.surname ? String(payer.surname).slice(0, 128) : undefined,
-          email: payer.email ? String(payer.email).slice(0, 128) : undefined,
-        })
-      : undefined,
+  if (params && typeof params === "object") {
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null || v === "") continue;
+      url.searchParams.set(k, String(v));
+    }
+  }
 
-    back_urls: {
-      success: back.success,
-      pending: back.pending,
-      failure: back.failure,
-    },
-
-    auto_return: "approved",
-
-    // ✅ Evitamos policy si webhook no es https válido
-    notification_url: webhook || undefined,
-
-    external_reference: orderId ? String(orderId) : undefined,
-
-    metadata: cleanObj({
-      ...(metadata || {}),
-      order_id: orderId ? String(orderId) : undefined,
-    }),
-
-    statement_descriptor: statementDescriptor ? String(statementDescriptor).slice(0, 22) : undefined,
-  };
-
-  const ship = Number(shippingCost || 0);
-  if (ship > 0) {
-    pref.items.push({
-      title: "Envío",
-      quantity: 1,
-      currency_id: "ARS",
-      unit_price: ship,
+  let resp;
+  try {
+    resp = await fetch(url.toString(), {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
     });
+  } catch (networkErr) {
+    const e = new Error("No se pudo conectar con MercadoPago");
+    e.code = "MP_NETWORK_ERROR";
+    e.statusCode = 502;
+    e.payload = { message: networkErr?.message || String(networkErr) };
+    throw e;
   }
 
-  // limpieza final
-  Object.keys(pref).forEach((k) => {
-    if (pref[k] === undefined) delete pref[k];
-  });
+  let data = null;
+  const text = await resp.text().catch(() => "");
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text || null;
+  }
 
-  const data = await mpFetch("POST", "/checkout/preferences", accessToken, pref);
+  if (!resp.ok) {
+    const e = new Error(`MercadoPago API error (${resp.status})`);
+    e.code = "MP_API_ERROR";
+    e.statusCode = resp.status;
 
-  return {
-    id: data?.id || null,
-    init_point: data?.init_point || null,
-    sandbox_init_point: data?.sandbox_init_point || null,
-    raw: data,
+    // MP a veces trae {message, error, status, cause, ...}
+    e.payload = data || { message: "Error MercadoPago" };
+    throw e;
+  }
+
+  return data;
+}
+
+/**
+ * Crea preferencia de pago (REDIRECT).
+ * @param {Object} opts
+ * @returns {Object} { preference, redirect_url }
+ */
+async function createCheckoutPreference(opts = {}) {
+  const {
+    external_reference = null,
+    payer = null,
+    items = [],
+    back_urls = null,
+    notification_url = null,
+    auto_return = "approved",
+    statement_descriptor = null,
+    expires = false,
+    expiration_date_from = null,
+    expiration_date_to = null,
+    metadata = null,
+  } = opts;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    const e = new Error("MercadoPago: items vacío");
+    e.code = "MP_BAD_REQUEST";
+    e.statusCode = 400;
+    e.payload = { message: e.message };
+    throw e;
+  }
+
+  const body = {
+    items: items.map((it) => ({
+      title: String(it.title || it.name || "Producto"),
+      quantity: Number(it.quantity || it.qty || 1),
+      unit_price: Number(it.unit_price || it.price || 0),
+      currency_id: it.currency_id || "ARS",
+    })),
+    external_reference: external_reference ? String(external_reference) : undefined,
+    payer: payer || undefined,
+    back_urls: back_urls || undefined,
+    notification_url: notification_url || undefined,
+    auto_return,
+    statement_descriptor: statement_descriptor || undefined,
+    expires,
+    expiration_date_from: expiration_date_from || undefined,
+    expiration_date_to: expiration_date_to || undefined,
+    metadata: metadata || undefined,
   };
+
+  // Limpieza de undefined (MP a veces rompe si mandás undefined)
+  Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
+
+  const preference = await mpFetch("/checkout/preferences", { method: "POST", body });
+
+  const redirect_url =
+    preference?.init_point ||
+    preference?.sandbox_init_point ||
+    null;
+
+  return { preference, redirect_url };
 }
 
 module.exports = {
+  mpIsEnabled,
   mpFetch,
-  createPreference,
+  createCheckoutPreference,
 };
