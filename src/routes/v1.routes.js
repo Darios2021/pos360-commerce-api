@@ -3,6 +3,7 @@
 // + ✅ GET /api/v1/_version
 // + (opcional) GET /api/v1/_whoami
 // + ✅ Ecommerce Checkout público: POST /api/v1/ecom/checkout
+// + ✅ Admin Shop Orders: GET /api/v1/admin/shop/orders (+/:id)
 //
 // FIX FINAL:
 // - Ya NO montamos posRefundsRoutes / posExchangesRoutes
@@ -67,6 +68,9 @@ const adminUsersRoutes = require("./adminUsers.routes");
 // ✅ ADMIN SHOP BRANDING
 const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
 
+// ✅ ADMIN SHOP ORDERS (INBOX)
+const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
+
 function safeUse(path, ...mws) {
   for (const mw of mws) {
     if (typeof mw !== "function") {
@@ -119,6 +123,9 @@ safeUse("/me", requireAuth, meRoutes);
 // Admin
 // =========================
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
+
+// Admin Shop (Branding + Orders)
 safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes);
+safeUse("/admin/shop", requireAuth, adminShopOrdersRoutes);
 
 module.exports = router;
