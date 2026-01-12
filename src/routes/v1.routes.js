@@ -2,6 +2,7 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // + ✅ GET /api/v1/_version
 // + (opcional) GET /api/v1/_whoami
+// + ✅ Ecommerce Checkout público: POST /api/v1/ecom/checkout
 //
 // FIX FINAL:
 // - Ya NO montamos posRefundsRoutes / posExchangesRoutes
@@ -37,8 +38,11 @@ router.get("/_whoami", requireAuth, (req, res) => {
 const healthRoutes = require("./health.routes");
 const authRoutes = require("./auth.routes");
 
-// 🛒 Ecommerce Public
+// 🛒 Ecommerce Public (catálogo, producto, etc.)
 const publicEcomRoutes = require("./public.routes");
+
+// 🧾 Ecommerce Checkout (SIN AUTH)
+const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 
 // =========================
 // Protected
@@ -85,6 +89,10 @@ safeUse("/auth", authRoutes);
 
 // 🛒 Ecommerce público (SIN AUTH)
 safeUse("/public", publicEcomRoutes);
+
+// ✅ Checkout público (SIN AUTH)
+// POST /api/v1/ecom/checkout
+safeUse("/ecom", ecomCheckoutRoutes);
 
 // =========================
 // Protected
