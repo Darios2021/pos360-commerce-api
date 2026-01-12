@@ -1,13 +1,13 @@
 // src/app.js
 // ✅ COPY-PASTE FINAL COMPLETO
-// - Mantiene tu estructura: module.exports = { createApp }
-// - CORS robusto + X-Branch-Id
+// - Mantiene: module.exports = { createApp }
+// - CORS robusto (incluye cache-control/pragma para DevTools + WebViews)
 // - Request logger
 // - Root
 // - ✅ /api/v1 (routes)
 // - 404
 // - ✅ Error handler con sqlMessage real (db)
-// - ✅ Headers globales: X-Service-Name / X-Build-Id (para verificar deploy real)
+// - ✅ Headers globales: X-Service-Name / X-Build-Id
 
 const express = require("express");
 const cors = require("cors");
@@ -24,24 +24,54 @@ function createApp() {
   // =====================
   // CORS
   // =====================
-  const allowedOrigins = (process.env.CORS_ORIGINS || "")
+  const allowedOriginsRaw = (process.env.CORS_ORIGINS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const allowNullOrigin = allowedOriginsRaw.includes("null");
+  const allowedOrigins = allowedOriginsRaw.filter((o) => o !== "null");
+
   const corsOptions = {
     origin: (origin, callback) => {
+      // server-to-server / curl (sin Origin)
       if (!origin) return callback(null, true);
+
+      // algunos WebViews / file:// envían origin = "null"
+      if (origin === "null") return callback(null, !!allowNullOrigin);
+
+      // dev local
       if (origin.includes("localhost") || origin.includes("127.0.0.1")) return callback(null, true);
 
-      if (allowedOrigins.length === 0 || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+      if (
+        allowedOrigins.length === 0 ||
+        allowedOrigins.includes("*") ||
+        allowedOrigins.includes(origin)
+      ) {
         return callback(null, true);
       }
+
       return callback(new Error(`CORS blocked by pos360: ${origin}`));
     },
+
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Branch-Id"],
+
+    // ✅ FIX CLAVE: permitir headers que Chrome/IG WebView mandan en preflight
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Branch-Id",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+      "Cache-Control",
+      "Pragma",
+      "Expires",
+    ],
+
+    // (opcional) por compat con proxies viejos
+    optionsSuccessStatus: 204,
   };
 
   app.use(cors(corsOptions));
