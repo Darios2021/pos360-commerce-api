@@ -1,4 +1,5 @@
 // src/controllers/ecomCheckout.controller.js
+// ✅ COPY-PASTE FINAL (FIX insertId vacío + fallback LAST_INSERT_ID)
 // ✅ Checkout público mínimo (DB pos360)
 // - Crea/actualiza customer por email
 // - Valida stock por sucursal (pickup) o elige sucursal que cumpla (delivery)
@@ -32,6 +33,19 @@ function unitPriceFromProductRow(p) {
 function genPublicCode() {
   // 12 chars alfanum (compacto tipo ML)
   return crypto.randomBytes(8).toString("hex").slice(0, 12);
+}
+
+// ✅ FIX: sequelize.query INSERT puede devolver insertId en [0] o [1]
+function pickInsertId(qres) {
+  const a = Array.isArray(qres) ? qres[0] : qres;
+  const b = Array.isArray(qres) ? qres[1] : null;
+
+  const id =
+    (a && typeof a === "object" && Number(a.insertId)) ||
+    (b && typeof b === "object" && Number(b.insertId)) ||
+    null;
+
+  return id ? Number(id) : null;
 }
 
 async function fetchActiveBranches(t) {
@@ -144,7 +158,7 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
     return id;
   }
 
-  const [ins] = await sequelize.query(
+  const qres = await sequelize.query(
     `
     INSERT INTO ecom_customers (email, first_name, last_name, phone, doc_number, created_at)
     VALUES (:email, :first_name, :last_name, :phone, :doc_number, CURRENT_TIMESTAMP)
@@ -161,17 +175,19 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
     }
   );
 
-  // mysql2 / sequelize.query: insertId suele venir en metadata
-  const insertId = ins?.insertId ? Number(ins.insertId) : null;
+  // ✅ FIX: insertId robusto
+  let insertId = pickInsertId(qres);
+
+  // fallback: buscar por email (sigue siendo útil si insertId viene raro)
   if (!insertId) {
     const [r2] = await sequelize.query(`SELECT id FROM ecom_customers WHERE email = :email LIMIT 1`, {
       replacements: { email: em },
       transaction: t,
     });
-    return r2?.[0]?.id ? Number(r2[0].id) : null;
+    insertId = r2?.[0]?.id ? Number(r2[0].id) : null;
   }
 
-  return insertId;
+  return insertId || null;
 }
 
 function normalizeProvider(method) {
@@ -199,7 +215,7 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
 
   const notes = String(payload.notes || "").trim() || null;
 
-  const [ins] = await sequelize.query(
+  const qres = await sequelize.query(
     `
     INSERT INTO ecom_orders
       (public_code, branch_id, customer_id, status, currency,
@@ -238,7 +254,14 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
     }
   );
 
-  const order_id = ins?.insertId ? Number(ins.insertId) : null;
+  // ✅ FIX: insertId robusto + fallback LAST_INSERT_ID()
+  let order_id = pickInsertId(qres);
+
+  if (!order_id) {
+    const [r] = await sequelize.query(`SELECT LAST_INSERT_ID() AS id`, { transaction: t });
+    order_id = r?.[0]?.id ? Number(r[0].id) : null;
+  }
+
   if (!order_id) throw new Error("No se pudo crear el pedido (insertId vacío).");
 
   return { order_id, public_code };
@@ -275,7 +298,7 @@ async function createOrderItems({ order_id, items, productsById, t }) {
 }
 
 async function createPayment({ order_id, provider, amount, t }) {
-  const [ins] = await sequelize.query(
+  const qres = await sequelize.query(
     `
     INSERT INTO ecom_payments (order_id, provider, status, amount, created_at)
     VALUES (:order_id, :provider, 'created', :amount, CURRENT_TIMESTAMP)
@@ -283,8 +306,8 @@ async function createPayment({ order_id, provider, amount, t }) {
     { replacements: { order_id, provider, amount }, transaction: t }
   );
 
-  const payment_id = ins?.insertId ? Number(ins.insertId) : null;
-  return { payment_id, provider, status: "created" };
+  const payment_id = pickInsertId(qres);
+  return { payment_id: payment_id || null, provider, status: "created" };
 }
 
 // ============================
@@ -335,7 +358,11 @@ async function checkout(req, res) {
       subtotal = Number(subtotal.toFixed(2));
 
       // shipping_total (por ahora simple)
-      const shipping_total = fulfillment_type === "delivery" ? Number(toNum(payload.shipping_total, 0).toFixed(2)) : 0.0;
+      const shipping_total =
+        fulfillment_type === "delivery"
+          ? Number(toNum(payload.shipping_total, 0).toFixed(2))
+          : 0.0;
+
       const total = Number((subtotal + shipping_total).toFixed(2));
 
       // Customer upsert (por email)
