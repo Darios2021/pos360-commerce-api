@@ -5,6 +5,7 @@
 // + ✅ Ecommerce Checkout público: POST /api/v1/ecom/checkout
 // + ✅ Ecommerce Payments: preference MP + webhook + transfer proof
 // + ✅ Admin Ecommerce Orders: GET /api/v1/admin/shop/orders
+// + ✅ Admin Ecommerce Payments: GET/PATCH/mark-paid/mark-unpaid
 // + ✅ Admin review transfer: POST /api/v1/admin/shop/payments/:paymentId/review
 // + ✅ Public shop config: GET /api/v1/public/shop/payment-config
 // + ✅ Admin shop settings: GET/PUT /api/v1/admin/shop/settings/:key
@@ -80,8 +81,8 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 // ✅ ADMIN SHOP SETTINGS (orders/shipping/pickup/payments/notify)
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 
-// ✅ ADMIN transfer review
-const { reviewTransferPayment } = require("../controllers/ecomPayments.controller");
+// ✅ ADMIN SHOP PAYMENTS (gestión + review transfer)
+const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
 function safeUse(path, ...mws) {
   for (const mw of mws) {
@@ -155,8 +156,13 @@ safeUse("/admin/shop", requireAuth, adminShopOrdersRoutes);
 // ✅ Settings admin (queda bajo /admin/shop/settings/:key)
 safeUse("/admin/shop", requireAuth, adminShopSettingsRoutes);
 
-// ✅ Review transfer payments (admin)
-// POST /api/v1/admin/shop/payments/:paymentId/review
-router.post("/admin/shop/payments/:paymentId/review", requireAuth, reviewTransferPayment);
+// ✅ Payments admin (gestión + review transfer)
+// GET /api/v1/admin/shop/payments
+// GET /api/v1/admin/shop/payments/:paymentId
+// PATCH /api/v1/admin/shop/payments/:paymentId
+// POST /api/v1/admin/shop/payments/:paymentId/mark-paid
+// POST /api/v1/admin/shop/payments/:paymentId/mark-unpaid
+// POST /api/v1/admin/shop/payments/:paymentId/review  (compat)
+safeUse("/admin/shop", requireAuth, adminShopPaymentsRoutes);
 
 module.exports = router;

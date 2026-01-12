@@ -1,7 +1,6 @@
 // src/controllers/ecomCheckout.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (Checkout público ROBUSTO + MercadoPago REAL)
-// - Crea order + items + payment
-// - Guarda method/reference/note en ecom_payments (tu schema real)
+// - Crea ecom_orders + ecom_order_items + ecom_payments
 // - Si método = MERCADOPAGO: crea preferencia MP y devuelve redirect_url (init_point)
 // - Tokens SIEMPRE en ENV (NO en DB)
 //
@@ -10,6 +9,11 @@
 // Opcional:
 // - ECOMMERCE_PUBLIC_URL (back_urls)
 // - MP_NOTIFICATION_URL (webhook público)
+// - MP_STATEMENT_DESCRIPTOR (<= 22 chars)
+//
+// Enable MP:
+// - shop_settings('payments').mp_enabled (boolean)
+// - y que exista MERCADOPAGO_ACCESS_TOKEN en ENV
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -19,7 +23,7 @@ const { createPreference } = require("../services/mercadopago.service");
 // Helpers
 // =====================
 function toNum(v, d = 0) {
-  const n = Number(v);
+  const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
 function toInt(v, d = 0) {
@@ -70,47 +74,6 @@ async function viewExists(viewName, t) {
     { replacements: { name: viewName }, transaction: t }
   );
   return !!(r && r.length);
-}
-
-async function hasColumn(table, column, t) {
-  const [r] = await sequelize.query(
-    `
-    SELECT COUNT(*) AS c
-    FROM information_schema.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = :t
-      AND COLUMN_NAME = :c
-    `,
-    { replacements: { t: table, c: column }, transaction: t }
-  );
-  return Number(r?.[0]?.c || 0) > 0;
-}
-
-async function setOrderPaymentMetaIfPossible({ order_id, provider, t }) {
-  const hasPayStatus = await hasColumn("ecom_orders", "payment_status", t);
-  const hasProvider = await hasColumn("ecom_orders", "checkout_provider", t);
-  if (!hasPayStatus && !hasProvider) return;
-
-  const sets = [];
-  const repl = { id: order_id };
-
-  if (hasPayStatus) {
-    sets.push("payment_status = :payment_status");
-    repl.payment_status = "pending";
-  }
-  if (hasProvider) {
-    sets.push("checkout_provider = :checkout_provider");
-    repl.checkout_provider = String(provider || "").toUpperCase();
-  }
-
-  await sequelize.query(
-    `
-    UPDATE ecom_orders
-    SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP
-    WHERE id = :id
-    `,
-    { replacements: repl, transaction: t }
-  );
 }
 
 async function fetchActiveBranches(t) {
@@ -300,14 +263,14 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
   const qres = await sequelize.query(
     `
     INSERT INTO ecom_orders
-      (public_code, branch_id, customer_id, status, currency,
+      (public_code, branch_id, customer_id, status, payment_status, checkout_provider, currency,
        subtotal, discount_total, shipping_total, total,
        fulfillment_type,
        ship_name, ship_phone, ship_address1, ship_address2, ship_city, ship_province, ship_zip,
        notes,
        created_at)
     VALUES
-      (:public_code, :branch_id, :customer_id, 'created', 'ARS',
+      (:public_code, :branch_id, :customer_id, 'created', 'unpaid', NULL, 'ARS',
        :subtotal, 0.00, :shipping_total, :total,
        :fulfillment_type,
        :ship_name, :ship_phone, :ship_address1, :ship_address2, :ship_city, :ship_province, :ship_zip,
@@ -376,21 +339,43 @@ async function createOrderItems({ order_id, items, productsById, t }) {
   }
 }
 
-async function createPayment({ order_id, provider, method, amount, reference, note, currency, t }) {
+async function setOrderPaymentMeta({ order_id, provider, payment_status, t }) {
+  await sequelize.query(
+    `
+    UPDATE ecom_orders
+    SET checkout_provider = :checkout_provider,
+        payment_status = :payment_status,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = :id
+    `,
+    {
+      replacements: {
+        id: order_id,
+        checkout_provider: String(provider || "").toLowerCase(),
+        payment_status: String(payment_status || "unpaid").toLowerCase(),
+      },
+      transaction: t,
+    }
+  );
+}
+
+async function createPayment({ order_id, provider, method, amount, reference, note, external_reference, t }) {
   const qres = await sequelize.query(
     `
-    INSERT INTO ecom_payments (order_id, provider, method, status, amount, reference, note, currency, created_at)
-    VALUES (:order_id, :provider, :method, 'created', :amount, :reference, :note, :currency, CURRENT_TIMESTAMP)
+    INSERT INTO ecom_payments
+      (order_id, provider, method, status, amount, currency, reference, note, external_reference, created_at)
+    VALUES
+      (:order_id, :provider, :method, 'created', :amount, 'ARS', :reference, :note, :external_reference, CURRENT_TIMESTAMP)
     `,
     {
       replacements: {
         order_id,
-        provider,
-        method: method || null,
+        provider: String(provider || "other").toLowerCase(),
+        method: method ? String(method).toLowerCase() : null,
         amount,
-        reference: reference || null,
-        note: note || null,
-        currency: currency || "ARS",
+        reference: reference ? String(reference).trim() : null,
+        note: note ? String(note).trim() : null,
+        external_reference: external_reference ? String(external_reference).trim() : null,
       },
       transaction: t,
     }
@@ -409,55 +394,35 @@ async function createPayment({ order_id, provider, method, amount, reference, no
   return { payment_id: payment_id || null, provider, status: "created" };
 }
 
-async function updatePaymentMpMetaIfPossible({ payment_id, mpPref, externalRef, t }) {
+async function updatePaymentMpMeta({ payment_id, mpPref, externalRef, payer_email, t }) {
   if (!payment_id) return;
-
-  const sets = [];
-  const repl = { id: payment_id };
-
-  sets.push("status = :status");
-  repl.status = "pending";
-
-  const hasExternalPayload = await hasColumn("ecom_payments", "external_payload", t);
-  const hasExternalId = await hasColumn("ecom_payments", "external_id", t);
-  const hasExternalStatus = await hasColumn("ecom_payments", "external_status", t);
-
-  if (hasExternalId) {
-    sets.push("external_id = COALESCE(external_id, :external_id)");
-    repl.external_id = mpPref?.id || null;
-  }
-  if (hasExternalStatus) {
-    sets.push("external_status = :external_status");
-    repl.external_status = "preference_created";
-  }
-  if (hasExternalPayload) {
-    sets.push(
-      "external_payload = JSON_SET(COALESCE(external_payload, JSON_OBJECT()), '$.mp_preference', CAST(:mp_payload AS JSON))"
-    );
-    repl.mp_payload = JSON.stringify(mpPref || {});
-  }
-
-  const hasMpPrefId = await hasColumn("ecom_payments", "mp_preference_id", t);
-  const hasExtRef = await hasColumn("ecom_payments", "external_reference", t);
-
-  if (hasMpPrefId) {
-    sets.push("mp_preference_id = :mp_preference_id");
-    repl.mp_preference_id = mpPref?.id || null;
-  }
-  if (hasExtRef) {
-    sets.push("external_reference = :external_reference");
-    repl.external_reference = externalRef || null;
-  }
-
-  if (!sets.length) return;
 
   await sequelize.query(
     `
     UPDATE ecom_payments
-    SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP
+    SET
+      status = 'pending',
+      external_id = :external_id,
+      external_reference = :external_reference,
+      mp_preference_id = :mp_preference_id,
+      external_status = 'preference_created',
+      status_detail = NULL,
+      payer_email = COALESCE(:payer_email, payer_email),
+      external_payload = JSON_SET(COALESCE(external_payload, JSON_OBJECT()), '$.mp_preference', CAST(:mp_payload AS JSON)),
+      updated_at = CURRENT_TIMESTAMP
     WHERE id = :id
     `,
-    { replacements: repl, transaction: t }
+    {
+      replacements: {
+        id: payment_id,
+        external_id: mpPref?.id || null,
+        external_reference: externalRef || null,
+        mp_preference_id: mpPref?.id || null,
+        payer_email: payer_email ? String(payer_email).toLowerCase() : null,
+        mp_payload: JSON.stringify(mpPref || {}),
+      },
+      transaction: t,
+    }
   );
 }
 
@@ -482,12 +447,8 @@ async function checkout(req, res) {
   const fulfillment_type = payload.fulfillment_type === "delivery" ? "delivery" : "pickup";
   const pickup_branch_id = toInt(payload.pickup_branch_id || 0, 0) || null;
 
-  const rawPayMethod = String(payload?.payment?.method || payload?.pay_method || "MERCADOPAGO").trim().toUpperCase();
-  const pay_provider = normalizeProvider(rawPayMethod);
-
-  const pay_reference = toStr(payload?.payment?.reference || "");
-  const pay_note = toStr(payload?.payment?.note || "");
-  const currency = "ARS";
+  const pay_provider = normalizeProvider(payload?.payment?.method || payload?.pay_method || "mercadopago");
+  const rawPayMethod = String(payload?.payment?.method || "").trim() || null;
 
   try {
     const result = await sequelize.transaction(async (t) => {
@@ -502,6 +463,7 @@ async function checkout(req, res) {
         }
       }
 
+      // Totales
       let subtotal = 0;
       for (const it of normItems) {
         const p = productsById.get(it.product_id);
@@ -515,9 +477,11 @@ async function checkout(req, res) {
 
       const total = Number((subtotal + shipping_total).toFixed(2));
 
+      // Customer
+      const customerEmail = payload?.contact?.email || payload?.email || "";
       const customer_id = await upsertCustomer(
         {
-          email: payload?.contact?.email || payload?.email,
+          email: customerEmail,
           first_name: payload?.contact?.first_name || payload?.contact?.name || payload?.first_name,
           last_name: payload?.contact?.last_name || payload?.last_name,
           phone: payload?.contact?.phone || payload?.phone,
@@ -526,6 +490,7 @@ async function checkout(req, res) {
         t
       );
 
+      // Branch
       let branch_id = null;
 
       if (fulfillment_type === "pickup") {
@@ -561,6 +526,7 @@ async function checkout(req, res) {
         branch_id = pick.branch_id;
       }
 
+      // Order
       const { order_id, public_code } = await createOrder({
         branch_id,
         customer_id,
@@ -582,30 +548,35 @@ async function checkout(req, res) {
         { replacements: { id: order_id, subtotal, shipping_total, total }, transaction: t }
       );
 
+      const externalRef = String(public_code || order_id);
+
+      // Payment (ahora guarda method/reference/note/external_reference)
       const pay = await createPayment({
         order_id,
         provider: pay_provider,
         method: rawPayMethod,
         amount: total,
-        reference: pay_reference || null,
-        note: pay_note || null,
-        currency,
+        reference: payload?.payment?.reference || null,
+        note: payload?.payment?.note || null,
+        external_reference: externalRef,
         t,
       });
 
-      await setOrderPaymentMetaIfPossible({ order_id, provider: pay_provider, t });
+      const paymentsCfg = await getShopPaymentsSettings(t);
+      const mpEnabledByAdmin = !!paymentsCfg.mp_enabled;
+
+      // Token real SOLO ENV
+      const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+      const isMp = pay_provider === "mercadopago";
+
+      // default status order
+      let orderPayStatus = "unpaid";
 
       // ==========================
       // ✅ MercadoPago REAL
       // ==========================
       let redirect_url = null;
       let mp = null;
-
-      const paymentsCfg = await getShopPaymentsSettings(t);
-      const mpEnabledByAdmin = !!paymentsCfg.mp_enabled;
-
-      const envMp = !!process.env.MERCADOPAGO_ACCESS_TOKEN;
-      const isMp = pay_provider === "mercadopago";
 
       if (isMp) {
         if (!mpEnabledByAdmin) {
@@ -640,8 +611,6 @@ async function checkout(req, res) {
           };
         });
 
-        const externalRef = String(public_code || order_id);
-
         const prefPayload = {
           external_reference: externalRef,
           items: mpItems,
@@ -668,10 +637,11 @@ async function checkout(req, res) {
 
         const mpPref = await createPreference(prefPayload);
 
-        await updatePaymentMpMetaIfPossible({
+        await updatePaymentMpMeta({
           payment_id: pay.payment_id,
           mpPref,
           externalRef,
+          payer_email: customerEmail,
           t,
         });
 
@@ -692,7 +662,12 @@ async function checkout(req, res) {
             },
           };
         }
+
+        orderPayStatus = "pending";
       }
+
+      // set order meta final
+      await setOrderPaymentMeta({ order_id, provider: pay_provider, payment_status: orderPayStatus, t });
 
       return {
         order: {
@@ -704,11 +679,13 @@ async function checkout(req, res) {
           subtotal,
           shipping_total,
           total,
+          payment_status: orderPayStatus,
         },
         payment: {
           id: pay.payment_id,
           provider: pay.provider,
           status: isMp ? "pending" : pay.status,
+          external_reference: externalRef,
         },
         redirect_url,
         mp,
