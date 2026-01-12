@@ -1,5 +1,5 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (agrega strict_search + exclude_terms + SHOP BRANDING)
+// ✅ COPY-PASTE FINAL (agrega strict_search + exclude_terms + SHOP BRANDING + PAYMENT CONFIG)
 // - strict_search=1 => NO busca en description (evita “cargadores para auriculares”)
 // - exclude_terms => excluye palabras (ej: cargador,cable,energia,usb)
 
@@ -119,7 +119,7 @@ module.exports = {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    // ✅ NUEVO: exclude_terms (coma separada)
+    // ✅ exclude_terms (coma separada)
     const ex = toStr(exclude_terms)
       .split(",")
       .map((x) => x.trim())
@@ -149,7 +149,7 @@ module.exports = {
     if (q.length) {
       repl.q = `%${escLike(q)}%`;
 
-      // strict_search=1 => NO incluye description (clave para evitar energía/cargadores)
+      // strict_search=1 => NO incluye description
       where.push(`
         (
           LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
@@ -269,7 +269,7 @@ module.exports = {
     return rows?.[0] || null;
   },
 
-  // ✅ NUEVO: Branding público para ShopHeader + favicon
+  // ✅ Branding público para ShopHeader + favicon
   async getShopBranding() {
     const [rows] = await sequelize.query(`
       SELECT id, name, logo_url, favicon_url, updated_at
@@ -295,5 +295,58 @@ module.exports = {
       favicon_url: r.favicon_url || "",
       updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
     };
+  },
+
+  // ✅ NUEVO: Config pública para pagos (Transfer + flag MP)
+  async getPaymentConfig() {
+    // 1) Intentamos leer desde shop_branding (si existen columnas)
+    try {
+      const [rows] = await sequelize.query(`
+        SELECT
+          transfer_alias,
+          transfer_cbu,
+          transfer_holder
+        FROM shop_branding
+        WHERE id = 1
+        LIMIT 1
+      `);
+
+      const r = rows?.[0] || null;
+
+      const transfer = {
+        alias: String(r?.transfer_alias || "").trim(),
+        cbu: String(r?.transfer_cbu || "").trim(),
+        holder: String(r?.transfer_holder || "").trim(),
+      };
+
+      // fallback env si DB viene vacío
+      const envTransfer = {
+        alias: String(process.env.TRANSFER_ALIAS || "").trim(),
+        cbu: String(process.env.TRANSFER_CBU || "").trim(),
+        holder: String(process.env.TRANSFER_HOLDER || "").trim(),
+      };
+
+      const finalTransfer =
+        transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
+
+      return {
+        transfer: finalTransfer,
+        mercadopago: {
+          enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim(),
+        },
+      };
+    } catch (e) {
+      // 2) Si no existen columnas/tabla => ENV
+      return {
+        transfer: {
+          alias: String(process.env.TRANSFER_ALIAS || "").trim(),
+          cbu: String(process.env.TRANSFER_CBU || "").trim(),
+          holder: String(process.env.TRANSFER_HOLDER || "").trim(),
+        },
+        mercadopago: {
+          enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim(),
+        },
+      };
+    }
   },
 };
