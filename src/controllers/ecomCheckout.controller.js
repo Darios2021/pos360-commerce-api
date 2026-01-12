@@ -1,12 +1,13 @@
 // src/controllers/ecomCheckout.controller.js
+// ✅ COPY-PASTE FINAL (ANTI insertId vacío)
 // ✅ Checkout público mínimo (DB pos360)
-// - Crea/actualiza customer por email
+// - Upsert customer por email
 // - Valida stock por sucursal (pickup) o elige sucursal que cumpla (delivery)
 // - Inserta ecom_orders + ecom_order_items
-// - Crea ecom_payments (created) provider: mercadopago | transfer | cash | other
+// - Inserta ecom_payments (created)
 //
-// NO depende de modelos Sequelize: usa sequelize.query (robusto ante falta de models)
-// Requiere: sequelize exportado desde ../models (como ya usan otros controllers)
+// 🔥 FIX REAL: NO dependemos de insertId.
+// Si insertId viene vacío, resolvemos el id por public_code (UNIQUE) dentro de la transacción.
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -30,8 +31,26 @@ function unitPriceFromProductRow(p) {
 }
 
 function genPublicCode() {
-  // 12 chars alfanum (compacto tipo ML)
   return crypto.randomBytes(8).toString("hex").slice(0, 12);
+}
+
+// ✅ sequelize.query INSERT puede devolver metadata en posiciones distintas.
+// Esto intenta rescatar insertId si existe, pero NO dependemos de esto.
+function pickInsertId(qres) {
+  try {
+    if (!Array.isArray(qres)) return null;
+    const a = qres[0];
+    const b = qres[1];
+
+    const cand = [];
+    if (a && typeof a === "object") cand.push(a.insertId, a?.[0]?.insertId);
+    if (b && typeof b === "object") cand.push(b.insertId, b?.[0]?.insertId);
+
+    const id = cand.map((x) => Number(x)).find((x) => Number.isFinite(x) && x > 0);
+    return id || null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchActiveBranches(t) {
@@ -144,7 +163,7 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
     return id;
   }
 
-  const [, meta] = await sequelize.query(
+  await sequelize.query(
     `
     INSERT INTO ecom_customers (email, first_name, last_name, phone, doc_number, created_at)
     VALUES (:email, :first_name, :last_name, :phone, :doc_number, CURRENT_TIMESTAMP)
@@ -161,16 +180,12 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
     }
   );
 
-  const insertId = meta?.insertId ? Number(meta.insertId) : null;
-  if (!insertId) {
-    const [r2] = await sequelize.query(`SELECT id FROM ecom_customers WHERE email = :email LIMIT 1`, {
-      replacements: { email: em },
-      transaction: t,
-    });
-    return r2?.[0]?.id ? Number(r2[0].id) : null;
-  }
+  const [r2] = await sequelize.query(`SELECT id FROM ecom_customers WHERE email = :email LIMIT 1`, {
+    replacements: { email: em },
+    transaction: t,
+  });
 
-  return insertId;
+  return r2?.[0]?.id ? Number(r2[0].id) : null;
 }
 
 function normalizeProvider(method) {
@@ -197,7 +212,7 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
 
   const notes = String(payload.notes || "").trim() || null;
 
-  const [, meta] = await sequelize.query(
+  const qres = await sequelize.query(
     `
     INSERT INTO ecom_orders
       (public_code, branch_id, customer_id, status, currency,
@@ -236,7 +251,24 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
     }
   );
 
-  const order_id = meta?.insertId ? Number(meta.insertId) : null;
+  // 1) intentar insertId
+  let order_id = pickInsertId(qres);
+
+  // 2) 🔥 FIX definitivo: buscar por public_code (UNIQUE)
+  if (!order_id) {
+    const [r] = await sequelize.query(
+      `SELECT id FROM ecom_orders WHERE public_code = :public_code LIMIT 1`,
+      { replacements: { public_code }, transaction: t }
+    );
+    order_id = r?.[0]?.id ? Number(r[0].id) : null;
+  }
+
+  // 3) último fallback: LAST_INSERT_ID()
+  if (!order_id) {
+    const [r] = await sequelize.query(`SELECT LAST_INSERT_ID() AS id`, { transaction: t });
+    order_id = r?.[0]?.id ? Number(r[0].id) : null;
+  }
+
   if (!order_id) throw new Error("No se pudo crear el pedido (insertId vacío).");
 
   return { order_id, public_code };
@@ -259,13 +291,7 @@ async function createOrderItems({ order_id, items, productsById, t }) {
       VALUES (:order_id, :product_id, :qty, :unit_price, :line_total, CURRENT_TIMESTAMP)
       `,
       {
-        replacements: {
-          order_id,
-          product_id: pid,
-          qty,
-          unit_price,
-          line_total,
-        },
+        replacements: { order_id, product_id: pid, qty, unit_price, line_total },
         transaction: t,
       }
     );
@@ -273,7 +299,7 @@ async function createOrderItems({ order_id, items, productsById, t }) {
 }
 
 async function createPayment({ order_id, provider, amount, t }) {
-  const [, meta] = await sequelize.query(
+  const qres = await sequelize.query(
     `
     INSERT INTO ecom_payments (order_id, provider, status, amount, created_at)
     VALUES (:order_id, :provider, 'created', :amount, CURRENT_TIMESTAMP)
@@ -281,8 +307,18 @@ async function createPayment({ order_id, provider, amount, t }) {
     { replacements: { order_id, provider, amount }, transaction: t }
   );
 
-  const payment_id = meta?.insertId ? Number(meta.insertId) : null;
-  return { payment_id, provider, status: "created" };
+  let payment_id = pickInsertId(qres);
+
+  // fallback: última payment del pedido (por created_at DESC)
+  if (!payment_id) {
+    const [r] = await sequelize.query(
+      `SELECT id FROM ecom_payments WHERE order_id = :order_id ORDER BY id DESC LIMIT 1`,
+      { replacements: { order_id }, transaction: t }
+    );
+    payment_id = r?.[0]?.id ? Number(r[0].id) : null;
+  }
+
+  return { payment_id: payment_id || null, provider, status: "created" };
 }
 
 // ============================
@@ -331,6 +367,7 @@ async function checkout(req, res) {
 
       const shipping_total =
         fulfillment_type === "delivery" ? Number(toNum(payload.shipping_total, 0).toFixed(2)) : 0.0;
+
       const total = Number((subtotal + shipping_total).toFixed(2));
 
       const customer_id = await upsertCustomer(
@@ -353,25 +390,14 @@ async function checkout(req, res) {
 
         const { ok, missing } = await branchCanFulfillAll(pickup_branch_id, normItems, productsById, t);
         if (!ok) {
-          return {
-            error: {
-              status: 409,
-              message: "Sin stock suficiente en la sucursal elegida.",
-              missing,
-            },
-          };
+          return { error: { status: 409, message: "Sin stock suficiente en la sucursal elegida.", missing } };
         }
 
         branch_id = pickup_branch_id;
       } else {
         const pick = await pickBranchForDelivery(normItems, productsById, t);
         if (!pick.picked || !pick.branch_id) {
-          return {
-            error: {
-              status: 409,
-              message: "No hay stock suficiente para preparar el envío desde ninguna sucursal.",
-            },
-          };
+          return { error: { status: 409, message: "No hay stock suficiente para preparar el envío desde ninguna sucursal." } };
         }
         branch_id = pick.branch_id;
       }
@@ -414,10 +440,7 @@ async function checkout(req, res) {
       };
     });
 
-    if (result?.error) {
-      return res.status(result.error.status || 400).json(result.error);
-    }
-
+    if (result?.error) return res.status(result.error.status || 400).json(result.error);
     return res.json(result);
   } catch (e) {
     console.error("❌ checkout error:", e);
@@ -425,6 +448,4 @@ async function checkout(req, res) {
   }
 }
 
-module.exports = {
-  checkout,
-};
+module.exports = { checkout };
