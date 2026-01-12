@@ -1,29 +1,47 @@
 // src/routes/admin.shopPayments.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
+//
+// Base: /api/v1/admin/shop
+// Endpoints:
+// - GET    /payments                       listAdminPayments
+// - GET    /payments/:paymentId            getAdminPaymentById
+// - PATCH  /payments/:paymentId            updateAdminPayment
+// - POST   /payments/:paymentId/mark-paid  markPaymentPaid
+// - POST   /payments/:paymentId/mark-unpaid markPaymentUnpaid
+// - POST   /payments/:paymentId/review     reviewTransferPayment (compat)
 
-const express = require("express");
-const router = express.Router();
+const router = require("express").Router();
 
 const {
-  listAdminShopPayments,
-  getAdminShopPayment,
-  updateAdminShopPayment,
-  markAdminShopPaymentPaid,
-  markAdminShopPaymentUnpaid,
+  listAdminPayments,
+  getAdminPaymentById,
+  updateAdminPayment,
+  markPaymentPaid,
+  markPaymentUnpaid,
+  reviewTransferPayment,
 } = require("../controllers/admin.shopPayments.controller");
 
-// ✅ mantenemos tu review transfer EXISTENTE
-const { reviewTransferPayment } = require("../controllers/ecomPayments.controller");
+// =========================
+// Helpers (anti-undefined)
+// =========================
+function mustFn(name, fn) {
+  if (typeof fn !== "function") {
+    console.error(`❌ [admin.shopPayments.routes] Handler inválido: ${name}`, typeof fn);
+    throw new Error(`INVALID_HANDLER_${name}`);
+  }
+  return fn;
+}
 
-// Base: /api/v1/admin/shop
-router.get("/payments", listAdminShopPayments);
-router.get("/payments/:paymentId", getAdminShopPayment);
-router.patch("/payments/:paymentId", updateAdminShopPayment);
+// =========================
+// Routes
+// =========================
+router.get("/payments", mustFn("listAdminPayments", listAdminPayments));
+router.get("/payments/:paymentId", mustFn("getAdminPaymentById", getAdminPaymentById));
+router.patch("/payments/:paymentId", mustFn("updateAdminPayment", updateAdminPayment));
 
-router.post("/payments/:paymentId/mark-paid", markAdminShopPaymentPaid);
-router.post("/payments/:paymentId/mark-unpaid", markAdminShopPaymentUnpaid);
+router.post("/payments/:paymentId/mark-paid", mustFn("markPaymentPaid", markPaymentPaid));
+router.post("/payments/:paymentId/mark-unpaid", mustFn("markPaymentUnpaid", markPaymentUnpaid));
 
-// ✅ compat: tu endpoint ya usado
-router.post("/payments/:paymentId/review", reviewTransferPayment);
+router.post("/payments/:paymentId/review", mustFn("reviewTransferPayment", reviewTransferPayment));
 
 module.exports = router;

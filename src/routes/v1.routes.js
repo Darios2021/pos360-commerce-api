@@ -157,12 +157,12 @@ safeUse("/admin/shop", requireAuth, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, adminShopSettingsRoutes);
 
 // ✅ Payments admin (gestión + review transfer)
-// GET /api/v1/admin/shop/payments
-// GET /api/v1/admin/shop/payments/:paymentId
+// GET  /api/v1/admin/shop/payments
+// GET  /api/v1/admin/shop/payments/:paymentId
 // PATCH /api/v1/admin/shop/payments/:paymentId
 // POST /api/v1/admin/shop/payments/:paymentId/mark-paid
 // POST /api/v1/admin/shop/payments/:paymentId/mark-unpaid
-// POST /api/v1/admin/shop/payments/:paymentId/review  (compat)
+// POST /api/v1/admin/shop/payments/:paymentId/review
 safeUse("/admin/shop", requireAuth, adminShopPaymentsRoutes);
 
 module.exports = router;
