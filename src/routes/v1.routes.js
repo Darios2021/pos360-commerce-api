@@ -3,11 +3,7 @@
 // + ✅ GET /api/v1/_version
 // + (opcional) GET /api/v1/_whoami
 // + ✅ Ecommerce Checkout público: POST /api/v1/ecom/checkout
-// + ✅ Admin Shop Orders: GET /api/v1/admin/shop/orders (+/:id)
-//
-// FIX FINAL:
-// - Ya NO montamos posRefundsRoutes / posExchangesRoutes
-// - Todo refunds/exchanges vive en posRoutes (que llama posSales.controller.js)
+// + ✅ Admin Ecommerce Orders: GET /api/v1/admin/shop/orders
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -68,7 +64,7 @@ const adminUsersRoutes = require("./adminUsers.routes");
 // ✅ ADMIN SHOP BRANDING
 const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
 
-// ✅ ADMIN SHOP ORDERS (INBOX)
+// ✅ ADMIN SHOP ORDERS
 const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 
 function safeUse(path, ...mws) {
@@ -124,8 +120,10 @@ safeUse("/me", requireAuth, meRoutes);
 // =========================
 safeUse("/admin/users", requireAuth, adminUsersRoutes);
 
-// Admin Shop (Branding + Orders)
+// Branding existente
 safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes);
+
+// ✅ Orders admin (queda bajo /admin/shop/orders...)
 safeUse("/admin/shop", requireAuth, adminShopOrdersRoutes);
 
 module.exports = router;

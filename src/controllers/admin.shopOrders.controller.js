@@ -1,14 +1,19 @@
 // src/controllers/admin.shopOrders.controller.js
-// ✅ Admin Ecommerce Orders (DB pos360)
-// - GET /api/v1/admin/shop/orders
-// - GET /api/v1/admin/shop/orders/:id
+// ✅ COPY-PASTE FINAL
+// Admin Ecommerce Orders
+// GET  /api/v1/admin/shop/orders
+// GET  /api/v1/admin/shop/orders/:id
 //
-// Lee:
-// - ecom_orders
-// - ecom_order_items (+ products.name)
-// - ecom_payments
+// Lee desde tablas:
+// - ecom_orders, ecom_order_items, ecom_payments, ecom_customers, branches
 //
-// NO depende de modelos: sequelize.query
+// Soporta filtros:
+// - q (public_code, email, nombre)
+// - status
+// - fulfillment_type
+// - branch_id
+// - from, to (YYYY-MM-DD)
+// - page, limit
 
 const { sequelize } = require("../models");
 
@@ -16,151 +21,250 @@ function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
+
 function toStr(v) {
   return String(v ?? "").trim();
 }
 
-async function listOrders(req, res) {
-  const page = Math.max(1, toInt(req.query.page, 1));
-  const limit = Math.min(100, Math.max(5, toInt(req.query.limit, 20)));
-  const offset = (page - 1) * limit;
+function normDate(v) {
+  const s = toStr(v);
+  // muy simple: YYYY-MM-DD
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return null;
+}
 
-  const q = toStr(req.query.q);
-  const status = toStr(req.query.status);
-  const fulfillment_type = toStr(req.query.fulfillment_type);
-  const branch_id = toInt(req.query.branch_id, 0);
-
+function buildWhere({ q, status, fulfillment_type, branch_id, from, to }) {
   const where = [];
-  const repl = { limit, offset };
+  const repl = {};
 
   if (status) {
-    where.push(`o.status = :status`);
+    where.push("o.status = :status");
     repl.status = status;
   }
   if (fulfillment_type) {
-    where.push(`o.fulfillment_type = :fulfillment_type`);
+    where.push("o.fulfillment_type = :fulfillment_type");
     repl.fulfillment_type = fulfillment_type;
   }
   if (branch_id) {
-    where.push(`o.branch_id = :branch_id`);
-    repl.branch_id = branch_id;
+    where.push("o.branch_id = :branch_id");
+    repl.branch_id = Number(branch_id);
   }
-  if (q) {
-    where.push(`(
-      o.public_code LIKE :q
-      OR c.email LIKE :q
-      OR CONCAT(IFNULL(c.first_name,''),' ',IFNULL(c.last_name,'')) LIKE :q
-      OR CAST(o.id AS CHAR) LIKE :q
-    )`);
-    repl.q = `%${q}%`;
+
+  const dFrom = normDate(from);
+  const dTo = normDate(to);
+
+  if (dFrom) {
+    where.push("o.created_at >= CONCAT(:from,' 00:00:00')");
+    repl.from = dFrom;
+  }
+  if (dTo) {
+    where.push("o.created_at <= CONCAT(:to,' 23:59:59')");
+    repl.to = dTo;
+  }
+
+  const qq = toStr(q);
+  if (qq) {
+    // búsqueda tipo ML: public_code / email / nombre completo
+    where.push(`
+      (
+        o.public_code LIKE :q_like
+        OR c.email LIKE :q_like
+        OR CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,'')) LIKE :q_like
+        OR CAST(o.id AS CHAR) = :q_exact
+      )
+    `);
+    repl.q_like = `%${qq}%`;
+    repl.q_exact = qq;
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-  const [rows] = await sequelize.query(
-    `
-    SELECT
-      o.id,
-      o.public_code,
-      o.branch_id,
-      b.name AS branch_name,
-      o.customer_id,
-      c.email AS customer_email,
-      CONCAT(IFNULL(c.first_name,''),' ',IFNULL(c.last_name,'')) AS customer_name,
-      o.status,
-      o.currency,
-      o.subtotal,
-      o.discount_total,
-      o.shipping_total,
-      o.total,
-      o.fulfillment_type,
-      o.ship_name,
-      o.ship_phone,
-      o.ship_city,
-      o.ship_province,
-      o.ship_zip,
-      o.created_at,
-      o.updated_at,
-      (SELECT COUNT(*) FROM ecom_order_items i WHERE i.order_id = o.id) AS items_count,
-      (SELECT COALESCE(SUM(p.amount),0) FROM ecom_payments p WHERE p.order_id = o.id) AS payments_sum,
-      (SELECT p.provider FROM ecom_payments p WHERE p.order_id = o.id ORDER BY p.id DESC LIMIT 1) AS last_payment_provider,
-      (SELECT p.status FROM ecom_payments p WHERE p.order_id = o.id ORDER BY p.id DESC LIMIT 1) AS last_payment_status
-    FROM ecom_orders o
-    JOIN branches b ON b.id = o.branch_id
-    LEFT JOIN ecom_customers c ON c.id = o.customer_id
-    ${whereSql}
-    ORDER BY o.id DESC
-    LIMIT :limit OFFSET :offset
-    `,
-    { replacements: repl }
-  );
-
-  const [cnt] = await sequelize.query(
-    `
-    SELECT COUNT(*) AS total
-    FROM ecom_orders o
-    LEFT JOIN ecom_customers c ON c.id = o.customer_id
-    ${whereSql}
-    `,
-    { replacements: repl }
-  );
-
-  const total = Number(cnt?.[0]?.total || 0);
-  const pages = Math.max(1, Math.ceil(total / limit));
-
-  return res.json({
-    ok: true,
-    data: rows || [],
-    meta: { page, limit, total, pages },
-  });
+  return { whereSql, repl };
 }
 
+// ===============================
+// GET /api/v1/admin/shop/orders
+// ===============================
+async function listOrders(req, res) {
+  try {
+    const page = Math.max(1, toInt(req.query.page, 1));
+    const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
+    const offset = (page - 1) * limit;
+
+    const q = req.query.q;
+    const status = req.query.status;
+    const fulfillment_type = req.query.fulfillment_type;
+    const branch_id = req.query.branch_id ? Number(req.query.branch_id) : null;
+    const from = req.query.from;
+    const to = req.query.to;
+
+    const { whereSql, repl } = buildWhere({ q, status, fulfillment_type, branch_id, from, to });
+
+    // count
+    const [countRows] = await sequelize.query(
+      `
+      SELECT COUNT(*) AS total
+      FROM ecom_orders o
+      LEFT JOIN ecom_customers c ON c.id = o.customer_id
+      ${whereSql}
+      `,
+      { replacements: repl }
+    );
+
+    const total = Number(countRows?.[0]?.total || 0);
+
+    // data (con agregados de items y pagos)
+    const [rows] = await sequelize.query(
+      `
+      SELECT
+        o.id,
+        o.public_code,
+        o.status,
+        o.fulfillment_type,
+        o.branch_id,
+        b.name AS branch_name,
+        o.customer_id,
+        c.email AS customer_email,
+        CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,'')) AS customer_name,
+        o.subtotal,
+        o.shipping_total,
+        o.total,
+        o.created_at,
+
+        COALESCE(oi.items_count, 0) AS items_count,
+        COALESCE(oi.items_qty, 0) AS items_qty,
+
+        ep.provider AS payment_provider,
+        ep.status AS payment_status,
+        ep.amount  AS payment_amount
+
+      FROM ecom_orders o
+      LEFT JOIN ecom_customers c ON c.id = o.customer_id
+      LEFT JOIN branches b ON b.id = o.branch_id
+
+      LEFT JOIN (
+        SELECT
+          order_id,
+          COUNT(*) AS items_count,
+          CAST(SUM(qty) AS DECIMAL(14,3)) AS items_qty
+        FROM ecom_order_items
+        GROUP BY order_id
+      ) oi ON oi.order_id = o.id
+
+      LEFT JOIN (
+        SELECT p1.*
+        FROM ecom_payments p1
+        INNER JOIN (
+          SELECT order_id, MAX(id) AS max_id
+          FROM ecom_payments
+          GROUP BY order_id
+        ) px ON px.order_id = p1.order_id AND px.max_id = p1.id
+      ) ep ON ep.order_id = o.id
+
+      ${whereSql}
+      ORDER BY o.id DESC
+      LIMIT :limit OFFSET :offset
+      `,
+      {
+        replacements: { ...repl, limit, offset },
+      }
+    );
+
+    return res.json({
+      ok: true,
+      data: rows || [],
+      meta: {
+        page,
+        limit,
+        total,
+        pages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  } catch (e) {
+    console.error("❌ listOrders error:", e);
+    return res.status(500).json({ ok: false, message: "Error listando pedidos.", detail: e?.message || String(e) });
+  }
+}
+
+// ===============================
+// GET /api/v1/admin/shop/orders/:id
+// ===============================
 async function getOrderById(req, res) {
-  const id = toInt(req.params.id, 0);
-  if (!id) return res.status(400).json({ ok: false, message: "ID inválido." });
+  try {
+    const id = Number(req.params.id || 0);
+    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
-  const [[order]] = await sequelize.query(
-    `
-    SELECT
-      o.*,
-      b.name AS branch_name,
-      c.email AS customer_email,
-      CONCAT(IFNULL(c.first_name,''),' ',IFNULL(c.last_name,'')) AS customer_name
-    FROM ecom_orders o
-    JOIN branches b ON b.id = o.branch_id
-    LEFT JOIN ecom_customers c ON c.id = o.customer_id
-    WHERE o.id = :id
-    LIMIT 1
-    `,
-    { replacements: { id } }
-  );
+    const [orders] = await sequelize.query(
+      `
+      SELECT
+        o.*,
+        b.name AS branch_name,
+        c.email AS customer_email,
+        c.first_name,
+        c.last_name,
+        c.phone,
+        c.doc_number
+      FROM ecom_orders o
+      LEFT JOIN branches b ON b.id = o.branch_id
+      LEFT JOIN ecom_customers c ON c.id = o.customer_id
+      WHERE o.id = :id
+      LIMIT 1
+      `,
+      { replacements: { id } }
+    );
 
-  if (!order) return res.status(404).json({ ok: false, message: "Pedido no encontrado." });
+    const order = orders?.[0];
+    if (!order) return res.status(404).json({ ok: false, message: "Pedido no encontrado" });
 
-  const [items] = await sequelize.query(
-    `
-    SELECT
-      i.*,
-      p.name AS product_name
-    FROM ecom_order_items i
-    JOIN products p ON p.id = i.product_id
-    WHERE i.order_id = :id
-    ORDER BY i.id ASC
-    `,
-    { replacements: { id } }
-  );
+    const [items] = await sequelize.query(
+      `
+      SELECT
+        i.id,
+        i.order_id,
+        i.product_id,
+        p.name AS product_name,
+        i.qty,
+        i.unit_price,
+        i.line_total,
+        i.created_at
+      FROM ecom_order_items i
+      JOIN products p ON p.id = i.product_id
+      WHERE i.order_id = :id
+      ORDER BY i.id ASC
+      `,
+      { replacements: { id } }
+    );
 
-  const [payments] = await sequelize.query(
-    `
-    SELECT *
-    FROM ecom_payments
-    WHERE order_id = :id
-    ORDER BY id DESC
-    `,
-    { replacements: { id } }
-  );
+    const [payments] = await sequelize.query(
+      `
+      SELECT
+        id,
+        order_id,
+        provider,
+        status,
+        amount,
+        external_id,
+        external_status,
+        external_payload,
+        created_at,
+        updated_at
+      FROM ecom_payments
+      WHERE order_id = :id
+      ORDER BY id ASC
+      `,
+      { replacements: { id } }
+    );
 
-  return res.json({ ok: true, order, items: items || [], payments: payments || [] });
+    return res.json({
+      ok: true,
+      order,
+      items: items || [],
+      payments: payments || [],
+    });
+  } catch (e) {
+    console.error("❌ getOrderById error:", e);
+    return res.status(500).json({ ok: false, message: "Error obteniendo pedido.", detail: e?.message || String(e) });
+  }
 }
 
 module.exports = {

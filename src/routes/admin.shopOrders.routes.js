@@ -1,9 +1,14 @@
 // src/routes/admin.shopOrders.routes.js
-// ✅ Admin Shop: Orders Inbox
-const router = require("express").Router();
-const C = require("../controllers/admin.shopOrders.controller");
+// ✅ COPY-PASTE FINAL
+const express = require("express");
+const router = express.Router();
 
-router.get("/orders", C.listOrders);
-router.get("/orders/:id", C.getOrderById);
+const Ctrl = require("../controllers/admin.shopOrders.controller");
+
+// Lista (datatable)
+router.get("/orders", Ctrl.listOrders);
+
+// Detalle
+router.get("/orders/:id", Ctrl.getOrderById);
 
 module.exports = router;
