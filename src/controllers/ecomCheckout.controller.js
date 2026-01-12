@@ -1,13 +1,5 @@
 // src/controllers/ecomCheckout.controller.js
-// ✅ COPY-PASTE FINAL (ANTI insertId vacío)
-// ✅ Checkout público mínimo (DB pos360)
-// - Upsert customer por email
-// - Valida stock por sucursal (pickup) o elige sucursal que cumpla (delivery)
-// - Inserta ecom_orders + ecom_order_items
-// - Inserta ecom_payments (created)
-//
-// 🔥 FIX REAL: NO dependemos de insertId.
-// Si insertId viene vacío, resolvemos el id por public_code (UNIQUE) dentro de la transacción.
+// ✅ COPY-PASTE FINAL (Checkout público robusto + errores claros)
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -16,12 +8,10 @@ function toNum(v, d = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 }
-
 function normalizeEmail(v) {
   const s = String(v || "").trim().toLowerCase();
   return s && s.includes("@") ? s : "";
 }
-
 function unitPriceFromProductRow(p) {
   const d = toNum(p.price_discount, 0);
   if (d > 0) return d;
@@ -29,13 +19,9 @@ function unitPriceFromProductRow(p) {
   if (l > 0) return l;
   return toNum(p.price, 0);
 }
-
 function genPublicCode() {
   return crypto.randomBytes(8).toString("hex").slice(0, 12);
 }
-
-// ✅ sequelize.query INSERT puede devolver metadata en posiciones distintas.
-// Esto intenta rescatar insertId si existe, pero NO dependemos de esto.
 function pickInsertId(qres) {
   try {
     if (!Array.isArray(qres)) return null;
@@ -51,6 +37,20 @@ function pickInsertId(qres) {
   } catch {
     return null;
   }
+}
+
+async function viewExists(viewName, t) {
+  const [r] = await sequelize.query(
+    `
+    SELECT TABLE_NAME
+    FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = :name
+    LIMIT 1
+    `,
+    { replacements: { name: viewName }, transaction: t }
+  );
+  return !!(r && r.length);
 }
 
 async function fetchActiveBranches(t) {
@@ -80,6 +80,14 @@ async function fetchProductsByIds(ids, t) {
 }
 
 async function stockForBranch(branchId, productIds, t) {
+  // ✅ Si no existe la VIEW, tiramos error claro
+  const okView = await viewExists("v_stock_by_branch_product", t);
+  if (!okView) {
+    const err = new Error("Falta la VIEW v_stock_by_branch_product (stock por sucursal).");
+    err.code = "MISSING_STOCK_VIEW";
+    throw err;
+  }
+
   const [rows] = await sequelize.query(
     `
     SELECT product_id, qty
@@ -89,6 +97,7 @@ async function stockForBranch(branchId, productIds, t) {
     `,
     { replacements: { branch_id: branchId, product_ids: productIds }, transaction: t }
   );
+
   const map = new Map();
   for (const r of rows || []) map.set(Number(r.product_id), toNum(r.qty, 0));
   return map;
@@ -103,10 +112,12 @@ async function branchCanFulfillAll(branchId, items, productsById, t) {
     const pid = Number(it.product_id);
     const qty = toNum(it.qty, 0);
     const p = productsById.get(pid);
+
     if (!p) {
       missing.push({ product_id: pid, reason: "PRODUCT_NOT_FOUND" });
       continue;
     }
+
     if (Number(p.track_stock) === 1 || p.track_stock === true) {
       const avail = toNum(stockMap.get(pid), 0);
       if (avail < qty) {
@@ -138,6 +149,7 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
 
   if (existing && existing.length) {
     const id = Number(existing[0].id);
+
     await sequelize.query(
       `
       UPDATE ecom_customers
@@ -160,6 +172,7 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
         transaction: t,
       }
     );
+
     return id;
   }
 
@@ -251,10 +264,8 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
     }
   );
 
-  // 1) intentar insertId
   let order_id = pickInsertId(qres);
 
-  // 2) 🔥 FIX definitivo: buscar por public_code (UNIQUE)
   if (!order_id) {
     const [r] = await sequelize.query(
       `SELECT id FROM ecom_orders WHERE public_code = :public_code LIMIT 1`,
@@ -263,7 +274,6 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
     order_id = r?.[0]?.id ? Number(r[0].id) : null;
   }
 
-  // 3) último fallback: LAST_INSERT_ID()
   if (!order_id) {
     const [r] = await sequelize.query(`SELECT LAST_INSERT_ID() AS id`, { transaction: t });
     order_id = r?.[0]?.id ? Number(r[0].id) : null;
@@ -278,7 +288,6 @@ async function createOrderItems({ order_id, items, productsById, t }) {
   for (const it of items) {
     const pid = Number(it.product_id);
     const qty = toNum(it.qty, 0);
-
     const p = productsById.get(pid);
     if (!p) throw new Error(`Producto no encontrado: ${pid}`);
 
@@ -290,10 +299,7 @@ async function createOrderItems({ order_id, items, productsById, t }) {
       INSERT INTO ecom_order_items (order_id, product_id, qty, unit_price, line_total, created_at)
       VALUES (:order_id, :product_id, :qty, :unit_price, :line_total, CURRENT_TIMESTAMP)
       `,
-      {
-        replacements: { order_id, product_id: pid, qty, unit_price, line_total },
-        transaction: t,
-      }
+      { replacements: { order_id, product_id: pid, qty, unit_price, line_total }, transaction: t }
     );
   }
 }
@@ -309,7 +315,6 @@ async function createPayment({ order_id, provider, amount, t }) {
 
   let payment_id = pickInsertId(qres);
 
-  // fallback: última payment del pedido (por created_at DESC)
   if (!payment_id) {
     const [r] = await sequelize.query(
       `SELECT id FROM ecom_payments WHERE order_id = :order_id ORDER BY id DESC LIMIT 1`,
@@ -326,8 +331,8 @@ async function createPayment({ order_id, provider, amount, t }) {
 // ============================
 async function checkout(req, res) {
   const payload = req.body || {};
-
   const items = Array.isArray(payload.items) ? payload.items : [];
+
   if (!items.length) return res.status(400).json({ message: "Carrito vacío." });
 
   const normItems = items
@@ -353,7 +358,7 @@ async function checkout(req, res) {
 
       for (const pid of productIds) {
         if (!productsById.has(pid)) {
-          return { error: { status: 400, message: `Producto no existe: ${pid}` } };
+          return { error: { status: 400, message: `Producto no existe: ${pid}`, code: "PRODUCT_NOT_FOUND" } };
         }
       }
 
@@ -385,19 +390,33 @@ async function checkout(req, res) {
 
       if (fulfillment_type === "pickup") {
         if (!pickup_branch_id) {
-          return { error: { status: 400, message: "Falta pickup_branch_id para retiro." } };
+          return { error: { status: 400, message: "Falta pickup_branch_id para retiro.", code: "MISSING_PICKUP_BRANCH" } };
         }
 
         const { ok, missing } = await branchCanFulfillAll(pickup_branch_id, normItems, productsById, t);
         if (!ok) {
-          return { error: { status: 409, message: "Sin stock suficiente en la sucursal elegida.", missing } };
+          return {
+            error: {
+              status: 409,
+              message: "Sin stock suficiente en la sucursal elegida.",
+              code: "NO_STOCK_PICKUP",
+              missing,
+              pickup_branch_id,
+            },
+          };
         }
 
         branch_id = pickup_branch_id;
       } else {
         const pick = await pickBranchForDelivery(normItems, productsById, t);
         if (!pick.picked || !pick.branch_id) {
-          return { error: { status: 409, message: "No hay stock suficiente para preparar el envío desde ninguna sucursal." } };
+          return {
+            error: {
+              status: 409,
+              message: "No hay stock suficiente para preparar el envío desde ninguna sucursal.",
+              code: "NO_STOCK_DELIVERY",
+            },
+          };
         }
         branch_id = pick.branch_id;
       }
@@ -443,8 +462,19 @@ async function checkout(req, res) {
     if (result?.error) return res.status(result.error.status || 400).json(result.error);
     return res.json(result);
   } catch (e) {
+    const detail = e?.message || String(e);
+
+    // ✅ Errores controlados (ej: falta view stock)
+    if (e?.code === "MISSING_STOCK_VIEW") {
+      return res.status(500).json({
+        message: "No se puede validar stock por sucursal.",
+        code: "MISSING_STOCK_VIEW",
+        detail,
+      });
+    }
+
     console.error("❌ checkout error:", e);
-    return res.status(500).json({ message: "Error creando el pedido.", detail: e?.message || String(e) });
+    return res.status(500).json({ message: "Error creando el pedido.", detail });
   }
 }
 

@@ -35,6 +35,35 @@ const SaleItem = require("./sale_item.model")(sequelize, DataTypes);
 const Payment = require("./payment.model")(sequelize, DataTypes);
 
 // ==========================================
+// ✅ Ecommerce (OPCIONAL: no rompe si no existe)
+// ==========================================
+let EcomCustomer = null;
+let EcomOrder = null;
+let EcomOrderItem = null;
+let EcomPayment = null;
+
+try {
+  EcomCustomer = require("./ecom_customer.model")(sequelize, DataTypes);
+} catch (e) {
+  // ok: puede no existir
+}
+try {
+  EcomOrder = require("./ecom_order.model")(sequelize, DataTypes);
+} catch (e) {
+  // ok: puede no existir
+}
+try {
+  EcomOrderItem = require("./ecom_order_item.model")(sequelize, DataTypes);
+} catch (e) {
+  // ok: puede no existir
+}
+try {
+  EcomPayment = require("./ecom_payment.model")(sequelize, DataTypes);
+} catch (e) {
+  // ok: puede no existir
+}
+
+// ==========================================
 // ASOCIACIONES
 // ==========================================
 
@@ -175,8 +204,37 @@ if (!StockMovement.associations?.creator) {
   StockMovement.belongsTo(User, { foreignKey: "created_by", as: "creator" });
 }
 
+// ==========================================
+// ✅ Ecommerce associations (si los modelos existen)
+// ==========================================
+if (EcomOrder && EcomCustomer && !EcomOrder.associations?.customer) {
+  EcomOrder.belongsTo(EcomCustomer, { foreignKey: "customer_id", as: "customer" });
+}
+if (EcomCustomer && EcomOrder && !EcomCustomer.associations?.orders) {
+  EcomCustomer.hasMany(EcomOrder, { foreignKey: "customer_id", as: "orders" });
+}
+
+if (EcomOrder && EcomOrderItem && !EcomOrder.associations?.items) {
+  EcomOrder.hasMany(EcomOrderItem, { foreignKey: "order_id", as: "items" });
+}
+if (EcomOrderItem && EcomOrder && !EcomOrderItem.associations?.order) {
+  EcomOrderItem.belongsTo(EcomOrder, { foreignKey: "order_id", as: "order" });
+}
+
+if (EcomOrderItem && Product && !EcomOrderItem.associations?.product) {
+  EcomOrderItem.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+}
+
+if (EcomPayment && EcomOrder && !EcomPayment.associations?.order) {
+  EcomPayment.belongsTo(EcomOrder, { foreignKey: "order_id", as: "order" });
+}
+if (EcomOrder && EcomPayment && !EcomOrder.associations?.payments) {
+  EcomOrder.hasMany(EcomPayment, { foreignKey: "order_id", as: "payments" });
+}
+
 module.exports = {
   sequelize,
+
   User,
   Role,
   Permission,
@@ -197,4 +255,10 @@ module.exports = {
   Sale,
   SaleItem,
   Payment,
+
+  // ✅ Ecommerce (si existen)
+  EcomCustomer,
+  EcomOrder,
+  EcomOrderItem,
+  EcomPayment,
 };
