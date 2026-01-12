@@ -1,5 +1,4 @@
 // src/controllers/ecomCheckout.controller.js
-// ✅ COPY-PASTE FINAL (FIX insertId vacío + fallback LAST_INSERT_ID)
 // ✅ Checkout público mínimo (DB pos360)
 // - Crea/actualiza customer por email
 // - Valida stock por sucursal (pickup) o elige sucursal que cumpla (delivery)
@@ -33,19 +32,6 @@ function unitPriceFromProductRow(p) {
 function genPublicCode() {
   // 12 chars alfanum (compacto tipo ML)
   return crypto.randomBytes(8).toString("hex").slice(0, 12);
-}
-
-// ✅ FIX: sequelize.query INSERT puede devolver insertId en [0] o [1]
-function pickInsertId(qres) {
-  const a = Array.isArray(qres) ? qres[0] : qres;
-  const b = Array.isArray(qres) ? qres[1] : null;
-
-  const id =
-    (a && typeof a === "object" && Number(a.insertId)) ||
-    (b && typeof b === "object" && Number(b.insertId)) ||
-    null;
-
-  return id ? Number(id) : null;
 }
 
 async function fetchActiveBranches(t) {
@@ -158,7 +144,7 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
     return id;
   }
 
-  const qres = await sequelize.query(
+  const [, meta] = await sequelize.query(
     `
     INSERT INTO ecom_customers (email, first_name, last_name, phone, doc_number, created_at)
     VALUES (:email, :first_name, :last_name, :phone, :doc_number, CURRENT_TIMESTAMP)
@@ -175,19 +161,16 @@ async function upsertCustomer({ email, first_name, last_name, phone, doc_number 
     }
   );
 
-  // ✅ FIX: insertId robusto
-  let insertId = pickInsertId(qres);
-
-  // fallback: buscar por email (sigue siendo útil si insertId viene raro)
+  const insertId = meta?.insertId ? Number(meta.insertId) : null;
   if (!insertId) {
     const [r2] = await sequelize.query(`SELECT id FROM ecom_customers WHERE email = :email LIMIT 1`, {
       replacements: { email: em },
       transaction: t,
     });
-    insertId = r2?.[0]?.id ? Number(r2[0].id) : null;
+    return r2?.[0]?.id ? Number(r2[0].id) : null;
   }
 
-  return insertId || null;
+  return insertId;
 }
 
 function normalizeProvider(method) {
@@ -200,7 +183,6 @@ function normalizeProvider(method) {
 
 async function createOrder({ branch_id, customer_id, payload, subtotal, shipping_total, total, t }) {
   const public_code = genPublicCode();
-
   const fulfillment_type = payload.fulfillment_type === "delivery" ? "delivery" : "pickup";
 
   const ship = payload.shipping || {};
@@ -215,7 +197,7 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
 
   const notes = String(payload.notes || "").trim() || null;
 
-  const qres = await sequelize.query(
+  const [, meta] = await sequelize.query(
     `
     INSERT INTO ecom_orders
       (public_code, branch_id, customer_id, status, currency,
@@ -254,14 +236,7 @@ async function createOrder({ branch_id, customer_id, payload, subtotal, shipping
     }
   );
 
-  // ✅ FIX: insertId robusto + fallback LAST_INSERT_ID()
-  let order_id = pickInsertId(qres);
-
-  if (!order_id) {
-    const [r] = await sequelize.query(`SELECT LAST_INSERT_ID() AS id`, { transaction: t });
-    order_id = r?.[0]?.id ? Number(r[0].id) : null;
-  }
-
+  const order_id = meta?.insertId ? Number(meta.insertId) : null;
   if (!order_id) throw new Error("No se pudo crear el pedido (insertId vacío).");
 
   return { order_id, public_code };
@@ -298,7 +273,7 @@ async function createOrderItems({ order_id, items, productsById, t }) {
 }
 
 async function createPayment({ order_id, provider, amount, t }) {
-  const qres = await sequelize.query(
+  const [, meta] = await sequelize.query(
     `
     INSERT INTO ecom_payments (order_id, provider, status, amount, created_at)
     VALUES (:order_id, :provider, 'created', :amount, CURRENT_TIMESTAMP)
@@ -306,8 +281,8 @@ async function createPayment({ order_id, provider, amount, t }) {
     { replacements: { order_id, provider, amount }, transaction: t }
   );
 
-  const payment_id = pickInsertId(qres);
-  return { payment_id: payment_id || null, provider, status: "created" };
+  const payment_id = meta?.insertId ? Number(meta.insertId) : null;
+  return { payment_id, provider, status: "created" };
 }
 
 // ============================
@@ -319,7 +294,6 @@ async function checkout(req, res) {
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (!items.length) return res.status(400).json({ message: "Carrito vacío." });
 
-  // normalizamos items
   const normItems = items
     .map((x) => ({
       product_id: Number(x.product_id || x.id || 0),
@@ -341,14 +315,12 @@ async function checkout(req, res) {
       const products = await fetchProductsByIds(productIds, t);
       const productsById = new Map(products.map((p) => [Number(p.id), p]));
 
-      // Validar que existan todos
       for (const pid of productIds) {
         if (!productsById.has(pid)) {
           return { error: { status: 400, message: `Producto no existe: ${pid}` } };
         }
       }
 
-      // Calcular totales
       let subtotal = 0;
       for (const it of normItems) {
         const p = productsById.get(it.product_id);
@@ -357,15 +329,10 @@ async function checkout(req, res) {
       }
       subtotal = Number(subtotal.toFixed(2));
 
-      // shipping_total (por ahora simple)
       const shipping_total =
-        fulfillment_type === "delivery"
-          ? Number(toNum(payload.shipping_total, 0).toFixed(2))
-          : 0.0;
-
+        fulfillment_type === "delivery" ? Number(toNum(payload.shipping_total, 0).toFixed(2)) : 0.0;
       const total = Number((subtotal + shipping_total).toFixed(2));
 
-      // Customer upsert (por email)
       const customer_id = await upsertCustomer(
         {
           email: payload?.contact?.email || payload?.email,
@@ -377,7 +344,6 @@ async function checkout(req, res) {
         t
       );
 
-      // Branch logic
       let branch_id = null;
 
       if (fulfillment_type === "pickup") {
@@ -398,7 +364,6 @@ async function checkout(req, res) {
 
         branch_id = pickup_branch_id;
       } else {
-        // delivery: elegimos una sucursal que pueda cumplir todo (primer match)
         const pick = await pickBranchForDelivery(normItems, productsById, t);
         if (!pick.picked || !pick.branch_id) {
           return {
@@ -411,7 +376,6 @@ async function checkout(req, res) {
         branch_id = pick.branch_id;
       }
 
-      // Crear order + items + payment
       const { order_id, public_code } = await createOrder({
         branch_id,
         customer_id,
@@ -424,7 +388,6 @@ async function checkout(req, res) {
 
       await createOrderItems({ order_id, items: normItems, productsById, t });
 
-      // update totals (por si cambia en futuro)
       await sequelize.query(
         `
         UPDATE ecom_orders
