@@ -1,18 +1,15 @@
 // src/controllers/ecomCheckout.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (Checkout público ROBUSTO + MercadoPago REAL)
 // - Crea order + items + payment
+// - Guarda method/reference/note en ecom_payments (tu schema real)
 // - Si método = MERCADOPAGO: crea preferencia MP y devuelve redirect_url (init_point)
 // - Tokens SIEMPRE en ENV (NO en DB)
 //
 // Requiere ENV (real):
-// - MERCADOPAGO_ACCESS_TOKEN   ✅ (tu mercadopago.service.js)
+// - MERCADOPAGO_ACCESS_TOKEN
 // Opcional:
 // - ECOMMERCE_PUBLIC_URL (back_urls)
 // - MP_NOTIFICATION_URL (webhook público)
-//
-// NOTA: para compatibilidad, el enable de MP lo controla:
-// - shop_settings('payments').mp_enabled (boolean)
-// - y que exista MERCADOPAGO_ACCESS_TOKEN en ENV
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -379,13 +376,24 @@ async function createOrderItems({ order_id, items, productsById, t }) {
   }
 }
 
-async function createPayment({ order_id, provider, amount, t }) {
+async function createPayment({ order_id, provider, method, amount, reference, note, currency, t }) {
   const qres = await sequelize.query(
     `
-    INSERT INTO ecom_payments (order_id, provider, status, amount, created_at)
-    VALUES (:order_id, :provider, 'created', :amount, CURRENT_TIMESTAMP)
+    INSERT INTO ecom_payments (order_id, provider, method, status, amount, reference, note, currency, created_at)
+    VALUES (:order_id, :provider, :method, 'created', :amount, :reference, :note, :currency, CURRENT_TIMESTAMP)
     `,
-    { replacements: { order_id, provider, amount }, transaction: t }
+    {
+      replacements: {
+        order_id,
+        provider,
+        method: method || null,
+        amount,
+        reference: reference || null,
+        note: note || null,
+        currency: currency || "ARS",
+      },
+      transaction: t,
+    }
   );
 
   let payment_id = pickInsertId(qres);
@@ -441,6 +449,8 @@ async function updatePaymentMpMetaIfPossible({ payment_id, mpPref, externalRef, 
     repl.external_reference = externalRef || null;
   }
 
+  if (!sets.length) return;
+
   await sequelize.query(
     `
     UPDATE ecom_payments
@@ -472,7 +482,12 @@ async function checkout(req, res) {
   const fulfillment_type = payload.fulfillment_type === "delivery" ? "delivery" : "pickup";
   const pickup_branch_id = toInt(payload.pickup_branch_id || 0, 0) || null;
 
-  const pay_provider = normalizeProvider(payload?.payment?.method || payload?.pay_method || "mercadopago");
+  const rawPayMethod = String(payload?.payment?.method || payload?.pay_method || "MERCADOPAGO").trim().toUpperCase();
+  const pay_provider = normalizeProvider(rawPayMethod);
+
+  const pay_reference = toStr(payload?.payment?.reference || "");
+  const pay_note = toStr(payload?.payment?.note || "");
+  const currency = "ARS";
 
   try {
     const result = await sequelize.transaction(async (t) => {
@@ -567,29 +582,51 @@ async function checkout(req, res) {
         { replacements: { id: order_id, subtotal, shipping_total, total }, transaction: t }
       );
 
-      const pay = await createPayment({ order_id, provider: pay_provider, amount: total, t });
+      const pay = await createPayment({
+        order_id,
+        provider: pay_provider,
+        method: rawPayMethod,
+        amount: total,
+        reference: pay_reference || null,
+        note: pay_note || null,
+        currency,
+        t,
+      });
 
       await setOrderPaymentMetaIfPossible({ order_id, provider: pay_provider, t });
 
+      // ==========================
+      // ✅ MercadoPago REAL
+      // ==========================
       let redirect_url = null;
       let mp = null;
 
       const paymentsCfg = await getShopPaymentsSettings(t);
       const mpEnabledByAdmin = !!paymentsCfg.mp_enabled;
 
-      // ✅ SELLADO: token real env + trim
-      const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+      const envMp = !!process.env.MERCADOPAGO_ACCESS_TOKEN;
       const isMp = pay_provider === "mercadopago";
 
       if (isMp) {
         if (!mpEnabledByAdmin) {
-          return { error: { status: 400, code: "MP_DISABLED", message: "Mercado Pago está deshabilitado por configuración." } };
+          return {
+            error: { status: 400, code: "MP_DISABLED", message: "Mercado Pago está deshabilitado por configuración." },
+          };
         }
         if (!envMp) {
-          return { error: { status: 400, code: "MP_TOKEN_MISSING", message: "Falta MERCADOPAGO_ACCESS_TOKEN en el servidor." } };
+          return {
+            error: {
+              status: 400,
+              code: "MP_TOKEN_MISSING",
+              message: "Mercado Pago no está habilitado en el servidor (falta MERCADOPAGO_ACCESS_TOKEN).",
+            },
+          };
         }
 
-        const baseUrl = toStr(process.env.ECOMMERCE_PUBLIC_URL || process.env.FRONTEND_URL || process.env.APP_URL).replace(/\/+$/, "");
+        const baseUrl = toStr(process.env.ECOMMERCE_PUBLIC_URL || process.env.FRONTEND_URL || process.env.APP_URL).replace(
+          /\/+$/,
+          ""
+        );
 
         const mpItems = normItems.map((it) => {
           const p = productsById.get(it.product_id);
@@ -618,7 +655,12 @@ async function checkout(req, res) {
             : undefined,
           auto_return: "approved",
           notification_url: process.env.MP_NOTIFICATION_URL || undefined,
-          metadata: { order_id, public_code, branch_id, payment_id: pay.payment_id },
+          metadata: {
+            order_id,
+            public_code,
+            branch_id,
+            payment_id: pay.payment_id,
+          },
         };
 
         if (!prefPayload.back_urls) delete prefPayload.back_urls;
@@ -626,7 +668,12 @@ async function checkout(req, res) {
 
         const mpPref = await createPreference(prefPayload);
 
-        await updatePaymentMpMetaIfPossible({ payment_id: pay.payment_id, mpPref, externalRef, t });
+        await updatePaymentMpMetaIfPossible({
+          payment_id: pay.payment_id,
+          mpPref,
+          externalRef,
+          t,
+        });
 
         redirect_url = mpPref?.init_point || mpPref?.sandbox_init_point || null;
         mp = {
@@ -636,13 +683,33 @@ async function checkout(req, res) {
         };
 
         if (!redirect_url) {
-          return { error: { status: 500, code: "MP_NO_REDIRECT", message: "Mercado Pago no devolvió init_point.", detail: mpPref || null } };
+          return {
+            error: {
+              status: 500,
+              code: "MP_NO_REDIRECT",
+              message: "Mercado Pago no devolvió init_point (preferencia inválida).",
+              detail: mpPref || null,
+            },
+          };
         }
       }
 
       return {
-        order: { id: order_id, public_code, status: "created", fulfillment_type, branch_id, subtotal, shipping_total, total },
-        payment: { id: pay.payment_id, provider: pay.provider, status: isMp ? "pending" : pay.status },
+        order: {
+          id: order_id,
+          public_code,
+          status: "created",
+          fulfillment_type,
+          branch_id,
+          subtotal,
+          shipping_total,
+          total,
+        },
+        payment: {
+          id: pay.payment_id,
+          provider: pay.provider,
+          status: isMp ? "pending" : pay.status,
+        },
         redirect_url,
         mp,
       };
@@ -654,7 +721,11 @@ async function checkout(req, res) {
     const detail = e?.message || String(e);
 
     if (e?.code === "MISSING_STOCK_VIEW") {
-      return res.status(500).json({ message: "No se puede validar stock por sucursal.", code: "MISSING_STOCK_VIEW", detail });
+      return res.status(500).json({
+        message: "No se puede validar stock por sucursal.",
+        code: "MISSING_STOCK_VIEW",
+        detail,
+      });
     }
 
     console.error("❌ checkout error:", e);
