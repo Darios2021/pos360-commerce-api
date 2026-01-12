@@ -1,8 +1,7 @@
 // src/controllers/public.shopConfig.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (SELLADO)
 // Public config para checkout (SIN AUTH)
 //
-// Rutas:
 // GET /api/v1/public/shop/payment-config
 //
 // Lee shop_settings('payments') y devuelve:
@@ -11,16 +10,15 @@
 //   mercadopago: { enabled },
 //   cash: { enabled, note }
 // }
+//
+// ✅ REAL/SELLADO:
+// MP solo si:
+// - payments.mp_enabled === true (DB)
+// - y existe token REAL en ENV: MERCADOPAGO_ACCESS_TOKEN
+// ❌ NO usa tokens desde DB
+// ❌ NO usa fallback legacy
 
 const { sequelize } = require("../models");
-
-function hasMpEnvToken() {
-  // ✅ token REAL solo en ENV
-  return !!(
-    String(process.env.MP_ACCESS_TOKEN || "").trim() ||
-    String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim()
-  );
-}
 
 async function getPaymentsConfig(req, res) {
   const out = {
@@ -44,14 +42,15 @@ async function getPaymentsConfig(req, res) {
     out.transfer.holder = String(p.transfer_holder || "");
     out.transfer.instructions = String(p.transfer_instructions || "");
 
-    // ✅ habilitado si admin lo activó + existe token ENV real
-    out.mercadopago.enabled = !!p.mp_enabled && hasMpEnvToken();
+    // ✅ Token REAL (ENV) - SELLADO
+    const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+    out.mercadopago.enabled = !!p.mp_enabled && envMp;
 
     out.cash.enabled = !!p.cash_enabled;
     out.cash.note = String(p.cash_note || "");
 
     return res.json({ ok: true, ...out });
-  } catch (e) {
+  } catch {
     return res.json({ ok: true, ...out });
   }
 }

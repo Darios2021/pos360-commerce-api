@@ -272,7 +272,6 @@ function normalizeProvider(method) {
 }
 
 async function getShopPaymentsSettings(t) {
-  // Lee shop_settings('payments') para respetar mp_enabled/cash/transfer
   try {
     const [rows] = await sequelize.query(
       `SELECT value_json FROM shop_settings WHERE \`key\`='payments' LIMIT 1`,
@@ -408,11 +407,9 @@ async function updatePaymentMpMetaIfPossible({ payment_id, mpPref, externalRef, 
   const sets = [];
   const repl = { id: payment_id };
 
-  // Base columns que casi seguro existen en tu ecom_payments actual:
   sets.push("status = :status");
   repl.status = "pending";
 
-  // external_payload es JSON? Si existe en tu schema original: lo usamos. Si no, no rompemos.
   const hasExternalPayload = await hasColumn("ecom_payments", "external_payload", t);
   const hasExternalId = await hasColumn("ecom_payments", "external_id", t);
   const hasExternalStatus = await hasColumn("ecom_payments", "external_status", t);
@@ -426,14 +423,12 @@ async function updatePaymentMpMetaIfPossible({ payment_id, mpPref, externalRef, 
     repl.external_status = "preference_created";
   }
   if (hasExternalPayload) {
-    // guardamos mp_preference como json
     sets.push(
       "external_payload = JSON_SET(COALESCE(external_payload, JSON_OBJECT()), '$.mp_preference', CAST(:mp_payload AS JSON))"
     );
     repl.mp_payload = JSON.stringify(mpPref || {});
   }
 
-  // Si existen campos extra “nuevos”, los seteamos también
   const hasMpPrefId = await hasColumn("ecom_payments", "mp_preference_id", t);
   const hasExtRef = await hasColumn("ecom_payments", "external_reference", t);
 
@@ -445,8 +440,6 @@ async function updatePaymentMpMetaIfPossible({ payment_id, mpPref, externalRef, 
     sets.push("external_reference = :external_reference");
     repl.external_reference = externalRef || null;
   }
-
-  if (!sets.length) return;
 
   await sequelize.query(
     `
@@ -494,7 +487,6 @@ async function checkout(req, res) {
         }
       }
 
-      // Totales
       let subtotal = 0;
       for (const it of normItems) {
         const p = productsById.get(it.product_id);
@@ -508,7 +500,6 @@ async function checkout(req, res) {
 
       const total = Number((subtotal + shipping_total).toFixed(2));
 
-      // Customer
       const customer_id = await upsertCustomer(
         {
           email: payload?.contact?.email || payload?.email,
@@ -520,7 +511,6 @@ async function checkout(req, res) {
         t
       );
 
-      // Branch
       let branch_id = null;
 
       if (fulfillment_type === "pickup") {
@@ -556,7 +546,6 @@ async function checkout(req, res) {
         branch_id = pick.branch_id;
       }
 
-      // Order
       const { order_id, public_code } = await createOrder({
         branch_id,
         customer_id,
@@ -578,46 +567,29 @@ async function checkout(req, res) {
         { replacements: { id: order_id, subtotal, shipping_total, total }, transaction: t }
       );
 
-      // Payment
       const pay = await createPayment({ order_id, provider: pay_provider, amount: total, t });
 
-      // Meta order (si existen cols)
       await setOrderPaymentMetaIfPossible({ order_id, provider: pay_provider, t });
 
-      // ==========================
-      // ✅ MercadoPago REAL
-      // ==========================
       let redirect_url = null;
       let mp = null;
 
       const paymentsCfg = await getShopPaymentsSettings(t);
       const mpEnabledByAdmin = !!paymentsCfg.mp_enabled;
 
-      // Token real: SOLO ENV
-      const envMp = !!process.env.MERCADOPAGO_ACCESS_TOKEN;
-
+      // ✅ SELLADO: token real env + trim
+      const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
       const isMp = pay_provider === "mercadopago";
 
       if (isMp) {
         if (!mpEnabledByAdmin) {
-          return {
-            error: { status: 400, code: "MP_DISABLED", message: "Mercado Pago está deshabilitado por configuración." },
-          };
+          return { error: { status: 400, code: "MP_DISABLED", message: "Mercado Pago está deshabilitado por configuración." } };
         }
         if (!envMp) {
-          return {
-            error: {
-              status: 400,
-              code: "MP_TOKEN_MISSING",
-              message: "Mercado Pago no está habilitado en el servidor (falta MERCADOPAGO_ACCESS_TOKEN).",
-            },
-          };
+          return { error: { status: 400, code: "MP_TOKEN_MISSING", message: "Falta MERCADOPAGO_ACCESS_TOKEN en el servidor." } };
         }
 
-        const baseUrl = toStr(process.env.ECOMMERCE_PUBLIC_URL || process.env.FRONTEND_URL || process.env.APP_URL).replace(
-          /\/+$/,
-          ""
-        );
+        const baseUrl = toStr(process.env.ECOMMERCE_PUBLIC_URL || process.env.FRONTEND_URL || process.env.APP_URL).replace(/\/+$/, "");
 
         const mpItems = normItems.map((it) => {
           const p = productsById.get(it.product_id);
@@ -646,12 +618,7 @@ async function checkout(req, res) {
             : undefined,
           auto_return: "approved",
           notification_url: process.env.MP_NOTIFICATION_URL || undefined,
-          metadata: {
-            order_id,
-            public_code,
-            branch_id,
-            payment_id: pay.payment_id,
-          },
+          metadata: { order_id, public_code, branch_id, payment_id: pay.payment_id },
         };
 
         if (!prefPayload.back_urls) delete prefPayload.back_urls;
@@ -659,13 +626,7 @@ async function checkout(req, res) {
 
         const mpPref = await createPreference(prefPayload);
 
-        // Guardamos lo que podamos en DB (sin romper si faltan cols)
-        await updatePaymentMpMetaIfPossible({
-          payment_id: pay.payment_id,
-          mpPref,
-          externalRef,
-          t,
-        });
+        await updatePaymentMpMetaIfPossible({ payment_id: pay.payment_id, mpPref, externalRef, t });
 
         redirect_url = mpPref?.init_point || mpPref?.sandbox_init_point || null;
         mp = {
@@ -675,33 +636,13 @@ async function checkout(req, res) {
         };
 
         if (!redirect_url) {
-          return {
-            error: {
-              status: 500,
-              code: "MP_NO_REDIRECT",
-              message: "Mercado Pago no devolvió init_point (preferencia inválida).",
-              detail: mpPref || null,
-            },
-          };
+          return { error: { status: 500, code: "MP_NO_REDIRECT", message: "Mercado Pago no devolvió init_point.", detail: mpPref || null } };
         }
       }
 
       return {
-        order: {
-          id: order_id,
-          public_code,
-          status: "created",
-          fulfillment_type,
-          branch_id,
-          subtotal,
-          shipping_total,
-          total,
-        },
-        payment: {
-          id: pay.payment_id,
-          provider: pay.provider,
-          status: isMp ? "pending" : pay.status,
-        },
+        order: { id: order_id, public_code, status: "created", fulfillment_type, branch_id, subtotal, shipping_total, total },
+        payment: { id: pay.payment_id, provider: pay.provider, status: isMp ? "pending" : pay.status },
         redirect_url,
         mp,
       };
@@ -713,11 +654,7 @@ async function checkout(req, res) {
     const detail = e?.message || String(e);
 
     if (e?.code === "MISSING_STOCK_VIEW") {
-      return res.status(500).json({
-        message: "No se puede validar stock por sucursal.",
-        code: "MISSING_STOCK_VIEW",
-        detail,
-      });
+      return res.status(500).json({ message: "No se puede validar stock por sucursal.", code: "MISSING_STOCK_VIEW", detail });
     }
 
     console.error("❌ checkout error:", e);
