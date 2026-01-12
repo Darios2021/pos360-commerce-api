@@ -1,5 +1,5 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms + SHOP BRANDING)
+// ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms + SHOP BRANDING + PAYMENT CONFIG)
 
 const PublicService = require("../services/public.service");
 
@@ -169,7 +169,7 @@ module.exports = {
     }
   },
 
-  // ✅ NUEVO: GET /public/shop/branding
+  // ✅ GET /public/shop/branding
   async getShopBranding(req, res) {
     try {
       const item = await PublicService.getShopBranding();
@@ -180,6 +180,21 @@ module.exports = {
         ok: false,
         code: "PUBLIC_SHOP_BRANDING_ERROR",
         message: err?.message || "Error trayendo branding",
+      });
+    }
+  },
+
+  // ✅ NUEVO: GET /public/shop/payment-config
+  async getPaymentConfig(req, res) {
+    try {
+      const item = await PublicService.getPaymentConfig();
+      return res.json({ ok: true, item });
+    } catch (err) {
+      console.error("PUBLIC_PAYMENT_CONFIG_ERROR", err);
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_PAYMENT_CONFIG_ERROR",
+        message: err?.message || "Error trayendo config de pago",
       });
     }
   },
