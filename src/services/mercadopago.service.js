@@ -1,30 +1,46 @@
 // src/services/mercadopago.service.js
 // ✅ Mercado Pago service (sin SDK, usa fetch nativo)
-// Requiere env:
-// - MERCADOPAGO_ACCESS_TOKEN
+//
+// ✅ ENV (PROD seguro):
+// - MP_ACCESS_TOKEN               (RECOMENDADO)
+// Compatibilidad:
+// - MERCADOPAGO_ACCESS_TOKEN      (legacy)
+//
 // Opcional:
-// - MERCADOPAGO_BASE_URL (default https://api.mercadopago.com)
+// - MP_BASE_URL o MERCADOPAGO_BASE_URL (default https://api.mercadopago.com)
 
-const MP_BASE_URL = (process.env.MERCADOPAGO_BASE_URL || "https://api.mercadopago.com").replace(/\/+$/, "");
-const MP_TOKEN = String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+const MP_BASE_URL = (
+  process.env.MP_BASE_URL ||
+  process.env.MERCADOPAGO_BASE_URL ||
+  "https://api.mercadopago.com"
+).replace(/\/+$/, "");
+
+function getToken() {
+  const t =
+    String(process.env.MP_ACCESS_TOKEN || "").trim() ||
+    String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+  return t;
+}
 
 function assertToken() {
-  if (!MP_TOKEN) {
-    const err = new Error("Falta MERCADOPAGO_ACCESS_TOKEN en el entorno.");
+  const token = getToken();
+  if (!token) {
+    const err = new Error("Falta MP_ACCESS_TOKEN (o MERCADOPAGO_ACCESS_TOKEN) en el entorno.");
     err.code = "MP_TOKEN_MISSING";
     throw err;
   }
+  return token;
 }
 
 async function mpFetch(path, { method = "GET", body = null } = {}) {
-  assertToken();
+  const token = assertToken();
 
   const url = `${MP_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
 
   const resp = await fetch(url, {
     method,
     headers: {
-      Authorization: `Bearer ${MP_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : null,

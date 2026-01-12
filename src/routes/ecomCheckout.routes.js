@@ -1,5 +1,6 @@
 // src/routes/ecomCheckout.routes.js
 // ✅ Rutas públicas de ecommerce checkout
+// Se monta bajo /api/v1/ecom
 
 const express = require("express");
 const router = express.Router();

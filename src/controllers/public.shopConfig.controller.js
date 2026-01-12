@@ -14,8 +14,15 @@
 
 const { sequelize } = require("../models");
 
+function hasMpEnvToken() {
+  // ✅ token REAL solo en ENV
+  return !!(
+    String(process.env.MP_ACCESS_TOKEN || "").trim() ||
+    String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim()
+  );
+}
+
 async function getPaymentsConfig(req, res) {
-  // default
   const out = {
     transfer: { enabled: true, bank: "", alias: "", cbu: "", holder: "", instructions: "" },
     mercadopago: { enabled: false },
@@ -37,16 +44,14 @@ async function getPaymentsConfig(req, res) {
     out.transfer.holder = String(p.transfer_holder || "");
     out.transfer.instructions = String(p.transfer_instructions || "");
 
-    // mp_enabled lo puede activar el admin, pero además el backend puede validar env reales
-    const envMp = !!process.env.MP_ACCESS_TOKEN;
-    out.mercadopago.enabled = !!p.mp_enabled && envMp;
+    // ✅ habilitado si admin lo activó + existe token ENV real
+    out.mercadopago.enabled = !!p.mp_enabled && hasMpEnvToken();
 
     out.cash.enabled = !!p.cash_enabled;
     out.cash.note = String(p.cash_note || "");
 
     return res.json({ ok: true, ...out });
   } catch (e) {
-    // fallback suave
     return res.json({ ok: true, ...out });
   }
 }
