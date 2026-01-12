@@ -53,6 +53,49 @@ async function viewExists(viewName, t) {
   return !!(r && r.length);
 }
 
+// ✅ NEW: check column exists (para no romper si no migraste aún)
+async function hasColumn(table, column, t) {
+  const [r] = await sequelize.query(
+    `
+    SELECT COUNT(*) AS c
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = :t
+      AND COLUMN_NAME = :c
+    `,
+    { replacements: { t: table, c: column }, transaction: t }
+  );
+  return Number(r?.[0]?.c || 0) > 0;
+}
+
+// ✅ NEW: set order payment fields if exist
+async function setOrderPaymentMetaIfPossible({ order_id, provider, t }) {
+  const hasPayStatus = await hasColumn("ecom_orders", "payment_status", t);
+  const hasProvider = await hasColumn("ecom_orders", "checkout_provider", t);
+  if (!hasPayStatus && !hasProvider) return;
+
+  const sets = [];
+  const repl = { id: order_id };
+
+  if (hasPayStatus) {
+    sets.push("payment_status = :payment_status");
+    repl.payment_status = "pending";
+  }
+  if (hasProvider) {
+    sets.push("checkout_provider = :checkout_provider");
+    repl.checkout_provider = String(provider || "").toUpperCase();
+  }
+
+  await sequelize.query(
+    `
+    UPDATE ecom_orders
+    SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP
+    WHERE id = :id
+    `,
+    { replacements: repl, transaction: t }
+  );
+}
+
 async function fetchActiveBranches(t) {
   const [rows] = await sequelize.query(
     `SELECT id, name, is_active FROM branches WHERE is_active = 1 ORDER BY id ASC`,
@@ -443,6 +486,9 @@ async function checkout(req, res) {
       );
 
       const pay = await createPayment({ order_id, provider: pay_method, amount: total, t });
+
+      // ✅ NEW: si existen columnas nuevas, marcamos pending + provider
+      await setOrderPaymentMetaIfPossible({ order_id, provider: pay_method, t });
 
       return {
         order: {
