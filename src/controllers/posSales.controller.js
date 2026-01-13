@@ -404,7 +404,7 @@ function injectExistsFiltersIntoWhere(where, req) {
   if (ands.length) where[Op.and] = (where[Op.and] || []).concat(ands);
 }
 
-// ============================
+/// ============================
 // GET /api/v1/pos/sales
 // ============================
 async function listSales(req, res, next) {
@@ -423,12 +423,24 @@ async function listSales(req, res, next) {
     const saleBranchAs = findAssocAlias(Sale, Branch);
     const saleUserAs = findAssocAlias(Sale, User);
     const salePaymentsAs = findAssocAlias(Sale, Payment);
+    const saleItemsAs = findAssocAlias(Sale, SaleItem);
 
     if (Branch && saleBranchAs) {
-      include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
+      include.push({
+        model: Branch,
+        as: saleBranchAs,
+        required: false,
+        attributes: pickBranchAttributes(),
+      });
     }
+
     if (User && saleUserAs) {
-      include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
+      include.push({
+        model: User,
+        as: saleUserAs,
+        required: false,
+        attributes: pickUserAttributes(),
+      });
     }
 
     // ✅ CRÍTICO: payments hasMany => usar separate para NO duplicar filas ni romper paginado
@@ -439,6 +451,28 @@ async function listSales(req, res, next) {
         required: false,
         separate: true,
         order: [["id", "ASC"]],
+      });
+    }
+
+    // ✅ NUEVO: items hasMany => separate para poder mostrar PRODUCTOS sin romper paginado
+    if (SaleItem && saleItemsAs) {
+      include.push({
+        model: SaleItem,
+        as: saleItemsAs,
+        required: false,
+        separate: true,
+        order: [["id", "ASC"]],
+        attributes: [
+          "id",
+          "product_id",
+          "warehouse_id",
+          "quantity",
+          "unit_price",
+          "line_total",
+          "product_name_snapshot",
+          "product_sku_snapshot",
+          "product_barcode_snapshot",
+        ],
       });
     }
 
