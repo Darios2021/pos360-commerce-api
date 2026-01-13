@@ -2,14 +2,13 @@
 // ✅ COPY-PASTE FINAL COMPLETO (SIN RUTAS DUPLICADAS)
 //
 // OBJETIVO:
-// - Este router es el ÚNICO que expone /sales/* en /api/v1/pos
-// - Refunds/Exchanges salen del módulo de ventas (posSales.controller.js)
-// - ✅ GET refunds/exchanges TAMBIÉN desde posSales.controller.js (FUENTE DE VERDAD)
-//   para no depender de controllers opcionales que pueden faltar.
+// - /api/v1/pos/context + /products + ✅ POST /sales => POS rápido (pos.controller.js)
+// - List/stats/detail/delete/refunds/exchanges => posSales.controller.js
 //
-// IMPORTANTE:
-// - NO montes otros routers que definan /sales/:id/refunds o /sales/:id/exchanges
-//   (posRefunds.routes.js y posExchanges.routes.js deben quedar fuera de /pos)
+// CLAVE DEL FIX:
+// - ✅ POST /sales debe ir a pos.controller.js (createPosSale)
+//   porque tu POS front NO envía warehouse_id por item y ese controller lo resuelve por contexto.
+// - posSales.controller.js puede seguir existiendo para list/stats/detail/refunds/exchanges.
 
 const router = require("express").Router();
 
@@ -23,6 +22,12 @@ const getContext = posController.getContext || posController?.default?.getContex
 const listProductsForPos =
   posController.listProductsForPos || posController?.default?.listProductsForPos;
 const createPosSale = posController.createSale || posController?.default?.createSale;
+
+// ✅ NUEVO: devoluciones/cambios del POS rápido (si existen)
+const createSaleReturn =
+  posController.createSaleReturn || posController?.default?.createSaleReturn;
+const createSaleExchange =
+  posController.createSaleExchange || posController?.default?.createSaleExchange;
 
 // ==============================
 // POS Sales (list/stats/detail/delete/refunds/exchanges)
@@ -45,7 +50,10 @@ const getSaleById =
   posSalesController.getSale ||
   posSalesController.saleById;
 
-const createSale =
+// ⚠️ OJO: createSale del módulo ventas NO lo usamos para POS checkout
+// porque te exige warehouse_id por item (según tu error actual).
+// Lo dejamos referenciado por si lo querés usar en otro endpoint.
+const createSaleBackoffice =
   posSalesController.createSale ||
   posSalesController.createSales ||
   posSalesController.newSale;
@@ -127,15 +135,26 @@ router.get("/context", safeFn("getContext", getContext));
 // ---- POS PRODUCTS
 router.get("/products", safeFn("listProductsForPos", listProductsForPos));
 
-// ---- POS CREATE SALE (pos.controller.js) - POS rápido
-router.post("/sale", safeFn("createPosSale", createPosSale));
+/**
+ * ✅ POS CREATE SALE (FRONT POS)
+ * Este ES el endpoint que usa el POS del frontend:
+ * - NO requiere warehouse_id por item
+ * - resuelve warehouse por contexto
+ */
+router.post("/sales", safeFn("createPosSale", createPosSale));
+
+/**
+ * (Opcional) si querés conservar el endpoint viejo del módulo ventas:
+ * - Útil para backoffice o importaciones
+ * - Puede exigir warehouse_id por item
+ */
+router.post("/sales/backoffice", safeFn("createSaleBackoffice", createSaleBackoffice));
 
 // ---- SALES MODULE (posSales.controller.js)
 router.get("/sales", safeFn("listSales", listSales));
 router.get("/sales/stats", safeFn("statsSales", statsSales));
 
 router.get("/sales/:id", safeFn("getSaleById", getSaleById));
-router.post("/sales", safeFn("createSale", createSale));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
 
 // ✅ Refunds/Exchanges del módulo de ventas (NO pos.controller.js)
@@ -145,6 +164,10 @@ router.post("/sales/:id/exchanges", safeFn("createExchange", createExchange));
 // ✅ GET refunds/exchanges garantizado (misma fuente de verdad)
 router.get("/sales/:id/refunds", safeFn("listRefundsBySale", listRefundsBySale));
 router.get("/sales/:id/exchanges", safeFn("listExchangesBySale", listExchangesBySale));
+
+// ---- DEVOLUCIONES / CAMBIOS (si usás las NUEVAS del pos.controller.js)
+router.post("/returns", safeFn("createSaleReturn", createSaleReturn));
+router.post("/exchanges", safeFn("createSaleExchange", createSaleExchange));
 
 // ---- OPTIONS (posSalesOptions.controller.js)
 router.get("/sales/options/sellers", safeFn("optionsSellers", optionsSellers));
