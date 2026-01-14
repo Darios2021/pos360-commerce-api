@@ -1,22 +1,77 @@
 // src/routes/v1.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO
-// - ✅ GET /api/v1/_version
-// - ✅ (opcional) GET /api/v1/_whoami
-// - ✅ Ecommerce Checkout público: POST /api/v1/ecom/checkout
-// - ✅ Ecommerce Payments: preference MP + webhook + transfer proof
-// - ✅ Admin Ecommerce Orders/Payments/Settings (con RBAC por permisos)
-// - ✅ Public shop config
+// ✅ COPY-PASTE FINAL COMPLETO (ANTI-CRASH + alineado al esquema actual)
 //
-// 🔒 RBAC:
-// - Solo se aplica a /admin/users y /admin/shop (para no romper operación).
+// Public:
+// - GET  /api/v1/_version
+// - GET  /api/v1/_whoami (opcional)
+// - /health
+// - /auth
+// - /public (ecommerce público)
+// - /public/shop/payment-config
+// - /ecom/checkout
+// - /ecom/payments + webhooks
 //
-// 🧭 Branch Context:
-// - Solo se aplica a /products por ahora (paso quirúrgico).
+// Protected:
+// - /products (con branchContext)
+// - /categories, /subcategories, /branches, /warehouses, /stock, /dashboard
+// - /pos (unificado)
+// - /me
+//
+// Admin (con RBAC context):
+// - /admin/users
+// - /admin/shop/* (branding/orders/settings/payments)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
-const branchContext = require("../middlewares/branchContext.middleware");
-const { attachAccessContext } = require("../middlewares/rbac.middleware");
+
+// =========================
+// Helpers: resolve function exports (default/named/module.exports)
+// =========================
+function resolveFn(mod, candidates = []) {
+  if (typeof mod === "function") return mod;
+  if (!mod || typeof mod !== "object") return null;
+
+  // default export
+  if (typeof mod.default === "function") return mod.default;
+
+  // named candidates
+  for (const k of candidates) {
+    if (typeof mod[k] === "function") return mod[k];
+  }
+
+  // if the object has exactly one function, use it
+  const fnKeys = Object.keys(mod).filter((k) => typeof mod[k] === "function");
+  if (fnKeys.length === 1) return mod[fnKeys[0]];
+
+  return null;
+}
+
+function safeUse(path, ...mws) {
+  const final = [];
+
+  for (const mw of mws) {
+    if (typeof mw === "function") {
+      final.push(mw);
+      continue;
+    }
+
+    // intentar “desempaquetar” módulos que vienen como objeto
+    const unwrapped = resolveFn(mw, ["middleware", "handler"]);
+    if (typeof unwrapped === "function") {
+      final.push(unwrapped);
+      continue;
+    }
+
+    const keys = mw && typeof mw === "object" ? Object.keys(mw) : null;
+    console.error("❌ [v1.routes] Middleware inválido en router.use()");
+    console.error("   path:", path);
+    console.error("   typeof:", typeof mw);
+    console.error("   keys:", keys);
+    throw new Error(`INVALID_MIDDLEWARE_FOR_${path}`);
+  }
+
+  router.use(path, ...final);
+}
 
 // =========================
 // ✅ VERSION (SIN AUTH)
@@ -40,21 +95,43 @@ router.get("/_whoami", requireAuth, (req, res) => {
 });
 
 // =========================
+// Middlewares “resueltos” (blindado)
+// =========================
+
+// ✅ Branch Context (scope por sucursal + warehouse)
+// OJO: este require tiene que apuntar al archivo correcto.
+// Este resolver evita que explote si el export es default/named.
+const branchContextMod = require("../middlewares/branchContext.middleware");
+const branchContext = resolveFn(branchContextMod, ["branchContext"]);
+if (!branchContext) {
+  console.error("❌ branchContext NO resolvió a function. keys:", Object.keys(branchContextMod || {}));
+  throw new Error("BRANCH_CONTEXT_INVALID_EXPORT");
+}
+
+// ✅ RBAC context
+const rbacMod = require("../middlewares/rbac.middleware");
+const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
+if (!attachAccessContext) {
+  console.error("❌ attachAccessContext NO resolvió a function. keys:", Object.keys(rbacMod || {}));
+  throw new Error("RBAC_INVALID_EXPORT");
+}
+
+// =========================
 // Public
 // =========================
 const healthRoutes = require("./health.routes");
 const authRoutes = require("./auth.routes");
 
-// 🛒 Ecommerce público (catálogo, producto, etc.)
+// 🛒 Ecommerce público
 const publicEcomRoutes = require("./public.routes");
 
-// ✅ Public shop config (payment-config, etc.)
+// ✅ Public shop config
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// 🧾 Ecommerce Checkout (SIN AUTH)
+// 🧾 Checkout público
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 
-// 💳 Ecommerce Payments (SIN AUTH)
+// 💳 Payments público (preference + webhook + transfer proof)
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
 
 // =========================
@@ -68,66 +145,38 @@ const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 const dashboardRoutes = require("./dashboard.routes");
 
-// POS (UNIFICADO)
+// POS
 const posRoutes = require("./pos.routes");
 
-// ✅ ME
+// Perfil
 const meRoutes = require("./me.routes");
 
-// ✅ ADMIN USERS
+// Admin
 const adminUsersRoutes = require("./adminUsers.routes");
-
-// ✅ ADMIN SHOP BRANDING
 const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
-
-// ✅ ADMIN SHOP ORDERS
 const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
-
-// ✅ ADMIN SHOP SETTINGS
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
-
-// ✅ ADMIN SHOP PAYMENTS
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
-function safeUse(path, ...mws) {
-  for (const mw of mws) {
-    if (typeof mw !== "function") {
-      const keys = mw && typeof mw === "object" ? Object.keys(mw) : null;
-      console.error("❌ [v1.routes] Middleware inválido en router.use()");
-      console.error("   path:", path);
-      console.error("   typeof:", typeof mw);
-      console.error("   keys:", keys);
-      throw new Error(`INVALID_MIDDLEWARE_FOR_${path}`);
-    }
-  }
-  router.use(path, ...mws);
-}
-
 // =========================
-// Public primero
+// Mount: Public primero
 // =========================
 safeUse("/health", healthRoutes);
 safeUse("/auth", authRoutes);
 
-// 🛒 Ecommerce público (SIN AUTH)
 safeUse("/public", publicEcomRoutes);
-
-// ✅ Public shop config (SIN AUTH)
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ Checkout público (SIN AUTH)
 safeUse("/ecom", ecomCheckoutRoutes);
-
-// ✅ Payments público (SIN AUTH)
 safeUse("/ecom", ecomPaymentsRoutes);
 
 // =========================
-// Protected (operación)
+// Mount: Protected (operación)
 // =========================
-// ✅ PASO QUIRÚRGICO: products con branchContext (scope por sucursal + warehouse)
+// ✅ products con branchContext (scope real por sucursal + warehouse)
 safeUse("/products", requireAuth, branchContext, productsRoutes);
 
-// resto protegido SIN branchContext (todavía)
+// resto protegido (por ahora sin branchContext)
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
 safeUse("/branches", requireAuth, branchesRoutes);
@@ -135,19 +184,17 @@ safeUse("/warehouses", requireAuth, warehousesRoutes);
 safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 
-// ✅ POS (UNIFICADO)
+// POS
 safeUse("/pos", requireAuth, posRoutes);
 
 // Perfil
 safeUse("/me", requireAuth, meRoutes);
 
 // =========================
-// Admin (RBAC REAL)
+// Mount: Admin (RBAC context)
 // =========================
-// ✅ RBAC: primero requireAuth, después attachAccessContext
 safeUse("/admin/users", requireAuth, attachAccessContext, adminUsersRoutes);
 
-// Branding / Orders / Settings / Payments con RBAC
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
