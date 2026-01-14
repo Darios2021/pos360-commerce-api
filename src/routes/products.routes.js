@@ -6,14 +6,15 @@
 //   safeUse("/products", requireAuth, branchContext, productsRoutes);
 //
 // RBAC:
-// - GET /           -> products.read
-// - GET /:id        -> products.read
-// - GET /:id/stock  -> products.read
-// - imágenes GET    -> products.read
+// - GET /              -> products.read
+// - GET /:id           -> products.read
+// - GET /:id/stock     -> products.read
+// - GET /:id/branches  -> products.read   ✅ matriz de sucursales (enabled + current_qty)
+// - imágenes GET       -> products.read
 //
-// - POST /          -> products.write
-// - PATCH /:id      -> products.write
-// - DELETE /:id     -> products.write
+// - POST /             -> products.write
+// - PATCH /:id         -> products.write
+// - DELETE /:id        -> products.write
 // - imágenes POST/DELETE -> products.write
 //
 // SAFE fallback:
@@ -75,6 +76,10 @@ router.post("/", allowAdminOrPermission("products.write"), productsCtrl.create);
 // GET /api/v1/products/:id/stock?branch_id=3
 router.get("/:id/stock", allowAdminOrPermission("products.read"), productsCtrl.getStock);
 
+// ✅ MATRIZ REAL por sucursal (para UI de reparto/asignación)
+// GET /api/v1/products/:id/branches
+router.get("/:id/branches", allowAdminOrPermission("products.read"), productsCtrl.getBranchesMatrix);
+
 router.get("/:id", allowAdminOrPermission("products.read"), productsCtrl.getOne);
 
 router.patch("/:id", allowAdminOrPermission("products.write"), productsCtrl.update);
@@ -90,10 +95,6 @@ router.get("/:id/images", allowAdminOrPermission("products.read"), productImages
 router.post("/:id/images", allowAdminOrPermission("products.write"), upload.any(), productImagesCtrl.upload);
 
 // ✅ borrar una imagen por id
-router.delete(
-  "/:id/images/:imageId",
-  allowAdminOrPermission("products.write"),
-  productImagesCtrl.remove
-);
+router.delete("/:id/images/:imageId", allowAdminOrPermission("products.write"), productImagesCtrl.remove);
 
 module.exports = router;
