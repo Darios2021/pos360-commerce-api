@@ -1,5 +1,4 @@
 // src/middlewares/rbac.middleware.js
-const { Op } = require("sequelize");
 const { User, Role, Branch, Permission, RolePermission } = require("../models");
 
 async function attachAccessContext(req, res, next) {
@@ -9,41 +8,43 @@ async function attachAccessContext(req, res, next) {
 
     const u = await User.findByPk(userId, {
       include: [
-        { model: Role, as: "roles", through: { attributes: [] }, required: false },
-        { model: Branch, as: "branches", through: { attributes: [] }, required: false },
+        {
+          model: Role,
+          as: "roles",
+          through: { attributes: [] },
+          required: false,
+          attributes: ["id", "name"], // ✅ seguro
+        },
+        {
+          model: Branch,
+          as: "branches",
+          through: { attributes: [] },
+          required: false,
+          // ✅ SOLO columnas que existen en tu DB (evita branches.phone)
+          attributes: ["id", "name", "code"],
+        },
       ],
+      attributes: ["id", "email"], // ✅ mínimo
     });
 
     if (!u) return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
 
-    const roles = (u.roles || []).map((r) => r.name).filter(Boolean);
+    const roles = (u.roles || []).map((r) => r.name);
     const is_super_admin = roles.includes("super_admin");
 
     let permissions = [];
-
-    const hasRolePermissionPivot =
-      Boolean(RolePermission) && typeof RolePermission.findAll === "function";
-
-    if (!is_super_admin && hasRolePermissionPivot) {
-      // permisos por roles → role_permissions → permissions
+    if (!is_super_admin) {
       const roleIds = (u.roles || []).map((r) => r.id).filter(Boolean);
-
       if (roleIds.length) {
-        // ✅ FIX: IN para role_id
-        const rps = await RolePermission.findAll({
-          where: { role_id: { [Op.in]: roleIds } },
-        });
-
-        const permIds = Array.from(
-          new Set((rps || []).map((x) => x.permission_id).filter(Boolean))
-        );
+        const rps = await RolePermission.findAll({ where: { role_id: roleIds } });
+        const permIds = Array.from(new Set((rps || []).map((x) => x.permission_id).filter(Boolean)));
 
         if (permIds.length) {
-          // ✅ FIX: IN para permissions.id
           const perms = await Permission.findAll({
-            where: { id: { [Op.in]: permIds } },
+            where: { id: permIds },
+            attributes: ["code"],
           });
-          permissions = (perms || []).map((p) => p.code).filter(Boolean);
+          permissions = (perms || []).map((p) => p.code);
         }
       }
     }
@@ -51,9 +52,8 @@ async function attachAccessContext(req, res, next) {
     req.access = {
       roles,
       permissions,
-      branch_ids: (u.branches || []).map((b) => b.id).filter(Boolean),
+      branch_ids: (u.branches || []).map((b) => b.id),
       is_super_admin,
-      hasRolePermissionPivot,
     };
 
     return next();
