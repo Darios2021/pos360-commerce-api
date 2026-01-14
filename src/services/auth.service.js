@@ -1,4 +1,11 @@
 // src/services/auth.service.js
+// ✅ COPY-PASTE FINAL COMPLETO
+// FIX: tu DB tiene users.password (NO users.password_hash)
+// - Mantiene roles + branches (1 query) y JWT con branches habilitadas
+// - Enforce is_active
+// - bcrypt.compare contra user.password
+// - Ajusta branch_id principal si no está dentro de branches habilitadas
+
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const env = require("../config/env");
@@ -27,7 +34,8 @@ function pickPrimaryRole(roles = []) {
  */
 async function loadUserAccessContext(userId) {
   const u = await User.findByPk(userId, {
-    attributes: ["id", "email", "username", "branch_id", "is_active", "password", "password_hash"],
+    // ✅ FIX: NO pedir password_hash (no existe en DB)
+    attributes: ["id", "email", "username", "branch_id", "is_active", "password"],
     include: [
       { model: Role, as: "roles", attributes: ["name"], through: { attributes: [] }, required: false },
       { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
@@ -49,7 +57,9 @@ async function loadUserAccessContext(userId) {
   if (!roles.length) roles = ["user"];
 
   // branches reales
-  let branches = (plain.branches || []).map((b) => ({ id: b.id, name: b.name })).filter((b) => b?.id);
+  let branches = (plain.branches || [])
+    .map((b) => ({ id: b.id, name: b.name }))
+    .filter((b) => b?.id);
 
   // fallback: al menos la principal
   if (!branches.length && plain.branch_id) {
@@ -57,11 +67,10 @@ async function loadUserAccessContext(userId) {
   }
 
   // ✅ consistencia: branch principal debe estar habilitada (user_branches)
-  // Si no lo está, preferimos la primera branch habilitada (y LOGUEAMOS el caso)
+  // Si no lo está, preferimos la primera branch habilitada
   if (plain.branch_id && branches.length) {
     const allowedIds = new Set(branches.map((b) => b.id));
     if (!allowedIds.has(plain.branch_id)) {
-      // no rompemos prod; ajustamos branch_id al primero permitido
       plain.branch_id = branches[0].id;
     }
   }
@@ -102,11 +111,14 @@ function signAccessToken({ user, roles, branches }) {
 }
 
 exports.login = async ({ identifier, password }) => {
+  const ident = String(identifier || "").trim();
+
   const userRow = await User.findOne({
     where: {
-      [Op.or]: [{ email: identifier }, { username: identifier }],
+      [Op.or]: [{ email: ident }, { username: ident }],
     },
-    attributes: ["id", "password", "password_hash"],
+    // ✅ FIX: NO pedir password_hash
+    attributes: ["id", "password"],
   });
 
   if (!userRow) {
@@ -133,10 +145,10 @@ exports.login = async ({ identifier, password }) => {
     throw e;
   }
 
-  // hash
-  const hash = user.password_hash || user.password;
+  // ✅ hash real (DB: users.password)
+  const hash = user.password;
   if (!hash) {
-    const e = new Error("User has no password hash set");
+    const e = new Error("User has no password set");
     e.status = 500;
     throw e;
   }
