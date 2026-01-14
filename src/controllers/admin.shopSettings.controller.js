@@ -8,18 +8,19 @@
 // Keys esperadas: orders | shipping | pickup | payments | notify
 //
 // Guarda JSON en columna value_json (MySQL JSON)
+//
+// ✅ FIX SAFE:
+// - updated_by puede no existir => reintenta sin esa columna para no romper producción.
 
 const { sequelize } = require("../models");
 
 const ALLOWED_KEYS = new Set(["orders", "shipping", "pickup", "payments", "notify"]);
 
 function cleanKey(k) {
-  const s = String(k || "").trim().toLowerCase();
-  return s;
+  return String(k || "").trim().toLowerCase();
 }
 
 function safeJson(v) {
-  // si viene string JSON, parsea; si viene objeto, ok; sino {}
   if (v && typeof v === "object") return v;
   if (typeof v === "string") {
     try {
@@ -33,7 +34,6 @@ function safeJson(v) {
 }
 
 async function ensureDefaultRow(key) {
-  // si no existe, inserta un default vacío para no romper UI
   await sequelize.query(
     `
     INSERT INTO shop_settings (\`key\`, value_json, created_at)
@@ -81,25 +81,49 @@ async function putSetting(req, res) {
   const value = safeJson(req.body?.value ?? req.body ?? {});
   await ensureDefaultRow(key);
 
-  // (opcional) quién actualizó
   const updatedBy = req?.usuario?.id || req?.user?.id || req?.auth?.id || null;
 
-  await sequelize.query(
-    `
-    UPDATE shop_settings
-    SET value_json = :val,
-        updated_by = :updated_by,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE \`key\` = :key
-    `,
-    {
-      replacements: {
-        key,
-        val: JSON.stringify(value),
-        updated_by: updatedBy,
-      },
+  // 1) intento con updated_by
+  try {
+    await sequelize.query(
+      `
+      UPDATE shop_settings
+      SET value_json = :val,
+          updated_by = :updated_by,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE \`key\` = :key
+      `,
+      {
+        replacements: {
+          key,
+          val: JSON.stringify(value),
+          updated_by: updatedBy,
+        },
+      }
+    );
+  } catch (e) {
+    const msg = String(e?.original?.sqlMessage || e?.message || "").toLowerCase();
+
+    // ✅ si falla por columna inexistente, reintentar sin updated_by
+    if (msg.includes("unknown column") && msg.includes("updated_by")) {
+      await sequelize.query(
+        `
+        UPDATE shop_settings
+        SET value_json = :val,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE \`key\` = :key
+        `,
+        {
+          replacements: {
+            key,
+            val: JSON.stringify(value),
+          },
+        }
+      );
+    } else {
+      throw e;
     }
-  );
+  }
 
   const [rows] = await sequelize.query(
     `SELECT \`key\`, value_json, updated_at, created_at FROM shop_settings WHERE \`key\` = :key LIMIT 1`,

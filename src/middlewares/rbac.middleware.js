@@ -1,4 +1,5 @@
 // src/middlewares/rbac.middleware.js
+const { Op } = require("sequelize");
 const { User, Role, Branch, Permission, RolePermission } = require("../models");
 
 async function attachAccessContext(req, res, next) {
@@ -15,20 +16,34 @@ async function attachAccessContext(req, res, next) {
 
     if (!u) return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
 
-    const roles = (u.roles || []).map((r) => r.name);
+    const roles = (u.roles || []).map((r) => r.name).filter(Boolean);
     const is_super_admin = roles.includes("super_admin");
 
     let permissions = [];
-    if (!is_super_admin) {
+
+    const hasRolePermissionPivot =
+      Boolean(RolePermission) && typeof RolePermission.findAll === "function";
+
+    if (!is_super_admin && hasRolePermissionPivot) {
       // permisos por roles → role_permissions → permissions
       const roleIds = (u.roles || []).map((r) => r.id).filter(Boolean);
+
       if (roleIds.length) {
-        const rps = await RolePermission.findAll({ where: { role_id: roleIds } });
-        const permIds = Array.from(new Set((rps || []).map((x) => x.permission_id).filter(Boolean)));
+        // ✅ FIX: IN para role_id
+        const rps = await RolePermission.findAll({
+          where: { role_id: { [Op.in]: roleIds } },
+        });
+
+        const permIds = Array.from(
+          new Set((rps || []).map((x) => x.permission_id).filter(Boolean))
+        );
 
         if (permIds.length) {
-          const perms = await Permission.findAll({ where: { id: permIds } });
-          permissions = (perms || []).map((p) => p.code);
+          // ✅ FIX: IN para permissions.id
+          const perms = await Permission.findAll({
+            where: { id: { [Op.in]: permIds } },
+          });
+          permissions = (perms || []).map((p) => p.code).filter(Boolean);
         }
       }
     }
@@ -36,8 +51,9 @@ async function attachAccessContext(req, res, next) {
     req.access = {
       roles,
       permissions,
-      branch_ids: (u.branches || []).map((b) => b.id),
+      branch_ids: (u.branches || []).map((b) => b.id).filter(Boolean),
       is_super_admin,
+      hasRolePermissionPivot,
     };
 
     return next();

@@ -1,5 +1,6 @@
 // src/controllers/admin.shopOrders.controller.js
-// ✅ COPY-PASTE FINAL
+// ✅ COPY-PASTE FINAL (con scope por branch_ids según RBAC)
+//
 // Admin Ecommerce Orders
 // GET  /api/v1/admin/shop/orders
 // GET  /api/v1/admin/shop/orders/:id
@@ -14,6 +15,10 @@
 // - branch_id
 // - from, to (YYYY-MM-DD)
 // - page, limit
+//
+// ✅ FIX IMPORTANTE:
+// - Si NO es super_admin, limita por req.access.branch_ids (user_branches)
+// - branch_id solo si está permitido
 
 const { sequelize } = require("../models");
 
@@ -28,13 +33,21 @@ function toStr(v) {
 
 function normDate(v) {
   const s = toStr(v);
-  // muy simple: YYYY-MM-DD
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   return null;
 }
 
-function buildWhere({ q, status, fulfillment_type, branch_id, from, to }) {
+function getAccess(req) {
+  const a = req.access || {};
+  const branch_ids = Array.isArray(a.branch_ids) ? a.branch_ids.map((x) => toInt(x, 0)).filter(Boolean) : [];
+  return {
+    is_super_admin: Boolean(a.is_super_admin),
+    branch_ids,
+  };
+}
+
+function buildWhere({ q, status, fulfillment_type, branch_id, from, to, allowedBranchIds, isSuperAdmin }) {
   const where = [];
   const repl = {};
 
@@ -46,6 +59,23 @@ function buildWhere({ q, status, fulfillment_type, branch_id, from, to }) {
     where.push("o.fulfillment_type = :fulfillment_type");
     repl.fulfillment_type = fulfillment_type;
   }
+
+  // ✅ Scope por sucursal:
+  // - super_admin => no aplica
+  // - no super_admin => restringe a allowedBranchIds
+  if (!isSuperAdmin) {
+    const allowed = (allowedBranchIds || []).map((x) => Number(x)).filter(Boolean);
+
+    // si no tiene branches, no debería ver nada
+    if (!allowed.length) {
+      where.push("1 = 0");
+    } else {
+      where.push(`o.branch_id IN (:allowed_branch_ids)`);
+      repl.allowed_branch_ids = allowed;
+    }
+  }
+
+  // Filtro por branch_id (solo si está permitido)
   if (branch_id) {
     where.push("o.branch_id = :branch_id");
     repl.branch_id = Number(branch_id);
@@ -65,7 +95,6 @@ function buildWhere({ q, status, fulfillment_type, branch_id, from, to }) {
 
   const qq = toStr(q);
   if (qq) {
-    // búsqueda tipo ML: public_code / email / nombre completo
     where.push(`
       (
         o.public_code LIKE :q_like
@@ -87,6 +116,8 @@ function buildWhere({ q, status, fulfillment_type, branch_id, from, to }) {
 // ===============================
 async function listOrders(req, res) {
   try {
+    const { is_super_admin, branch_ids } = getAccess(req);
+
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
     const offset = (page - 1) * limit;
@@ -98,7 +129,30 @@ async function listOrders(req, res) {
     const from = req.query.from;
     const to = req.query.to;
 
-    const { whereSql, repl } = buildWhere({ q, status, fulfillment_type, branch_id, from, to });
+    // ✅ Si mandan branch_id pero no está permitido => 403
+    if (!is_super_admin && branch_id) {
+      const ok = branch_ids.includes(Number(branch_id));
+      if (!ok) {
+        return res.status(403).json({
+          ok: false,
+          code: "BRANCH_NOT_ALLOWED",
+          message: "No tenés permisos para ver pedidos de esa sucursal.",
+          branch_id,
+          allowed_branch_ids: branch_ids,
+        });
+      }
+    }
+
+    const { whereSql, repl } = buildWhere({
+      q,
+      status,
+      fulfillment_type,
+      branch_id,
+      from,
+      to,
+      allowedBranchIds: branch_ids,
+      isSuperAdmin: is_super_admin,
+    });
 
     // count
     const [countRows] = await sequelize.query(
@@ -191,6 +245,8 @@ async function listOrders(req, res) {
 // ===============================
 async function getOrderById(req, res) {
   try {
+    const { is_super_admin, branch_ids } = getAccess(req);
+
     const id = Number(req.params.id || 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
 
@@ -215,6 +271,20 @@ async function getOrderById(req, res) {
 
     const order = orders?.[0];
     if (!order) return res.status(404).json({ ok: false, message: "Pedido no encontrado" });
+
+    // ✅ Scope por sucursal en detalle
+    if (!is_super_admin) {
+      const ok = branch_ids.includes(Number(order.branch_id));
+      if (!ok) {
+        return res.status(403).json({
+          ok: false,
+          code: "BRANCH_NOT_ALLOWED",
+          message: "No tenés permisos para ver este pedido (sucursal no permitida).",
+          order_branch_id: order.branch_id,
+          allowed_branch_ids: branch_ids,
+        });
+      }
+    }
 
     const [items] = await sequelize.query(
       `

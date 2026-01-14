@@ -5,12 +5,15 @@
 // - /api/v1/pos/context + /products + ✅ POST /sales => POS rápido (pos.controller.js)
 // - List/stats/detail/delete/refunds/exchanges => posSales.controller.js
 //
-// CLAVE DEL FIX:
-// - ✅ POST /sales debe ir a pos.controller.js (createPosSale)
-//   porque tu POS front NO envía warehouse_id por item y ese controller lo resuelve por contexto.
-// - posSales.controller.js puede seguir existiendo para list/stats/detail/refunds/exchanges.
+// CLAVE:
+// - ✅ POST /sales va a pos.controller.js (createSale) porque resuelve warehouse por contexto.
+// - posSales.controller.js queda para list/stats/detail/refunds/exchanges.
 
 const router = require("express").Router();
+
+// ✅ IMPORTANTE: asegura req.ctx (branchId/warehouseId) en TODAS las rutas POS
+const branchContext = require("../middlewares/branchContext.middleware");
+router.use(branchContext);
 
 // ==============================
 // POS "context / products / createSale" (POS rápido)
@@ -51,8 +54,6 @@ const getSaleById =
   posSalesController.saleById;
 
 // ⚠️ OJO: createSale del módulo ventas NO lo usamos para POS checkout
-// porque te exige warehouse_id por item (según tu error actual).
-// Lo dejamos referenciado por si lo querés usar en otro endpoint.
 const createSaleBackoffice =
   posSalesController.createSale ||
   posSalesController.createSales ||
@@ -137,15 +138,13 @@ router.get("/products", safeFn("listProductsForPos", listProductsForPos));
 
 /**
  * ✅ POS CREATE SALE (FRONT POS)
- * Este ES el endpoint que usa el POS del frontend:
  * - NO requiere warehouse_id por item
  * - resuelve warehouse por contexto
  */
 router.post("/sales", safeFn("createPosSale", createPosSale));
 
 /**
- * (Opcional) si querés conservar el endpoint viejo del módulo ventas:
- * - Útil para backoffice o importaciones
+ * (Opcional) endpoint viejo del módulo ventas:
  * - Puede exigir warehouse_id por item
  */
 router.post("/sales/backoffice", safeFn("createSaleBackoffice", createSaleBackoffice));
@@ -157,11 +156,11 @@ router.get("/sales/stats", safeFn("statsSales", statsSales));
 router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
 
-// ✅ Refunds/Exchanges del módulo de ventas (NO pos.controller.js)
+// ✅ Refunds/Exchanges del módulo de ventas
 router.post("/sales/:id/refunds", safeFn("createRefund", createRefund));
 router.post("/sales/:id/exchanges", safeFn("createExchange", createExchange));
 
-// ✅ GET refunds/exchanges garantizado (misma fuente de verdad)
+// ✅ GET refunds/exchanges
 router.get("/sales/:id/refunds", safeFn("listRefundsBySale", listRefundsBySale));
 router.get("/sales/:id/exchanges", safeFn("listExchangesBySale", listExchangesBySale));
 

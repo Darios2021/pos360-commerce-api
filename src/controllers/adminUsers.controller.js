@@ -52,10 +52,21 @@ function safeUserRow(u) {
   };
 }
 
+function getAccess(req) {
+  const a = req.access || {};
+  const roles = Array.isArray(a.roles) ? a.roles : [];
+  const branch_ids = Array.isArray(a.branch_ids) ? a.branch_ids.map((x) => toInt(x, 0)).filter(Boolean) : [];
+  return {
+    is_super_admin: Boolean(a.is_super_admin),
+    roles,
+    branch_ids,
+  };
+}
+
 /**
  * Normaliza roles/sucursales:
  * - acepta role_ids / branch_ids como IDs
- * - acepta roles / branches como nombres o ids (por si el frontend manda labels)
+ * - acepta roles / branches como nombres o ids
  */
 async function normalizeRoleAndBranchIds(body) {
   // Roles
@@ -141,9 +152,17 @@ async function getMeta(req, res) {
 /**
  * GET /api/v1/admin/users
  * Query: q, page, limit
+ *
+ * ✅ Scope:
+ * - super_admin => todo
+ * - admin => todo (compat)
+ * - otros => usuarios que tengan al menos 1 branch en común con req.access.branch_ids
  */
 async function listUsers(req, res) {
   try {
+    const { is_super_admin, roles, branch_ids } = getAccess(req);
+    const isAdmin = roles.includes("admin");
+
     const q = String(req.query.q ?? "").trim();
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
@@ -159,15 +178,29 @@ async function listUsers(req, res) {
       ];
     }
 
+    // ✅ include branches con filtro SOLO si no es super_admin/admin
+    const branchesInclude =
+      is_super_admin || isAdmin
+        ? { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false }
+        : {
+            model: Branch,
+            as: "branches",
+            attributes: ["id", "name"],
+            through: { attributes: [] },
+            required: true, // solo usuarios que matcheen
+            where: branch_ids.length ? { id: { [Op.in]: branch_ids } } : { id: -1 },
+          };
+
     const { rows, count } = await User.findAndCountAll({
       where,
       order: [["id", "DESC"]],
       limit,
       offset,
       attributes: USER_ATTRS,
+      distinct: true,
       include: [
         { model: Role, as: "roles", attributes: ["id", "name"], through: { attributes: [] }, required: false },
-        { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false },
+        branchesInclude,
       ],
     });
 
@@ -188,8 +221,6 @@ async function listUsers(req, res) {
 
 /**
  * POST /api/v1/admin/users
- * Body:
- * { email, username, password?, first_name?, last_name?, is_active?, role_ids?/roles?, branch_ids?/branches? }
  */
 async function createUser(req, res) {
   try {
@@ -233,7 +264,7 @@ async function createUser(req, res) {
     const password = await bcrypt.hash(rawPass, 10);
     const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
 
-    // ✅ users.branch_id es NOT NULL en tu DB → hay que setearlo sí o sí
+    // ✅ users.branch_id es NOT NULL en tu DB
     const branch_id = branchIds.length ? branchIds[0] : toInt(body.branch_id, 0);
     if (!branch_id) {
       return res.status(400).json({
@@ -247,7 +278,6 @@ async function createUser(req, res) {
       const createdId = await sequelize.transaction(async (t) => {
         const payload = { email, username, password, first_name, last_name, is_active, branch_id };
 
-        // si existe avatar_url en model, lo aceptamos
         if (modelHasAttr(User, "avatar_url") && "avatar_url" in body) {
           payload.avatar_url = String(body.avatar_url || "").trim() || null;
         }
@@ -261,7 +291,6 @@ async function createUser(req, res) {
           );
         }
 
-        // ✅ user_branches: guardamos todas las sucursales elegidas + forzamos la principal sin duplicar
         const branchSet = new Set([branch_id, ...(branchIds || [])]);
         const finalBranchIds = Array.from(branchSet).filter(Boolean);
 
@@ -302,7 +331,6 @@ async function createUser(req, res) {
 
 /**
  * PUT /api/v1/admin/users/:id
- * Body: { first_name?, last_name?, is_active?, role_ids?/roles?, branch_ids?/branches?, branch_id? }
  */
 async function updateUser(req, res) {
   try {
@@ -318,7 +346,6 @@ async function updateUser(req, res) {
     if ("last_name" in body) u.last_name = (body.last_name ?? "").toString().trim() || null;
     if ("is_active" in body) u.is_active = boolVal(body.is_active, Boolean(u.is_active));
 
-    // opcional: permitir cambiar sucursal principal
     if ("branch_id" in body) {
       const bid = toInt(body.branch_id, 0);
       if (bid) u.branch_id = bid;
@@ -347,7 +374,6 @@ async function updateUser(req, res) {
         if (Array.isArray(body.branch_ids) || Array.isArray(body.branches)) {
           await UserBranch.destroy({ where: { user_id: id }, transaction: t });
 
-          // ✅ siempre incluimos la principal dentro de las habilitadas
           const branchSet = new Set([u.branch_id, ...(branchIds || [])]);
           const finalBranchIds = Array.from(branchSet).filter(Boolean);
 
@@ -379,7 +405,6 @@ async function updateUser(req, res) {
 
 /**
  * POST /api/v1/admin/users/:id/reset-password
- * Body: { password }
  */
 async function resetPassword(req, res) {
   try {
@@ -409,7 +434,6 @@ async function resetPassword(req, res) {
 
 /**
  * PATCH /api/v1/admin/users/:id/toggle-active
- * (si tu frontend usa este endpoint)
  */
 async function toggleActive(req, res) {
   try {

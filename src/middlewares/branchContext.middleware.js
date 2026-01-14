@@ -1,165 +1,174 @@
-// src/middlewares/branchContext.middleware.js
-const { sequelize } = require("../models");
+// src/middlewares/rbac.middleware.js
+const { User, Role, Branch, Permission, RolePermission } = require("../models");
 
-function toInt(v, d = 0) {
-  const n = parseInt(String(v ?? ""), 10);
-  return Number.isFinite(n) ? n : d;
+function uniq(arr) {
+  return Array.from(new Set((arr || []).filter(Boolean)));
 }
 
-function hasRole(req, roleName) {
-  const roles = req.user?.roles;
-  if (!roles) return false;
+function normRoleName(x) {
+  return String(x || "").trim().toLowerCase();
+}
 
-  // roles puede venir como array de strings o array de objetos
-  if (Array.isArray(roles)) {
-    return roles.some((r) => {
-      if (typeof r === "string") return r === roleName;
-      if (r && typeof r === "object") return r.name === roleName || r.code === roleName;
-      return false;
-    });
+function rolesFromToken(req) {
+  const u = req.user || {};
+  // puede venir: roles: ["admin"] o roles: [{name:"admin"}] o role: "admin"
+  const roles = [];
+
+  if (Array.isArray(u.roles)) {
+    for (const r of u.roles) {
+      if (!r) continue;
+      if (typeof r === "string") roles.push(r);
+      else if (typeof r === "object") roles.push(r.name || r.code || r.role);
+    }
+  } else if (typeof u.roles === "string") {
+    roles.push(...u.roles.split(/[,\s|]+/g));
   }
 
-  // roles puede venir como string único
-  if (typeof roles === "string") return roles === roleName;
-  return false;
+  if (typeof u.role === "string") roles.push(u.role);
+
+  return uniq(roles.map(normRoleName));
 }
 
-async function branchContext(req, res, next) {
+function branchIdsFromToken(req) {
+  const u = req.user || {};
+  // tu JWT pone: branches: [1,3,4] (ids)
+  if (Array.isArray(u.branches)) {
+    return uniq(u.branches.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0));
+  }
+  return [];
+}
+
+async function fetchRolesFromDB(userId) {
+  const u = await User.findByPk(userId, {
+    attributes: ["id"],
+    include: [{ model: Role, as: "roles", through: { attributes: [] }, required: false }],
+  });
+  return uniq((u?.roles || []).map((r) => normRoleName(r?.name)));
+}
+
+async function fetchBranchIdsFromDB(userId) {
+  const u = await User.findByPk(userId, {
+    attributes: ["id"],
+    include: [{ model: Branch, as: "branches", through: { attributes: [] }, required: false }],
+  });
+  return uniq((u?.branches || []).map((b) => Number(b?.id)).filter((n) => Number.isFinite(n) && n > 0));
+}
+
+async function fetchPermissionsFromDB(roleIdsOrNames) {
+  // role_permissions usa role_id (ids), pero acá normalmente tenemos nombres.
+  // Preferimos pedir IDs con un query extra SOLO si hace falta.
+  // Para no romper: si RolePermission no existe, devolvemos [].
+  if (!RolePermission) return [];
+
+  // 1) Buscar IDs de roles por nombre
+  const roleNames = uniq((roleIdsOrNames || []).map(normRoleName)).filter(Boolean);
+  if (!roleNames.length) return [];
+
+  const roles = await Role.findAll({
+    where: { name: roleNames },
+    attributes: ["id", "name"],
+  });
+
+  const roleIds = roles.map((r) => r.id).filter(Boolean);
+  if (!roleIds.length) return [];
+
+  // 2) role_permissions -> permission_id
+  const rps = await RolePermission.findAll({ where: { role_id: roleIds } });
+  const permIds = uniq((rps || []).map((x) => x.permission_id)).filter(Boolean);
+  if (!permIds.length) return [];
+
+  // 3) permissions
+  const perms = await Permission.findAll({ where: { id: permIds }, attributes: ["code"] });
+  return uniq((perms || []).map((p) => String(p.code || "").trim()).filter(Boolean));
+}
+
+/**
+ * ✅ attachAccessContext
+ * - Usa token si ya trae roles/branches.
+ * - Si faltan, cae a DB.
+ * - Carga permisos por role_permissions (si no es super_admin).
+ */
+async function attachAccessContext(req, res, next) {
   try {
-    const userId = toInt(req.user?.id || req.user?.sub, 0);
-    if (!userId) {
-      return res.status(401).json({
-        ok: false,
-        code: "NO_USER_IN_TOKEN",
-        message: "Token válido pero no se detectó userId (sub/id).",
-      });
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
+
+    // cache por request
+    if (req.access && req.access.user_id === userId) return next();
+
+    // 1) roles
+    let roles = rolesFromToken(req);
+    if (!roles.length) {
+      roles = await fetchRolesFromDB(userId);
     }
 
-    // ✅ Permitir override del contexto (solo super_admin)
-    // - Header: x-branch-id: 3
-    // - Query:  ?branchId=3
-    const isSuperAdmin = hasRole(req, "super_admin");
-    const overrideBranchId = toInt(req.headers["x-branch-id"] || req.query.branchId, 0);
+    const is_super_admin = roles.includes("super_admin");
 
-    // 1) Branch activa (default: users.branch_id)
-    const [[u]] = await sequelize.query(
-      `
-      SELECT id, branch_id, email
-      FROM users
-      WHERE id = :userId
-      LIMIT 1
-      `,
-      { replacements: { userId } }
-    );
-
-    let branchId = toInt(u?.branch_id, 0);
-    if (!branchId) {
-      return res.status(409).json({
-        ok: false,
-        code: "USER_WITHOUT_BRANCH",
-        message: `El usuario ${userId} no tiene sucursal asignada (users.branch_id).`,
-      });
+    // 2) branches (ids)
+    let branch_ids = branchIdsFromToken(req);
+    if (!branch_ids.length) {
+      branch_ids = await fetchBranchIdsFromDB(userId);
     }
 
-    // Si es super_admin y mandó overrideBranchId válido, usamos ese contexto (NO persistimos acá)
-    if (isSuperAdmin && overrideBranchId) {
-      branchId = overrideBranchId;
+    // 3) permissions
+    let permissions = [];
+    if (!is_super_admin) {
+      permissions = await fetchPermissionsFromDB(roles);
     }
 
-    // 2) Validar que la branch esté permitida para el usuario (user_branches)
-    //    - super_admin: validamos igual (para no dejar branchId a cualquiera accidentalmente),
-    //      pero como ya le asignamos todas, pasa.
-    const [[allowed]] = await sequelize.query(
-      `
-      SELECT 1 AS ok
-      FROM user_branches
-      WHERE user_id = :userId
-        AND branch_id = :branchId
-      LIMIT 1
-      `,
-      { replacements: { userId, branchId } }
-    );
-
-    if (!allowed?.ok) {
-      return res.status(403).json({
-        ok: false,
-        code: "BRANCH_NOT_ALLOWED",
-        message: `Sucursal no permitida para el usuario. userId=${userId} branchId=${branchId}`,
-      });
-    }
-
-    // 3) Cargar Branch (nota: en tu DB branches parece NO tener code/address/city; lo dejamos a prueba de fallos)
-    //    Si esos campos no existen, el query fallaría.
-    //    Entonces pedimos SOLO lo seguro: id, name.
-    const [[branch]] = await sequelize.query(
-      `
-      SELECT id, name
-      FROM branches
-      WHERE id = :branchId
-      LIMIT 1
-      `,
-      { replacements: { branchId } }
-    );
-
-    if (!branch?.id) {
-      return res.status(409).json({
-        ok: false,
-        code: "BRANCH_NOT_FOUND",
-        message: `Sucursal no existe: id=${branchId}`,
-      });
-    }
-
-    // 4) Warehouse default de la sucursal (el primero activo)
-    const [[wh]] = await sequelize.query(
-      `
-      SELECT id, code, name, branch_id
-      FROM warehouses
-      WHERE branch_id = :branchId
-        AND is_active = 1
-      ORDER BY id ASC
-      LIMIT 1
-      `,
-      { replacements: { branchId } }
-    );
-
-    if (!wh?.id) {
-      return res.status(409).json({
-        ok: false,
-        code: "WAREHOUSE_NOT_FOUND",
-        message: `No hay depósito activo para sucursal id=${branchId} (warehouses).`,
-      });
-    }
-
-    // ✅ Contexto listo (nombres estándar)
-    req.ctx = {
-      userId,
-      branchId,
-      warehouseId: toInt(wh.id, 0),
-      branch,
-      warehouse: wh,
-      isSuperAdmin,
-      overridden: Boolean(isSuperAdmin && overrideBranchId),
+    req.access = {
+      user_id: userId,
+      roles,
+      permissions,
+      branch_ids,
+      is_super_admin,
+      // ✅ helpers
+      is_admin: roles.includes("admin") || is_super_admin,
     };
 
-    // ✅ compat con controladores existentes
-    req.branch = branch;
-    req.branchId = branchId;
-    req.warehouse = wh;
-    req.warehouseId = toInt(wh.id, 0);
-
-    // ✅ nombres “claros” para queries nuevas
-    req.activeBranchId = branchId;
-    req.activeWarehouseId = toInt(wh.id, 0);
-
     return next();
-  } catch (e) {
-    console.error("❌ [branchContext] error:", e);
-    return res.status(500).json({
-      ok: false,
-      code: "BRANCH_CONTEXT_ERROR",
-      message: e.message,
-    });
+  } catch (err) {
+    console.error("❌ [rbac] attachAccessContext error:", err?.message || err);
+    return res.status(500).json({ ok: false, code: "INTERNAL_ERROR", message: "RBAC error" });
   }
 }
 
-module.exports = branchContext;
+// ✅ Guard genérico
+function requirePermission(code) {
+  return (req, res, next) => {
+    const a = req.access || {};
+    if (a.is_super_admin) return next();
+    const perms = Array.isArray(a.permissions) ? a.permissions : [];
+    if (perms.includes(code)) return next();
+    return res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN",
+      message: `Missing permission: ${code}`,
+    });
+  };
+}
+
+// ✅ Guard safe (permiso OR admin OR super_admin)
+function allowAdminOrPermission(permissionCode, message) {
+  return (req, res, next) => {
+    const a = req.access || {};
+    if (a.is_super_admin) return next();
+
+    const roles = Array.isArray(a.roles) ? a.roles : [];
+    const perms = Array.isArray(a.permissions) ? a.permissions : [];
+
+    if (permissionCode && perms.includes(permissionCode)) return next();
+    if (roles.includes("admin")) return next(); // fallback prod
+
+    return res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN",
+      message: message || "No tenés permisos.",
+      needed: permissionCode || null,
+      roles,
+      permissions: perms,
+    });
+  };
+}
+
+module.exports = { attachAccessContext, requirePermission, allowAdminOrPermission };
