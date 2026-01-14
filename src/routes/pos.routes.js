@@ -1,43 +1,38 @@
 // src/routes/pos.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO (SIN RUTAS DUPLICADAS)
-//
-// OBJETIVO:
-// - /api/v1/pos/context + /products + ✅ POST /sales => POS rápido (pos.controller.js)
-// - List/stats/detail/delete/refunds/exchanges => posSales.controller.js
-//
-// CLAVE:
-// - ✅ POST /sales va a pos.controller.js (createSale) porque resuelve warehouse por contexto.
-// - posSales.controller.js queda para list/stats/detail/refunds/exchanges.
+// ✅ COPY-PASTE FINAL COMPLETO (ANTI-CRASH)
+// - NO usa router.use() con imports dudosos
+// - POST /sales va al POS rápido (pos.controller.js) si existe createSale
+// - List/stats/detail/refunds/exchanges van al módulo posSales.controller.js si existen
 
 const router = require("express").Router();
 
-// ✅ IMPORTANTE: asegura req.ctx (branchId/warehouseId) en TODAS las rutas POS
-const branchContext = require("../middlewares/branchContext.middleware");
-router.use(branchContext);
-
 // ==============================
-// POS "context / products / createSale" (POS rápido)
+// POS "rápido" (context/products/createSale) => src/controllers/pos.controller.js
 // ==============================
 const posController = require("../controllers/pos.controller");
 
-// Soportar ambos estilos de export (module.exports = {} o exports.named)
-const getContext = posController.getContext || posController?.default?.getContext;
+// soporta module.exports = {..} o export default
+const getContext =
+  posController.getContext || posController?.default?.getContext;
+
 const listProductsForPos =
   posController.listProductsForPos || posController?.default?.listProductsForPos;
-const createPosSale = posController.createSale || posController?.default?.createSale;
 
-// ✅ NUEVO: devoluciones/cambios del POS rápido (si existen)
+const createPosSale =
+  posController.createSale || posController?.default?.createSale;
+
+// (opcionales)
 const createSaleReturn =
   posController.createSaleReturn || posController?.default?.createSaleReturn;
+
 const createSaleExchange =
   posController.createSaleExchange || posController?.default?.createSaleExchange;
 
 // ==============================
-// POS Sales (list/stats/detail/delete/refunds/exchanges)
+// POS Sales "módulo" (list/stats/detail/delete/refunds/exchanges) => posSales.controller.js
 // ==============================
 const posSalesController = require("../controllers/posSales.controller");
 
-// Aliases robustos (por si tu controller usa otros nombres)
 const listSales =
   posSalesController.listSales ||
   posSalesController.getSales ||
@@ -52,12 +47,6 @@ const getSaleById =
   posSalesController.getSaleById ||
   posSalesController.getSale ||
   posSalesController.saleById;
-
-// ⚠️ OJO: createSale del módulo ventas NO lo usamos para POS checkout
-const createSaleBackoffice =
-  posSalesController.createSale ||
-  posSalesController.createSales ||
-  posSalesController.newSale;
 
 const deleteSale =
   posSalesController.deleteSale ||
@@ -74,7 +63,6 @@ const createExchange =
   posSalesController.createSaleExchange ||
   posSalesController.exchangeSale;
 
-// ✅ GET refunds/exchanges: FUENTE DE VERDAD en posSales.controller.js
 const listRefundsBySale =
   posSalesController.listRefundsBySale ||
   posSalesController.getRefundsBySale ||
@@ -86,7 +74,7 @@ const listExchangesBySale =
   null;
 
 // ==============================
-// ✅ POS Sales OPTIONS (AUTOCOMPLETE)
+// OPTIONS (autocomplete) => posSalesOptions.controller.js
 // ==============================
 const posSalesOptionsController = require("../controllers/posSalesOptions.controller");
 
@@ -107,10 +95,10 @@ const optionsProducts =
 // ==============================
 function notImplemented(name) {
   return (req, res) => {
-    // eslint-disable-next-line no-console
     console.error(`❌ [pos.routes] Handler NO implementado: ${name}`);
     return res.status(501).json({
       ok: false,
+      code: "NOT_IMPLEMENTED",
       message: `POS handler no implementado: ${name}. Revisá exports en controller.`,
       handler: name,
     });
@@ -119,10 +107,7 @@ function notImplemented(name) {
 
 function safeFn(name, fn) {
   if (typeof fn === "function") return fn;
-
-  // eslint-disable-next-line no-console
   console.error(`❌ [pos.routes] Handler inválido: ${name} ->`, typeof fn);
-
   return notImplemented(name);
 }
 
@@ -138,37 +123,36 @@ router.get("/products", safeFn("listProductsForPos", listProductsForPos));
 
 /**
  * ✅ POS CREATE SALE (FRONT POS)
+ * Este ES el endpoint que usa el POS:
  * - NO requiere warehouse_id por item
- * - resuelve warehouse por contexto
+ * - resuelve warehouse por contexto (pos.controller.js)
  */
 router.post("/sales", safeFn("createPosSale", createPosSale));
 
 /**
- * (Opcional) endpoint viejo del módulo ventas:
- * - Puede exigir warehouse_id por item
+ * Backoffice sale create (si lo querés)
+ * (puede exigir warehouse_id por item según tu controller)
  */
-router.post("/sales/backoffice", safeFn("createSaleBackoffice", createSaleBackoffice));
+router.post("/sales/backoffice", safeFn("posSalesController.createSale", posSalesController.createSale));
 
-// ---- SALES MODULE (posSales.controller.js)
+// ---- SALES MODULE
 router.get("/sales", safeFn("listSales", listSales));
 router.get("/sales/stats", safeFn("statsSales", statsSales));
 
 router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
 
-// ✅ Refunds/Exchanges del módulo de ventas
 router.post("/sales/:id/refunds", safeFn("createRefund", createRefund));
 router.post("/sales/:id/exchanges", safeFn("createExchange", createExchange));
 
-// ✅ GET refunds/exchanges
 router.get("/sales/:id/refunds", safeFn("listRefundsBySale", listRefundsBySale));
 router.get("/sales/:id/exchanges", safeFn("listExchangesBySale", listExchangesBySale));
 
-// ---- DEVOLUCIONES / CAMBIOS (si usás las NUEVAS del pos.controller.js)
+// ---- POS rápido (si existen)
 router.post("/returns", safeFn("createSaleReturn", createSaleReturn));
 router.post("/exchanges", safeFn("createSaleExchange", createSaleExchange));
 
-// ---- OPTIONS (posSalesOptions.controller.js)
+// ---- OPTIONS
 router.get("/sales/options/sellers", safeFn("optionsSellers", optionsSellers));
 router.get("/sales/options/customers", safeFn("optionsCustomers", optionsCustomers));
 router.get("/sales/options/products", safeFn("optionsProducts", optionsProducts));
