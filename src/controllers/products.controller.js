@@ -1,5 +1,5 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FIX SCOPE + Matriz sucursales STOCK UI)
+// ✅ COPY-PASTE FINAL COMPLETO (FIX SCOPE + Matriz sucursales STOCK UI + CODE PRO en backend)
 //
 // REGLAS:
 // - products.branch_id = owner/origen (NOT NULL)
@@ -10,6 +10,16 @@
 //   - ?owner_branch_id= => filtra por sucursal dueña/origen
 //
 // ✅ NEW: GET /products/:id/branches => matriz para UI stock (enabled + current_qty por branch)
+//
+// ✅ FIX CRÍTICO (tu caso):
+// - Ya NO dependemos de trigger para code.
+// - En CREATE: luego de Product.create() generamos code = P + LPAD(id,9) y actualizamos dentro de la misma TX.
+// - IMPORTANTE: en DB debe estar DROPEADO trg_products_code_ai y trg_products_code_bi.
+// - Podés dejar trg_products_code_bu (BEFORE UPDATE) para impedir edición manual: este controller NO intenta editar code luego.
+//
+// NOTA: si dejás trg_products_code_bu, este controller igual funciona porque:
+// - setea code solo 1 vez post-create.
+// - luego nunca intenta editarlo de nuevo.
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
@@ -134,6 +144,13 @@ function creatorLabelFromUser(u) {
     [u.first_name, u.last_name].filter(Boolean).join(" ") ||
     (u.id ? `User #${u.id}` : null)
   );
+}
+
+// ✅ Generar code PRO desde id real
+function proCodeFromId(id) {
+  const n = toInt(id, 0);
+  if (!n) return null;
+  return `P${String(n).padStart(9, "0")}`;
 }
 
 /**
@@ -296,6 +313,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkString("sku", payload.sku, { required: true, max: 64 });
   checkString("name", payload.name, { required: true, max: 200 });
 
+  // code/barcode opcionales
   checkString("code", payload.code, { required: false, max: 64 });
   checkString("barcode", payload.barcode, { required: false, max: 64 });
   checkString("description", payload.description, { required: false });
@@ -329,6 +347,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
 function pickBody(body = {}) {
   const out = {};
   const fields = [
+    // code se acepta pero el controller lo ignora en CREATE (genera proCode)
     "code",
     "sku",
     "barcode",
@@ -620,7 +639,6 @@ async function list(req, res, next) {
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
 
     if (inStock || sellable) {
-      // si admin no mandó branch_id, este filtro no tiene sentido => usá total stock
       if (!admin || branchIdScope) {
         where[Op.and].push(existsStockInBranch(!admin ? branchIdScope : branchIdScope));
       } else {
@@ -803,30 +821,57 @@ async function create(req, res, next) {
 
     if (!admin) {
       if (!ctxBranchId) {
-        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario (branch_id)." });
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
       }
       payload.branch_id = ctxBranchId;
     } else {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
+    // ✅ En CREATE ignoramos code que venga del cliente (si existe trigger BU no importa)
+    if (Object.prototype.hasOwnProperty.call(payload, "code")) delete payload.code;
+
     await sanitizeCategoryFKs(payload);
 
     const errors = validateProductPayload(payload, { isPatch: false });
     if (errors.length) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "Hay errores de validación en el producto.", errors });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "Hay errores de validación en el producto.",
+        errors,
+      });
     }
 
     const created = await sequelize.transaction(async (t) => {
+      // 1) crear producto
       const p = await Product.create(payload, { transaction: t });
 
-      const bids = !admin ? [payload.branch_id] : (bodyBranchIds.length ? bodyBranchIds : [payload.branch_id]);
+      // 2) setear code PRO usando el id real (✅ FIX)
+      const proCode = proCodeFromId(p.id);
+      if (proCode) {
+        // OJO: si en DB dejaste trg_products_code_bu que impide editar code,
+        // esto sigue siendo OK porque code estaba NULL y lo seteamos una sola vez.
+        await p.update({ code: proCode }, { transaction: t, hooks: false });
+      }
+
+      // 3) habilitar sucursales (product_branches)
+      const bids = !admin ? [payload.branch_id] : bodyBranchIds.length ? bodyBranchIds : [payload.branch_id];
       await upsertProductBranches({ productId: p.id, branchIds: bids, transaction: t });
 
+      // 4) devolver el objeto ya con code
       return p;
     });
 
-    return res.status(201).json({ ok: true, message: "Producto creado", data: created });
+    // Reload opcional con includes (para UI)
+    const include = buildProductIncludes({ includeBranch: isAdminReq(req) });
+    const createdFull = await Product.findOne({ where: { id: created.id }, include }).catch(() => created);
+
+    return res.status(201).json({ ok: true, message: "Producto creado", data: createdFull });
   } catch (e) {
     if (e?.name === "SequelizeUniqueConstraintError") {
       return res.status(409).json({
@@ -887,6 +932,9 @@ async function update(req, res, next) {
 
     if (!admin) delete patch.branch_id;
     if (Object.prototype.hasOwnProperty.call(patch, "created_by")) delete patch.created_by;
+
+    // ✅ No permitir code por API (lo controla DB/trigger BU + backend)
+    if (Object.prototype.hasOwnProperty.call(patch, "code")) delete patch.code;
 
     await sanitizeCategoryFKs(patch);
 
