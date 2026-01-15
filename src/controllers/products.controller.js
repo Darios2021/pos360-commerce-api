@@ -1,5 +1,5 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FIX SCOPE + Matriz sucursales STOCK UI + CODE PRO en backend)
+// ✅ COPY-PASTE FINAL COMPLETO (FIX CODE + SCOPE + Matriz sucursales STOCK UI)
 //
 // REGLAS:
 // - products.branch_id = owner/origen (NOT NULL)
@@ -11,15 +11,9 @@
 //
 // ✅ NEW: GET /products/:id/branches => matriz para UI stock (enabled + current_qty por branch)
 //
-// ✅ FIX CRÍTICO (tu caso):
-// - Ya NO dependemos de trigger para code.
-// - En CREATE: luego de Product.create() generamos code = P + LPAD(id,9) y actualizamos dentro de la misma TX.
-// - IMPORTANTE: en DB debe estar DROPEADO trg_products_code_ai y trg_products_code_bi.
-// - Podés dejar trg_products_code_bu (BEFORE UPDATE) para impedir edición manual: este controller NO intenta editar code luego.
-//
-// NOTA: si dejás trg_products_code_bu, este controller igual funciona porque:
-// - setea code solo 1 vez post-create.
-// - luego nunca intenta editarlo de nuevo.
+// ✅ FIX CRÍTICO:
+// - code PRO se genera en BACKEND por id: P + LPAD(id,9,'0')
+// - NO dependemos de triggers
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
@@ -144,13 +138,6 @@ function creatorLabelFromUser(u) {
     [u.first_name, u.last_name].filter(Boolean).join(" ") ||
     (u.id ? `User #${u.id}` : null)
   );
-}
-
-// ✅ Generar code PRO desde id real
-function proCodeFromId(id) {
-  const n = toInt(id, 0);
-  if (!n) return null;
-  return `P${String(n).padStart(9, "0")}`;
 }
 
 /**
@@ -313,8 +300,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkString("sku", payload.sku, { required: true, max: 64 });
   checkString("name", payload.name, { required: true, max: 200 });
 
-  // code/barcode opcionales
-  checkString("code", payload.code, { required: false, max: 64 });
+  // code lo genera backend
   checkString("barcode", payload.barcode, { required: false, max: 64 });
   checkString("description", payload.description, { required: false });
 
@@ -347,8 +333,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
 function pickBody(body = {}) {
   const out = {};
   const fields = [
-    // code se acepta pero el controller lo ignora en CREATE (genera proCode)
-    "code",
+    // "code",  // 🚫 NO lo aceptamos del cliente
     "sku",
     "barcode",
     "name",
@@ -377,7 +362,6 @@ function pickBody(body = {}) {
 
   if (out.sku != null) out.sku = String(out.sku).trim();
   if (out.barcode != null) out.barcode = String(out.barcode).trim() || null;
-  if (out.code != null) out.code = String(out.code).trim() || null;
   if (out.name != null) out.name = String(out.name).trim();
 
   if (out.category_id != null) out.category_id = toInt(out.category_id, null);
@@ -587,19 +571,11 @@ async function list(req, res, next) {
       });
     }
 
-    // ✅ FIX 1:
-    // - Para ADMIN: branch_id SOLO si lo manda query/header.
-    // - Para NO-ADMIN: branch_id SIEMPRE su ctxBranchId.
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
     const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
-    // ✅ FIX 2:
-    // owner_branch_id SOLO se aplica si admin lo pide.
     const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
 
-    // ✅ stock:
-    // - No-admin: por su sucursal
-    // - Admin: si mandó ?branch_id => por esa sucursal, si no => total
     const stockBranchId = admin ? (branchIdScope || 0) : branchIdScope;
 
     const where = {};
@@ -617,18 +593,12 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // ✅ FIX 3 (CRÍTICO):
-    // - NO-ADMIN: NO filtrar por products.branch_id (dueño) JAMÁS.
-    // - ADMIN: si pasa owner_branch_id => filtra por dueño.
     if (admin && ownerBranchId) {
       where.branch_id = ownerBranchId;
     }
 
     where[Op.and] = where[Op.and] || [];
 
-    // ✅ FIX 4:
-    // - NO-ADMIN: siempre exigir enabled en su sucursal (product_branches)
-    // - ADMIN: solo exigir enabled si pidió ?branch_id
     if (!admin) {
       where[Op.and].push(enabledInBranchLiteral(branchIdScope));
     } else if (branchIdScope) {
@@ -640,7 +610,7 @@ async function list(req, res, next) {
 
     if (inStock || sellable) {
       if (!admin || branchIdScope) {
-        where[Op.and].push(existsStockInBranch(!admin ? branchIdScope : branchIdScope));
+        where[Op.and].push(existsStockInBranch(branchIdScope));
       } else {
         where[Op.and].push(
           Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`)
@@ -717,7 +687,6 @@ async function getOne(req, res, next) {
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-    // visibilidad por sucursal (no-admin)
     if (!admin) {
       const [[ok]] = await sequelize.query(
         `
@@ -832,9 +801,6 @@ async function create(req, res, next) {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
-    // ✅ En CREATE ignoramos code que venga del cliente (si existe trigger BU no importa)
-    if (Object.prototype.hasOwnProperty.call(payload, "code")) delete payload.code;
-
     await sanitizeCategoryFKs(payload);
 
     const errors = validateProductPayload(payload, { isPatch: false });
@@ -848,30 +814,32 @@ async function create(req, res, next) {
     }
 
     const created = await sequelize.transaction(async (t) => {
-      // 1) crear producto
+      // 1) Crear
       const p = await Product.create(payload, { transaction: t });
 
-      // 2) setear code PRO usando el id real (✅ FIX)
-      const proCode = proCodeFromId(p.id);
-      if (proCode) {
-        // OJO: si en DB dejaste trg_products_code_bu que impide editar code,
-        // esto sigue siendo OK porque code estaba NULL y lo seteamos una sola vez.
-        await p.update({ code: proCode }, { transaction: t, hooks: false });
-      }
+      // 2) ✅ Generar code PRO por ID (FUENTE DE VERDAD)
+      const code = `P${String(p.id).padStart(9, "0")}`;
+      await p.update({ code }, { transaction: t });
 
-      // 3) habilitar sucursales (product_branches)
-      const bids = !admin ? [payload.branch_id] : bodyBranchIds.length ? bodyBranchIds : [payload.branch_id];
+      // 3) Branches habilitadas
+      const bids = !admin ? [payload.branch_id] : (bodyBranchIds.length ? bodyBranchIds : [payload.branch_id]);
       await upsertProductBranches({ productId: p.id, branchIds: bids, transaction: t });
 
-      // 4) devolver el objeto ya con code
       return p;
     });
 
-    // Reload opcional con includes (para UI)
-    const include = buildProductIncludes({ includeBranch: isAdminReq(req) });
-    const createdFull = await Product.findOne({ where: { id: created.id }, include }).catch(() => created);
+    // ✅ devolver refrescado con includes + stock_qty
+    const include = buildProductIncludes({ includeBranch: admin });
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
+    const branchIdScope = admin ? (branchIdQuery || 0) : getBranchId(req);
 
-    return res.status(201).json({ ok: true, message: "Producto creado", data: createdFull });
+    const fresh = await Product.findOne({
+      where: { id: created.id },
+      include,
+      attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
+    });
+
+    return res.status(201).json({ ok: true, message: "Producto creado", data: fresh ? fresh.toJSON() : created });
   } catch (e) {
     if (e?.name === "SequelizeUniqueConstraintError") {
       return res.status(409).json({
@@ -923,7 +891,11 @@ async function update(req, res, next) {
       );
 
       if (!ok?.ok) {
-        return res.status(403).json({ ok: false, code: "FORBIDDEN_SCOPE", message: "No tenés permisos para editar productos no habilitados en tu sucursal." });
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_SCOPE",
+          message: "No tenés permisos para editar productos no habilitados en tu sucursal.",
+        });
       }
     }
 
@@ -932,9 +904,6 @@ async function update(req, res, next) {
 
     if (!admin) delete patch.branch_id;
     if (Object.prototype.hasOwnProperty.call(patch, "created_by")) delete patch.created_by;
-
-    // ✅ No permitir code por API (lo controla DB/trigger BU + backend)
-    if (Object.prototype.hasOwnProperty.call(patch, "code")) delete patch.code;
 
     await sanitizeCategoryFKs(patch);
 
