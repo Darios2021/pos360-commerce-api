@@ -1,10 +1,13 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (PASO 3 + Matriz de sucursales para STOCK UI)
+// ✅ COPY-PASTE FINAL COMPLETO (FIX SCOPE + Matriz sucursales STOCK UI)
 //
+// REGLAS:
 // - products.branch_id = owner/origen (NOT NULL)
-// - Catálogo visible por sucursal: product_branches (product_id, branch_id, is_active)
-// - Usuarios normales: solo ven productos habilitados en SU sucursal
-// - Admin: puede filtrar por ?branch_id= (catálogo habilitado) y/o ?owner_branch_id= (dueño/origen)
+// - Visibilidad por sucursal: product_branches (product_id, branch_id, is_active)
+// - Usuarios normales: ven productos habilitados en SU sucursal (NO por dueño)
+// - Admin: ve TODO. Opcional:
+//   - ?branch_id= => filtra por habilitados en esa sucursal
+//   - ?owner_branch_id= => filtra por sucursal dueña/origen
 //
 // ✅ NEW: GET /products/:id/branches => matriz para UI stock (enabled + current_qty por branch)
 
@@ -409,7 +412,6 @@ async function upsertProductBranches({ productId, branchIds, transaction = null 
   const bids = Array.isArray(branchIds) ? branchIds.map((x) => toInt(x, 0)).filter(Boolean) : [];
   if (!pid || !bids.length) return;
 
-  // INSERT IGNORE bulk
   const placeholders = bids.map(() => "(?, ?, 1, CURRENT_TIMESTAMP)").join(", ");
   const insertValues = [];
   for (const bid of bids) insertValues.push(pid, bid);
@@ -422,7 +424,6 @@ async function upsertProductBranches({ productId, branchIds, transaction = null 
     { replacements: insertValues, transaction }
   );
 
-  // UPDATE ... IN (?,?,?)
   const inPH = bids.map(() => "?").join(",");
   await sequelize.query(
     `
@@ -567,15 +568,20 @@ async function list(req, res, next) {
       });
     }
 
-    const ownerBranchId = admin
-      ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0)
-      : ctxBranchId;
+    // ✅ FIX 1:
+    // - Para ADMIN: branch_id SOLO si lo manda query/header.
+    // - Para NO-ADMIN: branch_id SIEMPRE su ctxBranchId.
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
+    const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
-    const branchIdScope = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
-      : ctxBranchId;
+    // ✅ FIX 2:
+    // owner_branch_id SOLO se aplica si admin lo pide.
+    const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
 
-    const stockBranchId = branchIdScope;
+    // ✅ stock:
+    // - No-admin: por su sucursal
+    // - Admin: si mandó ?branch_id => por esa sucursal, si no => total
+    const stockBranchId = admin ? (branchIdScope || 0) : branchIdScope;
 
     const where = {};
 
@@ -592,20 +598,37 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    if (!admin) {
-      where.branch_id = ownerBranchId;
-    } else if (ownerBranchId) {
+    // ✅ FIX 3 (CRÍTICO):
+    // - NO-ADMIN: NO filtrar por products.branch_id (dueño) JAMÁS.
+    // - ADMIN: si pasa owner_branch_id => filtra por dueño.
+    if (admin && ownerBranchId) {
       where.branch_id = ownerBranchId;
     }
 
     where[Op.and] = where[Op.and] || [];
-    if (!admin) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
-    else if (branchIdScope) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+
+    // ✅ FIX 4:
+    // - NO-ADMIN: siempre exigir enabled en su sucursal (product_branches)
+    // - ADMIN: solo exigir enabled si pidió ?branch_id
+    if (!admin) {
+      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+    } else if (branchIdScope) {
+      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+    }
 
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
 
-    if (inStock || sellable) where[Op.and].push(existsStockInBranch(stockBranchId));
+    if (inStock || sellable) {
+      // si admin no mandó branch_id, este filtro no tiene sentido => usá total stock
+      if (!admin || branchIdScope) {
+        where[Op.and].push(existsStockInBranch(!admin ? branchIdScope : branchIdScope));
+      } else {
+        where[Op.and].push(
+          Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`)
+        );
+      }
+    }
 
     if (sellable) {
       where[Op.and].push(
@@ -663,20 +686,20 @@ async function getOne(req, res, next) {
       });
     }
 
-    const branchIdScope = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
-      : ctxBranchId;
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
+    const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
     const include = buildProductIncludes({ includeBranch: admin });
 
     const p = await Product.findOne({
       where: { id },
       include,
-      attributes: { include: [[stockQtyLiteralByBranch(branchIdScope), "stock_qty"]] },
+      attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
+    // visibilidad por sucursal (no-admin)
     if (!admin) {
       const [[ok]] = await sequelize.query(
         `
@@ -888,14 +911,13 @@ async function update(req, res, next) {
 
     const include = buildProductIncludes({ includeBranch: admin });
 
-    const branchIdScope = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0) || ctxBranchId || 0
-      : ctxBranchId;
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
+    const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
     const updated = await Product.findOne({
       where: { id },
       include,
-      attributes: { include: [[stockQtyLiteralByBranch(branchIdScope), "stock_qty"]] },
+      attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
     const x = updated.toJSON();
