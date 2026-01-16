@@ -1,5 +1,5 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FIX CODE + SCOPE + Matriz sucursales STOCK UI + Soft delete)
+// ✅ COPY-PASTE FINAL COMPLETO (FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code)
 //
 // REGLAS:
 // - products.branch_id = owner/origen (NOT NULL)
@@ -9,16 +9,19 @@
 //   - ?branch_id= => filtra por habilitados en esa sucursal
 //   - ?owner_branch_id= => filtra por sucursal dueña/origen
 //
-// ✅ NEW: GET /products/next-code => preview del próximo código P000000123 (para UI)
 // ✅ NEW: GET /products/:id/branches => matriz para UI stock (enabled + current_qty por branch)
 //
 // ✅ FIX CRÍTICO:
-// - code PRO se genera en BACKEND por AUTO_INCREMENT (P + LPAD(id,9,'0'))
+// - code PRO se genera en BACKEND por id: P + LPAD(id,9,'0')
 // - NO dependemos de triggers
 //
-// ✅ DELETE:
-// - intenta hard delete
-// - si hay FK -> soft delete (is_active=0 + deshabilita product_branches)
+// ✅ NEW: GET /products/next-code => devuelve code aproximado (AUTO_INCREMENT)
+// - Sirve para UI (preview). Puede variar por concurrencia.
+//
+// ✅ DELETE PRO:
+// - Si stock total > 0 => NO borrar (409 STOCK_NOT_ZERO)
+// - Si hay referencias (ventas/movimientos/FKs) => soft delete (is_active=0) + deshabilita branches
+// - Si stock total = 0 y sin referencias fuertes => borra dependencias (images, branches, stock_balances) y luego products
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
@@ -145,8 +148,15 @@ function creatorLabelFromUser(u) {
   );
 }
 
+function codeFromId(id) {
+  const n = toInt(id, 0);
+  if (!n) return null;
+  return `P${String(n).padStart(9, "0")}`;
+}
+
 /**
  * ✅ Includes defensivos
+ * - Solo agrega asociaciones si existen
  */
 function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
@@ -301,10 +311,10 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
     if (!isBoolLike(v)) add(field, "Debe ser boolean (true/false).");
   };
 
+  // ✅ required solo en CREATE
   checkString("sku", payload.sku, { required: true, max: 64 });
   checkString("name", payload.name, { required: true, max: 200 });
 
-  // code lo genera backend (NO validar como input del cliente)
   checkString("barcode", payload.barcode, { required: false, max: 64 });
   checkString("description", payload.description, { required: false });
 
@@ -320,6 +330,7 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkBool("is_new", payload.is_new);
   checkBool("is_promo", payload.is_promo);
   checkBool("is_active", payload.is_active);
+  checkBool("track_stock", payload.track_stock);
 
   checkNumber("price_list", payload.price_list, { min: 0, allowNull: true });
   checkNumber("price_discount", payload.price_discount, { min: 0, allowNull: true });
@@ -337,7 +348,6 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
 function pickBody(body = {}) {
   const out = {};
   const fields = [
-    // "code",  // 🚫 NO lo aceptamos del cliente
     "sku",
     "barcode",
     "name",
@@ -369,6 +379,9 @@ function pickBody(body = {}) {
   if (out.name != null) out.name = String(out.name).trim();
   if (out.description != null) out.description = String(out.description).trim();
 
+  if (out.category_id === "") out.category_id = null;
+  if (out.subcategory_id === "") out.subcategory_id = null;
+
   if (out.category_id != null) out.category_id = toInt(out.category_id, null);
   if (out.subcategory_id != null) out.subcategory_id = toInt(out.subcategory_id, null);
   if (out.branch_id != null) out.branch_id = toInt(out.branch_id, null);
@@ -378,6 +391,9 @@ function pickBody(body = {}) {
 
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
+
+  // 🚫 NO aceptamos code del cliente
+  if (Object.prototype.hasOwnProperty.call(out, "code")) delete out.code;
 
   return out;
 }
@@ -487,84 +503,34 @@ function existsStockInBranch(branchId) {
   )`);
 }
 
-// ===== CODE helpers =====
-function makeProCodeFromId(id) {
-  const n = toInt(id, 0);
-  return `P${String(n).padStart(9, "0")}`;
-}
-
-async function getNextAutoIncrement({ transaction = null } = {}) {
-  const [rows] = await sequelize.query(
-    `
-    SELECT AUTO_INCREMENT AS next_id
-    FROM information_schema.TABLES
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = 'products'
-    LIMIT 1
-    `,
-    { transaction }
-  );
-
-  const nextId = toInt(rows?.[0]?.next_id, 0);
-  return nextId > 0 ? nextId : 1;
-}
-
-/**
- * Crea producto asegurando code único sin triggers.
- * - Setea payload.code con AUTO_INCREMENT (preview)
- * - Retry si por carrera cae en duplicado de code
- */
-async function createProductWithProCode(payload, { transaction }) {
-  const MAX = 3;
-  let lastErr = null;
-
-  for (let i = 0; i < MAX; i++) {
-    const nextId = await getNextAutoIncrement({ transaction });
-    const code = makeProCodeFromId(nextId);
-
-    try {
-      const p = await Product.create({ ...payload, code }, { transaction });
-
-      // Si por algún motivo code quedó null/vacío, lo intentamos setear por ID real
-      // (esto NO debería pasar, pero queda blindado)
-      if (!p.code) {
-        const realCode = makeProCodeFromId(p.id);
-        // ⚠️ esto hace UPDATE; si existe trigger BU que bloquea, te va a fallar:
-        // por eso arriba te dejé el DROP TRIGGER trg_products_code_bu
-        await p.update({ code: realCode }, { transaction });
-      }
-
-      return p;
-    } catch (e) {
-      lastErr = e;
-
-      const isDup = e?.name === "SequelizeUniqueConstraintError";
-      const msg = String(e?.original?.sqlMessage || e?.message || "").toLowerCase();
-
-      // retry SOLO si fue duplicado y parece venir por el code
-      if (isDup && (msg.includes("uq_products_code") || msg.includes("code"))) {
-        continue;
-      }
-
-      throw e;
-    }
-  }
-
-  throw lastErr || new Error("CREATE_FAILED");
-}
-
-// ✅ GET /api/v1/products/next-code
+// ✅ NEW: GET /api/v1/products/next-code
 async function getNextCode(req, res, next) {
   try {
-    const nextId = await getNextAutoIncrement();
-    const code = makeProCodeFromId(nextId);
-    return res.json({ ok: true, data: { next_id: nextId, code } });
+    const [[row]] = await sequelize.query(
+      `
+      SELECT AUTO_INCREMENT AS next_id
+      FROM information_schema.TABLES
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'products'
+      LIMIT 1
+      `
+    );
+
+    const nextId = toInt(row?.next_id, 0) || 1;
+    return res.json({
+      ok: true,
+      data: {
+        next_id: nextId,
+        code: codeFromId(nextId),
+        note: "Código aproximado (puede variar por concurrencia).",
+      },
+    });
   } catch (e) {
     next(e);
   }
 }
 
-// ✅ GET /api/v1/products/:id/branches
+// ✅ NUEVO: GET /api/v1/products/:id/branches
 async function getBranchesMatrix(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -675,19 +641,14 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // NO-ADMIN: jamás filtrar por products.branch_id (dueño)
-    if (admin && ownerBranchId) {
-      where.branch_id = ownerBranchId;
-    }
+    // ✅ NO-ADMIN nunca filtra por dueño; admin opcional
+    if (admin && ownerBranchId) where.branch_id = ownerBranchId;
 
     where[Op.and] = where[Op.and] || [];
 
-    // Visibilidad por sucursal
-    if (!admin) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
-    } else if (branchIdScope) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
-    }
+    // ✅ scope por branch habilitada
+    if (!admin) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+    else if (branchIdScope) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
 
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
@@ -735,14 +696,12 @@ async function list(req, res, next) {
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
-
     return res.json({ ok: true, data, meta: { page, limit, total: count, pages } });
   } catch (e) {
     next(e);
   }
 }
 
-// GET /api/v1/products/:id
 async function getOne(req, res, next) {
   try {
     const id = toInt(req.params.id, 0);
@@ -772,7 +731,6 @@ async function getOne(req, res, next) {
 
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-    // visibilidad por sucursal (no-admin)
     if (!admin) {
       const [[ok]] = await sequelize.query(
         `
@@ -804,7 +762,6 @@ async function getOne(req, res, next) {
   }
 }
 
-// GET /api/v1/products/:id/stock?branch_id=
 async function getStock(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -865,7 +822,6 @@ async function getStock(req, res, next) {
   }
 }
 
-// POST /api/v1/products
 async function create(req, res, next) {
   try {
     const admin = isAdminReq(req);
@@ -901,29 +857,33 @@ async function create(req, res, next) {
       });
     }
 
-    const created = await sequelize.transaction(async (t) => {
-      // 1) Crear con code PRO calculado por AUTO_INCREMENT (anti-trigger + previsualizable)
-      const p = await createProductWithProCode(payload, { transaction: t });
+    const createdId = await sequelize.transaction(async (t) => {
+      // 1) Crear
+      const p = await Product.create(payload, { transaction: t });
 
-      // 2) Branches habilitadas
+      // 2) ✅ Generar code PRO por ID (FUENTE DE VERDAD)
+      const code = codeFromId(p.id);
+      await p.update({ code }, { transaction: t });
+
+      // 3) Branches habilitadas
       const bids = !admin ? [payload.branch_id] : (bodyBranchIds.length ? bodyBranchIds : [payload.branch_id]);
       await upsertProductBranches({ productId: p.id, branchIds: bids, transaction: t });
 
-      return p;
+      return p.id;
     });
 
-    // devolver fresco con includes + stock_qty
+    // ✅ devolver refrescado con includes + stock_qty
     const include = buildProductIncludes({ includeBranch: admin });
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
     const branchIdScope = admin ? (branchIdQuery || 0) : getBranchId(req);
 
     const fresh = await Product.findOne({
-      where: { id: created.id },
+      where: { id: createdId },
       include,
       attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
-    return res.status(201).json({ ok: true, message: "Producto creado", data: fresh ? fresh.toJSON() : created.toJSON() });
+    return res.status(201).json({ ok: true, message: "Producto creado", data: fresh ? fresh.toJSON() : { id: createdId } });
   } catch (e) {
     if (e?.name === "SequelizeUniqueConstraintError") {
       return res.status(409).json({
@@ -947,7 +907,6 @@ async function create(req, res, next) {
   }
 }
 
-// PATCH /api/v1/products/:id
 async function update(req, res, next) {
   try {
     const id = toInt(req.params.id, 0);
@@ -961,7 +920,9 @@ async function update(req, res, next) {
 
     if (!admin) {
       const bid = ctxBranchId;
-      if (!bid) return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." });
+      if (!bid) {
+        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." });
+      }
 
       const [[ok]] = await sequelize.query(
         `
@@ -983,19 +944,31 @@ async function update(req, res, next) {
     const patch = pickBody(req.body || {});
     const bodyBranchIds = normalizeBranchIdsInput(req.body || {});
 
-    // seguridad
+    // 🔒 NO tocar branch_id si no admin
     if (!admin) delete patch.branch_id;
-    if (Object.prototype.hasOwnProperty.call(patch, "created_by")) delete patch.created_by;
-    // no aceptar code desde cliente
+
+    // 🚫 code no se edita desde API
     if (Object.prototype.hasOwnProperty.call(patch, "code")) delete patch.code;
 
     await sanitizeCategoryFKs(patch);
 
     const errors = validateProductPayload(patch, { isPatch: true });
-    if (errors.length) return res.status(400).json({ ok: false, code: "VALIDATION", message: "Hay errores de validación en el producto.", errors });
+    if (errors.length) {
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "Hay errores de validación en el producto.",
+        errors,
+      });
+    }
 
     await sequelize.transaction(async (t) => {
       await p.update(patch, { transaction: t });
+
+      // ✅ si por algún motivo quedó sin code, lo regeneramos
+      if (!p.code) {
+        await p.update({ code: codeFromId(p.id) }, { transaction: t });
+      }
 
       if (admin) {
         const hasBranchIds =
@@ -1021,7 +994,7 @@ async function update(req, res, next) {
       attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
-    const x = updated.toJSON();
+    const x = updated?.toJSON ? updated.toJSON() : (updated || {});
     const u = x?.createdByUser || null;
 
     return res.json({ ok: true, message: "Producto actualizado", data: { ...x, created_by_user: creatorLabelFromUser(u) } });
@@ -1048,7 +1021,6 @@ async function update(req, res, next) {
   }
 }
 
-// DELETE /api/v1/products/:id
 async function remove(req, res, next) {
   try {
     if (!requireAdmin(req, res)) return;
@@ -1056,41 +1028,82 @@ async function remove(req, res, next) {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
-    const p = await Product.findByPk(id);
+    const p = await Product.findByPk(id, { attributes: ["id", "name", "is_active"] });
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-    // 1) intentar hard delete
+    // 1) stock total real
+    const [[srow]] = await sequelize.query(
+      `
+      SELECT COALESCE(SUM(sb.qty), 0) AS total_qty
+      FROM stock_balances sb
+      WHERE sb.product_id = :pid
+      `,
+      { replacements: { pid: id } }
+    );
+
+    const totalQty = Number(srow?.total_qty || 0);
+
+    // Si tiene stock, NO borrar (evita quilombo de integridad)
+    if (totalQty > 0) {
+      return res.status(409).json({
+        ok: false,
+        code: "STOCK_NOT_ZERO",
+        message: "No se puede eliminar: el producto tiene stock. Primero dejá stock en 0 (ajuste/transferencia) y luego eliminá.",
+        data: { product_id: id, total_qty: totalQty },
+      });
+    }
+
+    // 2) Intento de borrado “limpio” (borra dependencias típicas)
     try {
       await sequelize.transaction(async (t) => {
-        // borrar imágenes (si tu schema lo permite)
+        // images
         if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id }, transaction: t });
 
-        // deshabilitar branches primero (evita basura)
-        await sequelize.query(
-          `UPDATE product_branches SET is_active = 0 WHERE product_id = :pid`,
-          { replacements: { pid: id }, transaction: t }
-        );
+        // product_branches
+        await sequelize.query(`DELETE FROM product_branches WHERE product_id = :pid`, {
+          replacements: { pid: id },
+          transaction: t,
+        });
 
-        // intentar borrar producto
+        // stock_balances (ya es 0 pero pueden existir filas)
+        await sequelize.query(`DELETE FROM stock_balances WHERE product_id = :pid`, {
+          replacements: { pid: id },
+          transaction: t,
+        });
+
+        // delete product
         await p.destroy({ transaction: t });
       });
 
       return res.json({ ok: true, message: "Producto eliminado" });
     } catch (err) {
-      // 2) si hay FK, hacemos SOFT DELETE (para que el admin “pueda eliminar”)
+      // 3) Si hay FK por ventas/movimientos => soft delete
       if (isFkConstraintError(err)) {
         await sequelize.transaction(async (t) => {
-          await p.update({ is_active: 0 }, { transaction: t });
           await sequelize.query(
-            `UPDATE product_branches SET is_active = 0 WHERE product_id = :pid`,
+            `
+            UPDATE products
+            SET is_active = 0
+            WHERE id = :pid
+            `,
+            { replacements: { pid: id }, transaction: t }
+          );
+
+          await sequelize.query(
+            `
+            UPDATE product_branches
+            SET is_active = 0
+            WHERE product_id = :pid
+            `,
             { replacements: { pid: id }, transaction: t }
           );
         });
 
-        return res.json({
+        return res.status(200).json({
           ok: true,
           code: "SOFT_DELETED",
-          message: "No se pudo eliminar por referencias (stock/ventas). Se deshabilitó el producto.",
+          message: "No se pudo borrar físicamente por referencias (ventas/movimientos). Se desactivó el producto (soft delete).",
+          data: { product_id: id },
         });
       }
 
@@ -1103,11 +1116,11 @@ async function remove(req, res, next) {
 
 module.exports = {
   list,
+  create,
   getOne,
   getStock,
   getBranchesMatrix,
-  getNextCode,
-  create,
   update,
   remove,
+  getNextCode, // ✅ nuevo
 };

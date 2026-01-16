@@ -1,27 +1,9 @@
 // src/routes/products.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO (RBAC + sin duplicar branchContext)
+// ✅ COPY-PASTE FINAL COMPLETO (RBAC + orden correcto de rutas)
 //
 // IMPORTANTE:
 // - branchContext NO va acá porque YA se aplica en v1.routes.js:
 //   safeUse("/products", requireAuth, branchContext, productsRoutes);
-//
-// RBAC:
-// - GET /                 -> products.read
-// - GET /next-code        -> products.read   ✅ preview code
-// - GET /:id              -> products.read
-// - GET /:id/stock        -> products.read
-// - GET /:id/branches     -> products.read   ✅ matriz de sucursales
-// - imágenes GET          -> products.read
-//
-// - POST /                -> products.write
-// - PATCH /:id            -> products.write
-// - DELETE /:id           -> products.write
-// - imágenes POST/DELETE  -> products.write
-//
-// SAFE fallback:
-// - super_admin: pasa siempre
-// - permiso presente: pasa
-// - rol admin: pasa (fallback producción)
 
 const router = require("express").Router();
 const multer = require("multer");
@@ -69,36 +51,36 @@ const upload = multer({
 // =========================
 // --- PRODUCTOS ---
 // =========================
-router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);
 
-// ✅ PREVIEW del próximo código (IMPORTANTE: antes de /:id)
+// ✅ SIEMPRE primero rutas literales (para que NO las agarre /:id)
 router.get("/next-code", allowAdminOrPermission("products.read"), productsCtrl.getNextCode);
 
+// ✅ Listado
+router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);
+
+// ✅ Crear
 router.post("/", allowAdminOrPermission("products.write"), productsCtrl.create);
 
 // ✅ STOCK REAL por sucursal
 // GET /api/v1/products/:id/stock?branch_id=3
 router.get("/:id/stock", allowAdminOrPermission("products.read"), productsCtrl.getStock);
 
-// ✅ MATRIZ REAL por sucursal (para UI de reparto/asignación)
+// ✅ MATRIZ REAL por sucursal
 // GET /api/v1/products/:id/branches
 router.get("/:id/branches", allowAdminOrPermission("products.read"), productsCtrl.getBranchesMatrix);
 
+// ✅ Imágenes (GET/POST) antes de /:id (no es obligatorio, pero queda prolijo)
+router.get("/:id/images", allowAdminOrPermission("products.read"), productImagesCtrl.listByProduct);
+router.post("/:id/images", allowAdminOrPermission("products.write"), upload.any(), productImagesCtrl.upload);
+router.delete("/:id/images/:imageId", allowAdminOrPermission("products.write"), productImagesCtrl.remove);
+
+// ✅ GetOne (siempre al final de las rutas paramétricas)
 router.get("/:id", allowAdminOrPermission("products.read"), productsCtrl.getOne);
 
+// ✅ Update
 router.patch("/:id", allowAdminOrPermission("products.write"), productsCtrl.update);
 
-// ✅ DELETE producto
+// ✅ Delete producto
 router.delete("/:id", allowAdminOrPermission("products.write"), productsCtrl.remove);
-
-// =========================
-// --- IMÁGENES ---
-// =========================
-router.get("/:id/images", allowAdminOrPermission("products.read"), productImagesCtrl.listByProduct);
-
-router.post("/:id/images", allowAdminOrPermission("products.write"), upload.any(), productImagesCtrl.upload);
-
-// ✅ borrar una imagen por id
-router.delete("/:id/images/:imageId", allowAdminOrPermission("products.write"), productImagesCtrl.remove);
 
 module.exports = router;
