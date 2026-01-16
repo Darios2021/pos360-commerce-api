@@ -6,16 +6,17 @@
 //   safeUse("/products", requireAuth, branchContext, productsRoutes);
 //
 // RBAC:
-// - GET /              -> products.read
-// - GET /:id           -> products.read
-// - GET /:id/stock     -> products.read
-// - GET /:id/branches  -> products.read   ✅ matriz de sucursales (enabled + current_qty)
-// - imágenes GET       -> products.read
+// - GET /                 -> products.read
+// - GET /next-code        -> products.read   ✅ preview code
+// - GET /:id              -> products.read
+// - GET /:id/stock        -> products.read
+// - GET /:id/branches     -> products.read   ✅ matriz de sucursales
+// - imágenes GET          -> products.read
 //
-// - POST /             -> products.write
-// - PATCH /:id         -> products.write
-// - DELETE /:id        -> products.write
-// - imágenes POST/DELETE -> products.write
+// - POST /                -> products.write
+// - PATCH /:id            -> products.write
+// - DELETE /:id           -> products.write
+// - imágenes POST/DELETE  -> products.write
 //
 // SAFE fallback:
 // - super_admin: pasa siempre
@@ -69,6 +70,9 @@ const upload = multer({
 // --- PRODUCTOS ---
 // =========================
 router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);
+
+// ✅ PREVIEW del próximo código (IMPORTANTE: antes de /:id)
+router.get("/next-code", allowAdminOrPermission("products.read"), productsCtrl.getNextCode);
 
 router.post("/", allowAdminOrPermission("products.write"), productsCtrl.create);
 
