@@ -88,7 +88,6 @@ function isAdminReq(req) {
       .split(/[,\s|]+/g)
       .map((x) => x.trim().toLowerCase())
       .filter(Boolean);
-
     if (parts.some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x))) return true;
   }
 
@@ -623,7 +622,6 @@ async function list(req, res, next) {
     const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
     const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
-
     const stockBranchId = admin ? (branchIdScope || 0) : branchIdScope;
 
     const where = {};
@@ -861,7 +859,7 @@ async function create(req, res, next) {
       // 1) Crear
       const p = await Product.create(payload, { transaction: t });
 
-      // 2) ✅ Generar code PRO por ID (FUENTE DE VERDAD)
+      // 2) ✅ Generar code PRO por ID
       const code = codeFromId(p.id);
       await p.update({ code }, { transaction: t });
 
@@ -937,7 +935,11 @@ async function update(req, res, next) {
       );
 
       if (!ok?.ok) {
-        return res.status(403).json({ ok: false, code: "FORBIDDEN_SCOPE", message: "No tenés permisos para editar productos no habilitados en tu sucursal." });
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_SCOPE",
+          message: "No tenés permisos para editar productos no habilitados en tu sucursal.",
+        });
       }
     }
 
@@ -997,7 +999,11 @@ async function update(req, res, next) {
     const x = updated?.toJSON ? updated.toJSON() : (updated || {});
     const u = x?.createdByUser || null;
 
-    return res.json({ ok: true, message: "Producto actualizado", data: { ...x, created_by_user: creatorLabelFromUser(u) } });
+    return res.json({
+      ok: true,
+      message: "Producto actualizado",
+      data: { ...x, created_by_user: creatorLabelFromUser(u) },
+    });
   } catch (e) {
     if (e?.name === "SequelizeUniqueConstraintError") {
       return res.status(409).json({
@@ -1043,7 +1049,7 @@ async function remove(req, res, next) {
 
     const totalQty = Number(srow?.total_qty || 0);
 
-    // Si tiene stock, NO borrar (evita quilombo de integridad)
+    // Si tiene stock, NO borrar
     if (totalQty > 0) {
       return res.status(409).json({
         ok: false,
@@ -1053,7 +1059,7 @@ async function remove(req, res, next) {
       });
     }
 
-    // 2) Intento de borrado “limpio” (borra dependencias típicas)
+    // 2) Intento de borrado “limpio”
     try {
       await sequelize.transaction(async (t) => {
         // images
@@ -1065,7 +1071,7 @@ async function remove(req, res, next) {
           transaction: t,
         });
 
-        // stock_balances (ya es 0 pero pueden existir filas)
+        // stock_balances (aunque qty=0 pueden existir filas)
         await sequelize.query(`DELETE FROM stock_balances WHERE product_id = :pid`, {
           replacements: { pid: id },
           transaction: t,
@@ -1122,5 +1128,5 @@ module.exports = {
   getBranchesMatrix,
   update,
   remove,
-  getNextCode, // ✅ nuevo
+  getNextCode,
 };
