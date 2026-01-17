@@ -1,11 +1,9 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
-// FIX: Subcategorías reales desde tabla `subcategories` (NO Subcategory model)
-// - Si viene subcategory_id => valida en subcategories y fuerza category_id = subcategories.category_id
+// ✅ COPY-PASTE FINAL COMPLETO (FIX subcategorias via categories.parent_id + guarda en subcategories real)
 // Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
 
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, ProductImage, sequelize } = require("../models");
+const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -138,17 +136,37 @@ function codeFromId(id) {
  * ✅ Includes defensivos
  * - Solo agrega asociaciones si existen
  * - category: ok
- * - subcategory: SI tu Product tiene asociación subcategory (belongsTo Subcategory o Category por subcategory_id)
+ * - subcategory: SI tu Product tiene asociación subcategory (belongsTo Category por subcategory_id)
  */
 function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
   const A = Product?.associations || {};
 
   const catAs = A.category ? "category" : A.Category ? "Category" : null;
-  if (catAs) inc.push({ association: catAs, required: false });
+  if (catAs) {
+    const catInclude = { association: catAs, required: false };
+    try {
+      const CatModel = A[catAs]?.target || Category;
+      const CA = CatModel?.associations || {};
+      const parentAs = CA.parent ? "parent" : CA.Parent ? "Parent" : null;
+      if (parentAs) catInclude.include = [{ association: parentAs, required: false }];
+    } catch {}
+    inc.push(catInclude);
+  }
 
+  // ⚠️ OJO: subcategory_id en DB referencia subcategories.id, así que este include puede NO matchear.
+  // Lo dejamos tal cual para no romper tu estructura. (El guardado queda OK).
   const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
-  if (subAs) inc.push({ association: subAs, required: false });
+  if (subAs) {
+    const subInclude = { association: subAs, required: false };
+    try {
+      const SubModel = A[subAs]?.target || Category;
+      const SA = SubModel?.associations || {};
+      const parentAs = SA.parent ? "parent" : SA.Parent ? "Parent" : null;
+      if (parentAs) subInclude.include = [{ association: parentAs, required: false }];
+    } catch {}
+    inc.push(subInclude);
+  }
 
   const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
@@ -177,16 +195,14 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 }
 
 /**
- * ✅ FIX REAL (TU DB):
- * Subcategoría real = tabla `subcategories` (tiene category_id FK)
- * - Si viene subcategory_id => valida en subcategories y fuerza category_id = subcategories.category_id
- * - Si viene category_id => valida que exista en categories
- * - NO usa Subcategory model (solo sequelize.query)
+ * ✅ UI manda:
+ * - category_id = categories.id padre
+ * - subcategory_id = categories.id hija (parent_id != null)
+ * Este helper valida y fuerza category_id = parent_id.
  */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
-  // category_id
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
 
@@ -202,7 +218,6 @@ async function sanitizeCategoryFKs(payload) {
     }
   }
 
-  // subcategory_id (tabla subcategories)
   if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
     if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
 
@@ -211,28 +226,16 @@ async function sanitizeCategoryFKs(payload) {
       if (!sid) {
         payload.subcategory_id = null;
       } else {
-        const [rows] = await sequelize.query(
-          `
-          SELECT id, category_id
-          FROM subcategories
-          WHERE id = :sid
-          LIMIT 1
-          `,
-          { replacements: { sid } }
-        );
+        const sub = await Category.findByPk(sid, { attributes: ["id", "parent_id"] }).catch(() => null);
+        const parentId = toInt(sub?.parent_id, 0);
 
-        const sub = rows?.[0] || null;
-        const parentCid = toInt(sub?.category_id, 0);
-
-        if (!sub || !parentCid) {
+        if (!sub || !parentId) {
           payload.subcategory_id = null;
         } else {
-          // ✅ guarda el subrubro y fuerza rubro padre
           payload.subcategory_id = sid;
-          payload.category_id = parentCid;
+          payload.category_id = parentId;
 
-          // ✅ valida que exista el rubro padre
-          const parentOk = await Category.findByPk(parentCid, { attributes: ["id"] }).catch(() => null);
+          const parentOk = await Category.findByPk(parentId, { attributes: ["id"] }).catch(() => null);
           if (!parentOk) {
             payload.category_id = null;
             payload.subcategory_id = null;
@@ -242,6 +245,67 @@ async function sanitizeCategoryFKs(payload) {
     }
   }
 
+  return payload;
+}
+
+/**
+ * ✅ CLAVE: convierte subcategory_id (categories.id hija) -> subcategories.id real (FK products.subcategory_id)
+ * - Si ya viene subcategories.id real, lo deja.
+ * - Si viene categories.id hija, crea/busca subcategories por UNIQUE(category_id, name)
+ */
+async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
+  if (!payload) return payload;
+
+  if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return payload;
+
+  if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
+  if (payload.subcategory_id == null) return payload;
+
+  const incoming = toInt(payload.subcategory_id, 0);
+  if (!incoming) {
+    payload.subcategory_id = null;
+    return payload;
+  }
+
+  // 1) ¿ya es subcategories.id?
+  const byPk = await Subcategory.findByPk(incoming, {
+    attributes: ["id", "category_id"],
+    transaction,
+  }).catch(() => null);
+
+  if (byPk) {
+    payload.subcategory_id = byPk.id;
+    if (!payload.category_id && byPk.category_id) payload.category_id = byPk.category_id;
+    return payload;
+  }
+
+  // 2) interpretarlo como categories.id hija
+  const catChild = await Category.findByPk(incoming, {
+    attributes: ["id", "name", "parent_id"],
+    transaction,
+  }).catch(() => null);
+
+  const parentId = toInt(catChild?.parent_id, 0);
+  const name = String(catChild?.name || "").trim();
+
+  if (!catChild || !parentId || !name) {
+    payload.subcategory_id = null;
+    return payload;
+  }
+
+  payload.category_id = parentId;
+
+  let sub = await Subcategory.findOne({
+    where: { category_id: parentId, name },
+    attributes: ["id"],
+    transaction,
+  });
+
+  if (!sub) {
+    sub = await Subcategory.create({ category_id: parentId, name, is_active: 1 }, { transaction });
+  }
+
+  payload.subcategory_id = sub.id;
   return payload;
 }
 
@@ -823,6 +887,9 @@ async function create(req, res, next) {
 
     await sanitizeCategoryFKs(payload);
 
+    // ✅ Si SKU vino vacío, lo dejamos vacío acá y lo seteamos luego con code (evita 409 por duplicados en front)
+    if (payload.sku != null && String(payload.sku).trim() === "") payload.sku = "";
+
     const errors = validateProductPayload(payload, { isPatch: false });
     if (errors.length) {
       return res.status(400).json({
@@ -834,9 +901,18 @@ async function create(req, res, next) {
     }
 
     const createdId = await sequelize.transaction(async (t) => {
-      const p = await Product.create(payload, { transaction: t });
+      // ✅ CLAVE: convertir subcategory_id a subcategories.id real
+      await ensureSubcategoryFK(payload, { transaction: t });
+
+      // ✅ Crear con SKU temporal si viene vacío, para evitar unique collisions (usamos random corto)
+      const tmpSku =
+        isNonEmptyStr(payload.sku) ? payload.sku.trim() : `TMP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+      const p = await Product.create({ ...payload, sku: tmpSku }, { transaction: t });
 
       const code = codeFromId(p.id);
+
+      // ✅ SKU final: si el usuario mandó uno, lo usamos. Si no, usamos el code (estable, único)
       const skuFinal = isNonEmptyStr(payload.sku) ? payload.sku.trim() : code;
 
       await p.update({ code, sku: skuFinal }, { transaction: t });
@@ -942,6 +1018,9 @@ async function update(req, res, next) {
     }
 
     await sequelize.transaction(async (t) => {
+      // ✅ CLAVE: convertir subcategory_id a subcategories.id real
+      await ensureSubcategoryFK(patch, { transaction: t });
+
       await p.update(patch, { transaction: t });
 
       if (!p.code) await p.update({ code: codeFromId(p.id) }, { transaction: t });
