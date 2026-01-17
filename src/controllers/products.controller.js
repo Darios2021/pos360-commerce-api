@@ -1081,6 +1081,7 @@ async function update(req, res, next) {
   }
 }
 
+// ✅ REEMPLAZAR FUNCIÓN remove() COMPLETA POR ESTA
 async function remove(req, res, next) {
   try {
     if (!requireAdmin(req, res)) return;
@@ -1091,6 +1092,7 @@ async function remove(req, res, next) {
     const p = await Product.findByPk(id, { attributes: ["id", "name", "is_active"] });
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
+    // ✅ Chequeo stock total (todas las sucursales/depósitos)
     const [[srow]] = await sequelize.query(
       `
       SELECT COALESCE(SUM(sb.qty), 0) AS total_qty
@@ -1102,15 +1104,40 @@ async function remove(req, res, next) {
 
     const totalQty = Number(srow?.total_qty || 0);
 
+    // ✅ CAMBIO CLAVE:
+    // Si tiene stock => NO devolvemos 409.
+    // Hacemos "soft delete" (desactivar) para que el botón "Eliminar" funcione.
     if (totalQty > 0) {
-      return res.status(409).json({
-        ok: false,
-        code: "STOCK_NOT_ZERO",
-        message: "No se puede eliminar: el producto tiene stock. Primero dejá stock en 0 (ajuste/transferencia) y luego eliminá.",
+      await sequelize.transaction(async (t) => {
+        await sequelize.query(
+          `
+          UPDATE products
+          SET is_active = 0
+          WHERE id = :pid
+          `,
+          { replacements: { pid: id }, transaction: t }
+        );
+
+        await sequelize.query(
+          `
+          UPDATE product_branches
+          SET is_active = 0
+          WHERE product_id = :pid
+          `,
+          { replacements: { pid: id }, transaction: t }
+        );
+      });
+
+      return res.status(200).json({
+        ok: true,
+        code: "SOFT_DELETED_STOCK",
+        message:
+          "El producto tenía stock, por seguridad NO se borró físicamente. Se desactivó (soft delete) y quedó oculto.",
         data: { product_id: id, total_qty: totalQty },
       });
     }
 
+    // ✅ Si NO tiene stock => intentamos borrado físico
     try {
       await sequelize.transaction(async (t) => {
         if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id }, transaction: t });
@@ -1120,6 +1147,7 @@ async function remove(req, res, next) {
           transaction: t,
         });
 
+        // si ya es 0, igual limpiamos (por consistencia)
         await sequelize.query(`DELETE FROM stock_balances WHERE product_id = :pid`, {
           replacements: { pid: id },
           transaction: t,
@@ -1130,6 +1158,7 @@ async function remove(req, res, next) {
 
       return res.json({ ok: true, message: "Producto eliminado" });
     } catch (err) {
+      // ✅ Si falla por FK (ventas/movimientos) => soft delete
       if (isFkConstraintError(err)) {
         await sequelize.transaction(async (t) => {
           await sequelize.query(
@@ -1154,7 +1183,8 @@ async function remove(req, res, next) {
         return res.status(200).json({
           ok: true,
           code: "SOFT_DELETED",
-          message: "No se pudo borrar físicamente por referencias (ventas/movimientos). Se desactivó el producto (soft delete).",
+          message:
+            "No se pudo borrar físicamente por referencias (ventas/movimientos). Se desactivó el producto (soft delete).",
           data: { product_id: id },
         });
       }
@@ -1165,6 +1195,7 @@ async function remove(req, res, next) {
     next(e);
   }
 }
+
 
 module.exports = {
   list,
