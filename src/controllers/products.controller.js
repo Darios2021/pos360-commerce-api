@@ -574,6 +574,8 @@ async function getNextCode(req, res, next) {
 }
 
 // ✅ NUEVO: GET /api/v1/products/:id/branches
+// ✅ MODIFICACIÓN FINAL: reemplazar getBranchesMatrix completo
+// GET /api/v1/products/:id/branches
 async function getBranchesMatrix(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -590,6 +592,7 @@ async function getBranchesMatrix(req, res, next) {
       });
     }
 
+    // scope: si NO es admin, validar que el producto esté habilitado en su sucursal
     if (!admin) {
       const [[ok]] = await sequelize.query(
         `
@@ -602,6 +605,7 @@ async function getBranchesMatrix(req, res, next) {
         `,
         { replacements: { pid: productId, bid: ctxBranchId } }
       );
+
       if (!ok?.ok) {
         return res.status(403).json({
           ok: false,
@@ -613,27 +617,46 @@ async function getBranchesMatrix(req, res, next) {
 
     const onlyOne = !admin ? "WHERE b.id = :onlyBranchId" : "";
 
+    // ✅ NUEVO: warehouse_id default por sucursal
+    // - si tu tabla warehouses tuviera un flag is_default, podés ordenar por is_default DESC, id ASC
+    // - si no, el primer warehouse (id ASC) es suficiente
     const [rows] = await sequelize.query(
       `
       SELECT
         b.id AS branch_id,
         b.name AS branch_name,
+
         COALESCE(pb.is_active, 0) AS enabled,
+
         COALESCE((
           SELECT SUM(sb.qty)
           FROM stock_balances sb
           JOIN warehouses w ON w.id = sb.warehouse_id
           WHERE sb.product_id = :pid
             AND w.branch_id = b.id
-        ), 0) AS current_qty
+        ), 0) AS current_qty,
+
+        COALESCE((
+          SELECT w2.id
+          FROM warehouses w2
+          WHERE w2.branch_id = b.id
+          ORDER BY w2.id ASC
+          LIMIT 1
+        ), 0) AS warehouse_id
+
       FROM branches b
       LEFT JOIN product_branches pb
         ON pb.product_id = :pid
        AND pb.branch_id = b.id
+
       ${onlyOne}
       ORDER BY b.name ASC
       `,
-      { replacements: admin ? { pid: productId } : { pid: productId, onlyBranchId: ctxBranchId } }
+      {
+        replacements: admin
+          ? { pid: productId }
+          : { pid: productId, onlyBranchId: ctxBranchId },
+      }
     );
 
     return res.json({ ok: true, data: rows || [] });
@@ -641,6 +664,7 @@ async function getBranchesMatrix(req, res, next) {
     next(e);
   }
 }
+
 
 // GET /api/v1/products
 async function list(req, res, next) {
