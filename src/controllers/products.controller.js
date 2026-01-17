@@ -1,31 +1,9 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code)
-//
-// REGLAS:
-// - products.branch_id = owner/origen (NOT NULL)
-// - Visibilidad por sucursal: product_branches (product_id, branch_id, is_active)
-// - Usuarios normales: ven productos habilitados en SU sucursal (NO por dueño)
-// - Admin: ve TODO. Opcional:
-//   - ?branch_id= => filtra por habilitados en esa sucursal
-//   - ?owner_branch_id= => filtra por sucursal dueña/origen
-//
-// ✅ NEW: GET /products/:id/branches => matriz para UI stock (enabled + current_qty por branch)
-//
-// ✅ FIX CRÍTICO:
-// - code PRO se genera en BACKEND por id: P + LPAD(id,9,'0')
-// - sku ahora puede ser opcional: si no viene, se autogenera igual que code (P000000123)
-// - NO dependemos de triggers
-//
-// ✅ NEW: GET /products/next-code => devuelve code aproximado (AUTO_INCREMENT)
-// - Sirve para UI (preview). Puede variar por concurrencia.
-//
-// ✅ DELETE PRO:
-// - Si stock total > 0 => NO borrar (409 STOCK_NOT_ZERO)
-// - Si hay referencias (ventas/movimientos/FKs) => soft delete (is_active=0) + deshabilita branches
-// - Si stock total = 0 y sin referencias fuertes => borra dependencias (images, branches, stock_balances) y luego products
+// ✅ COPY-PASTE FINAL COMPLETO (FIX subcategorias via categories.parent_id + NO Subcategory model)
+// Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
 
 const { Op, Sequelize } = require("sequelize");
-const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
+const { Product, Category, ProductImage, sequelize } = require("../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -157,6 +135,8 @@ function codeFromId(id) {
 /**
  * ✅ Includes defensivos
  * - Solo agrega asociaciones si existen
+ * - category: ok
+ * - subcategory: SI tu Product tiene asociación subcategory (belongsTo Category por subcategory_id)
  */
 function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
@@ -174,14 +154,15 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     inc.push(catInclude);
   }
 
+  // ✅ subcategory ahora es Category (misma tabla), si existe la asociación
   const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
   if (subAs) {
     const subInclude = { association: subAs, required: false };
     try {
-      const SubModel = A[subAs]?.target || Subcategory;
+      const SubModel = A[subAs]?.target || Category;
       const SA = SubModel?.associations || {};
-      const subCatAs = SA.category ? "category" : SA.Category ? "Category" : null;
-      if (subCatAs) subInclude.include = [{ association: subCatAs, required: false }];
+      const parentAs = SA.parent ? "parent" : SA.Parent ? "Parent" : null;
+      if (parentAs) subInclude.include = [{ association: parentAs, required: false }];
     } catch {}
     inc.push(subInclude);
   }
@@ -212,22 +193,31 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   return inc;
 }
 
+/**
+ * ✅ FIX: Subcategoría real = categories.id con parent_id != null
+ * - Si viene subcategory_id => valida que exista y que sea hija, y fuerza category_id = parent_id
+ * - Si viene category_id => valida que exista
+ */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
+  // category_id
   if (Object.prototype.hasOwnProperty.call(payload, "category_id")) {
     if (payload.category_id === "" || payload.category_id === undefined) payload.category_id = null;
 
     if (payload.category_id != null) {
-      const id = toInt(payload.category_id, 0);
-      if (!id) payload.category_id = null;
-      else {
-        const ok = await Category.findByPk(id, { attributes: ["id"] });
+      const cid = toInt(payload.category_id, 0);
+      if (!cid) {
+        payload.category_id = null;
+      } else {
+        const ok = await Category.findByPk(cid, { attributes: ["id"] }).catch(() => null);
         if (!ok) payload.category_id = null;
+        else payload.category_id = cid;
       }
     }
   }
 
+  // subcategory_id (Category hija)
   if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
     if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
 
@@ -236,26 +226,24 @@ async function sanitizeCategoryFKs(payload) {
       if (!sid) {
         payload.subcategory_id = null;
       } else {
-        if (!Subcategory || typeof Subcategory.findByPk !== "function") {
+        const sub = await Category.findByPk(sid, { attributes: ["id", "parent_id"] }).catch(() => null);
+
+        const parentId = toInt(sub?.parent_id, 0);
+
+        // debe existir y tener parent_id
+        if (!sub || !parentId) {
           payload.subcategory_id = null;
         } else {
-          const sub = await Subcategory.findByPk(sid, { attributes: ["id", "category_id"] }).catch(() => null);
+          payload.subcategory_id = sid;
 
-          if (!sub) {
+          // fuerza category_id al padre del subrubro
+          payload.category_id = parentId;
+
+          // valida padre
+          const parentOk = await Category.findByPk(parentId, { attributes: ["id"] }).catch(() => null);
+          if (!parentOk) {
+            payload.category_id = null;
             payload.subcategory_id = null;
-          } else {
-            payload.subcategory_id = toInt(sub.id, null);
-
-            const subCatId = toInt(sub.category_id, 0);
-            if (subCatId) {
-              payload.category_id = subCatId;
-
-              const ok = await Category.findByPk(subCatId, { attributes: ["id"] });
-              if (!ok) {
-                payload.category_id = null;
-                payload.subcategory_id = null;
-              }
-            }
           }
         }
       }
@@ -311,7 +299,6 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
     if (!isBoolLike(v)) add(field, "Debe ser boolean (true/false).");
   };
 
-  // ✅ REQUIRED solo name. SKU queda opcional (se autogenera si no viene)
   checkString("sku", payload.sku, { required: false, max: 64 });
   checkString("name", payload.name, { required: true, max: 200 });
 
@@ -640,12 +627,10 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
     }
 
-    // ✅ NO-ADMIN nunca filtra por dueño; admin opcional
     if (admin && ownerBranchId) where.branch_id = ownerBranchId;
 
     where[Op.and] = where[Op.and] || [];
 
-    // ✅ scope por branch habilitada
     if (!admin) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
     else if (branchIdScope) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
 
@@ -857,25 +842,19 @@ async function create(req, res, next) {
     }
 
     const createdId = await sequelize.transaction(async (t) => {
-      // 1) Crear
       const p = await Product.create(payload, { transaction: t });
 
-      // 2) ✅ Generar code PRO por ID
       const code = codeFromId(p.id);
-
-      // ✅ SKU opcional: si no vino, lo autogeneramos igual que code
       const skuFinal = isNonEmptyStr(payload.sku) ? payload.sku.trim() : code;
 
       await p.update({ code, sku: skuFinal }, { transaction: t });
 
-      // 3) Branches habilitadas
-      const bids = !admin ? [payload.branch_id] : (bodyBranchIds.length ? bodyBranchIds : [payload.branch_id]);
+      const bids = !admin ? [payload.branch_id] : bodyBranchIds.length ? bodyBranchIds : [payload.branch_id];
       await upsertProductBranches({ productId: p.id, branchIds: bids, transaction: t });
 
       return p.id;
     });
 
-    // ✅ devolver refrescado con includes + stock_qty
     const include = buildProductIncludes({ includeBranch: admin });
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
     const branchIdScope = admin ? (branchIdQuery || 0) : getBranchId(req);
@@ -886,7 +865,11 @@ async function create(req, res, next) {
       attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
-    return res.status(201).json({ ok: true, message: "Producto creado", data: fresh ? fresh.toJSON() : { id: createdId } });
+    return res.status(201).json({
+      ok: true,
+      message: "Producto creado",
+      data: fresh ? fresh.toJSON() : { id: createdId },
+    });
   } catch (e) {
     if (e?.name === "SequelizeUniqueConstraintError") {
       return res.status(409).json({
@@ -951,10 +934,7 @@ async function update(req, res, next) {
     const patch = pickBody(req.body || {});
     const bodyBranchIds = normalizeBranchIdsInput(req.body || {});
 
-    // 🔒 NO tocar branch_id si no admin
     if (!admin) delete patch.branch_id;
-
-    // 🚫 code no se edita desde API
     if (Object.prototype.hasOwnProperty.call(patch, "code")) delete patch.code;
 
     await sanitizeCategoryFKs(patch);
@@ -972,15 +952,8 @@ async function update(req, res, next) {
     await sequelize.transaction(async (t) => {
       await p.update(patch, { transaction: t });
 
-      // ✅ si por algún motivo quedó sin code, lo regeneramos
-      if (!p.code) {
-        await p.update({ code: codeFromId(p.id) }, { transaction: t });
-      }
-
-      // ✅ si quedó sku vacío/null, lo autocompletamos
-      if (!p.sku) {
-        await p.update({ sku: p.code || codeFromId(p.id) }, { transaction: t });
-      }
+      if (!p.code) await p.update({ code: codeFromId(p.id) }, { transaction: t });
+      if (!p.sku) await p.update({ sku: p.code || codeFromId(p.id) }, { transaction: t });
 
       if (admin) {
         const hasBranchIds =
@@ -1006,7 +979,7 @@ async function update(req, res, next) {
       attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
-    const x = updated?.toJSON ? updated.toJSON() : (updated || {});
+    const x = updated?.toJSON ? updated.toJSON() : updated || {};
     const u = x?.createdByUser || null;
 
     return res.json({
@@ -1047,7 +1020,6 @@ async function remove(req, res, next) {
     const p = await Product.findByPk(id, { attributes: ["id", "name", "is_active"] });
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
-    // 1) stock total real
     const [[srow]] = await sequelize.query(
       `
       SELECT COALESCE(SUM(sb.qty), 0) AS total_qty
@@ -1059,7 +1031,6 @@ async function remove(req, res, next) {
 
     const totalQty = Number(srow?.total_qty || 0);
 
-    // Si tiene stock, NO borrar
     if (totalQty > 0) {
       return res.status(409).json({
         ok: false,
@@ -1069,31 +1040,25 @@ async function remove(req, res, next) {
       });
     }
 
-    // 2) Intento de borrado “limpio”
     try {
       await sequelize.transaction(async (t) => {
-        // images
         if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id }, transaction: t });
 
-        // product_branches
         await sequelize.query(`DELETE FROM product_branches WHERE product_id = :pid`, {
           replacements: { pid: id },
           transaction: t,
         });
 
-        // stock_balances (aunque qty=0 pueden existir filas)
         await sequelize.query(`DELETE FROM stock_balances WHERE product_id = :pid`, {
           replacements: { pid: id },
           transaction: t,
         });
 
-        // delete product
         await p.destroy({ transaction: t });
       });
 
       return res.json({ ok: true, message: "Producto eliminado" });
     } catch (err) {
-      // 3) Si hay FK por ventas/movimientos => soft delete
       if (isFkConstraintError(err)) {
         await sequelize.transaction(async (t) => {
           await sequelize.query(
