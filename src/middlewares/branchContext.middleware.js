@@ -1,4 +1,12 @@
 // src/middlewares/branchContext.middleware.js
+// ✅ COPY-PASTE FINAL COMPLETO (FIX: users sin users.branch_id pero con user_branches)
+// - Determina sucursal activa sin exigir users.branch_id
+// - Override por X-Branch-Id:
+//    - usuarios normales: solo si pertenece a user_branches
+//    - super_admin: puede override a cualquier sucursal existente
+// - Usa roles desde req.access.roles si existe (rbac.middleware), sino req.user.roles (token)
+// - Valida sucursal existe y que tenga warehouse activo
+
 const { sequelize } = require("../models");
 
 function toInt(v, d = 0) {
@@ -7,27 +15,36 @@ function toInt(v, d = 0) {
 }
 
 // ✅ role match case-insensitive y soporta string/obj/array
-function hasRole(req, roleName) {
-  const target = String(roleName || "").toLowerCase().trim();
-  const roles = req.user?.roles;
+function rolesFromReq(req) {
+  const aRoles = Array.isArray(req.access?.roles) ? req.access.roles : null;
+  if (aRoles && aRoles.length) return aRoles;
 
-  if (!roles) return false;
+  const roles = req.user?.roles;
+  if (!roles) return [];
 
   if (Array.isArray(roles)) {
-    return roles.some((r) => {
-      if (!r) return false;
-      if (typeof r === "string") return r.toLowerCase().trim() === target;
-      if (typeof r === "object") {
-        const n = String(r.name || r.code || r.role || "").toLowerCase().trim();
-        return n === target;
-      }
-      return false;
-    });
+    return roles
+      .map((r) => {
+        if (!r) return null;
+        if (typeof r === "string") return r;
+        if (typeof r === "object") return r.name || r.code || r.role || null;
+        return null;
+      })
+      .filter(Boolean);
   }
 
-  if (typeof roles === "string") return roles.toLowerCase().trim() === target;
+  if (typeof roles === "string") return [roles];
+  return [];
+}
 
-  return false;
+function hasRole(req, roleName) {
+  const target = String(roleName || "").toLowerCase().trim();
+  const roles = rolesFromReq(req).map((r) => String(r || "").toLowerCase().trim());
+  return roles.includes(target);
+}
+
+function getOverrideBranchId(req) {
+  return toInt(req.headers["x-branch-id"] || req.query.branchId || req.query.branch_id, 0);
 }
 
 async function branchContext(req, res, next) {
@@ -41,11 +58,10 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // ✅ Permitir override SOLO super_admin
+    const overrideBranchId = getOverrideBranchId(req);
     const isSuperAdmin = hasRole(req, "super_admin");
-    const overrideBranchId = toInt(req.headers["x-branch-id"] || req.query.branchId, 0);
 
-    // 1) Branch activa (default: users.branch_id)
+    // 1) Traemos branch_id del user (puede ser null) + email
     const [[u]] = await sequelize.query(
       `
       SELECT id, branch_id, email
@@ -56,40 +72,64 @@ async function branchContext(req, res, next) {
       { replacements: { userId } }
     );
 
-    let branchId = toInt(u?.branch_id, 0);
+    if (!u?.id) {
+      return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "Usuario no encontrado." });
+    }
+
+    const userBranchId = toInt(u.branch_id, 0);
+
+    // 2) Branches permitidas (user_branches)
+    const [ubRows] = await sequelize.query(
+      `
+      SELECT branch_id
+      FROM user_branches
+      WHERE user_id = :userId
+      `,
+      { replacements: { userId } }
+    );
+
+    const allowedBranchIds = (ubRows || [])
+      .map((r) => toInt(r.branch_id, 0))
+      .filter((x) => x > 0);
+
+    if (!allowedBranchIds.length && !isSuperAdmin) {
+      return res.status(409).json({
+        ok: false,
+        code: "USER_WITHOUT_BRANCHES",
+        message: `El usuario ${userId} no tiene sucursales habilitadas (user_branches).`,
+      });
+    }
+
+    // 3) Elegir branch activa
+    // - super_admin: puede override a cualquier sucursal existente
+    // - user normal: override solo si está en allowed
+    let branchId = 0;
+
+    if (overrideBranchId) {
+      if (isSuperAdmin) branchId = overrideBranchId;
+      else if (allowedBranchIds.includes(overrideBranchId)) branchId = overrideBranchId;
+      else {
+        return res.status(403).json({
+          ok: false,
+          code: "BRANCH_NOT_ALLOWED",
+          message: `Sucursal no permitida para el usuario. userId=${userId} branchId=${overrideBranchId}`,
+        });
+      }
+    } else {
+      if (userBranchId && allowedBranchIds.includes(userBranchId)) branchId = userBranchId;
+      else if (allowedBranchIds.length) branchId = allowedBranchIds[0];
+      else branchId = 0; // super_admin sin allowed (lo dejamos pasar si luego existe branch)
+    }
+
     if (!branchId) {
       return res.status(409).json({
         ok: false,
-        code: "USER_WITHOUT_BRANCH",
-        message: `El usuario ${userId} no tiene sucursal asignada (users.branch_id).`,
+        code: "USER_WITHOUT_ACTIVE_BRANCH",
+        message: `No se pudo determinar sucursal activa para userId=${userId}.`,
       });
     }
 
-    if (isSuperAdmin && overrideBranchId) {
-      branchId = overrideBranchId;
-    }
-
-    // 2) Validar branch permitida (user_branches)
-    const [[allowed]] = await sequelize.query(
-      `
-      SELECT 1 AS ok
-      FROM user_branches
-      WHERE user_id = :userId
-        AND branch_id = :branchId
-      LIMIT 1
-      `,
-      { replacements: { userId, branchId } }
-    );
-
-    if (!allowed?.ok) {
-      return res.status(403).json({
-        ok: false,
-        code: "BRANCH_NOT_ALLOWED",
-        message: `Sucursal no permitida para el usuario. userId=${userId} branchId=${branchId}`,
-      });
-    }
-
-    // 3) Cargar Branch
+    // 4) Validar branch existe
     const [[branch]] = await sequelize.query(
       `
       SELECT id, name
@@ -108,7 +148,7 @@ async function branchContext(req, res, next) {
       });
     }
 
-    // 4) Warehouse default
+    // 5) Warehouse default
     const [[wh]] = await sequelize.query(
       `
       SELECT id, code, name, branch_id
@@ -133,11 +173,12 @@ async function branchContext(req, res, next) {
     req.ctx = {
       userId,
       branchId,
+      allowedBranchIds,
       warehouseId: toInt(wh.id, 0),
       branch,
       warehouse: wh,
       isSuperAdmin,
-      overridden: Boolean(isSuperAdmin && overrideBranchId),
+      overridden: Boolean(overrideBranchId),
     };
 
     // ✅ compat
@@ -160,5 +201,4 @@ async function branchContext(req, res, next) {
   }
 }
 
-// ✅ IMPORTANTÍSIMO: exporta UNA FUNCIÓN
 module.exports = branchContext;
