@@ -1,5 +1,7 @@
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FIX subcategorias via categories.parent_id + guarda FK real en subcategories.id)
+// ✅ COPY-PASTE FINAL COMPLETO
+// FIX: Subcategorías reales desde tabla `subcategories` (NO Subcategory model)
+// - Si viene subcategory_id => valida en subcategories y fuerza category_id = subcategories.category_id
 // Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
 
 const { Op, Sequelize } = require("sequelize");
@@ -136,35 +138,17 @@ function codeFromId(id) {
  * ✅ Includes defensivos
  * - Solo agrega asociaciones si existen
  * - category: ok
- * - subcategory: deja como está (si tu asociación existe, la incluye)
+ * - subcategory: SI tu Product tiene asociación subcategory (belongsTo Subcategory o Category por subcategory_id)
  */
 function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
   const A = Product?.associations || {};
 
   const catAs = A.category ? "category" : A.Category ? "Category" : null;
-  if (catAs) {
-    const catInclude = { association: catAs, required: false };
-    try {
-      const CatModel = A[catAs]?.target || Category;
-      const CA = CatModel?.associations || {};
-      const parentAs = CA.parent ? "parent" : CA.Parent ? "Parent" : null;
-      if (parentAs) catInclude.include = [{ association: parentAs, required: false }];
-    } catch {}
-    inc.push(catInclude);
-  }
+  if (catAs) inc.push({ association: catAs, required: false });
 
   const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
-  if (subAs) {
-    const subInclude = { association: subAs, required: false };
-    try {
-      const SubModel = A[subAs]?.target || null;
-      const SA = SubModel?.associations || {};
-      const parentAs = SA.parent ? "parent" : SA.Parent ? "Parent" : null;
-      if (parentAs) subInclude.include = [{ association: parentAs, required: false }];
-    } catch {}
-    inc.push(subInclude);
-  }
+  if (subAs) inc.push({ association: subAs, required: false });
 
   const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
@@ -193,10 +177,11 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 }
 
 /**
- * ✅ FIX: Subcategoría seleccionada en UI = categories.id hija (parent_id != null)
- * - Valida category_id si viene
- * - Si viene subcategory_id como categories.hija => fuerza category_id = parent_id
- *   (OJO: acá NO convertimos a subcategories todavía; eso lo hace ensureSubcategoryFK)
+ * ✅ FIX REAL (TU DB):
+ * Subcategoría real = tabla `subcategories` (tiene category_id FK)
+ * - Si viene subcategory_id => valida en subcategories y fuerza category_id = subcategories.category_id
+ * - Si viene category_id => valida que exista en categories
+ * - NO usa Subcategory model (solo sequelize.query)
  */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
@@ -217,7 +202,7 @@ async function sanitizeCategoryFKs(payload) {
     }
   }
 
-  // subcategory_id (Category hija)
+  // subcategory_id (tabla subcategories)
   if (Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) {
     if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
 
@@ -226,20 +211,28 @@ async function sanitizeCategoryFKs(payload) {
       if (!sid) {
         payload.subcategory_id = null;
       } else {
-        const sub = await Category.findByPk(sid, { attributes: ["id", "parent_id"] }).catch(() => null);
-        const parentId = toInt(sub?.parent_id, 0);
+        const [rows] = await sequelize.query(
+          `
+          SELECT id, category_id
+          FROM subcategories
+          WHERE id = :sid
+          LIMIT 1
+          `,
+          { replacements: { sid } }
+        );
 
-        // debe existir y tener parent_id
-        if (!sub || !parentId) {
+        const sub = rows?.[0] || null;
+        const parentCid = toInt(sub?.category_id, 0);
+
+        if (!sub || !parentCid) {
           payload.subcategory_id = null;
         } else {
+          // ✅ guarda el subrubro y fuerza rubro padre
           payload.subcategory_id = sid;
+          payload.category_id = parentCid;
 
-          // fuerza category_id al padre del subrubro
-          payload.category_id = parentId;
-
-          // valida padre
-          const parentOk = await Category.findByPk(parentId, { attributes: ["id"] }).catch(() => null);
+          // ✅ valida que exista el rubro padre
+          const parentOk = await Category.findByPk(parentCid, { attributes: ["id"] }).catch(() => null);
           if (!parentOk) {
             payload.category_id = null;
             payload.subcategory_id = null;
@@ -248,94 +241,6 @@ async function sanitizeCategoryFKs(payload) {
       }
     }
   }
-
-  return payload;
-}
-
-/**
- * ✅ FIX REAL: products.subcategory_id FK -> subcategories.id
- * - Si payload.subcategory_id ya existe en subcategories => OK
- * - Si NO existe => interpretamos que viene como categories.hija id:
- *    * tomamos (parent_id, name) de categories
- *    * buscamos/creamos subcategories(category_id=parent_id, name)
- *    * reemplazamos payload.subcategory_id por ese id real
- *
- * IMPORTANT: usa solo SQL (NO Subcategory model)
- */
-async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
-  if (!payload) return payload;
-  if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return payload;
-  if (payload.subcategory_id == null) return payload;
-
-  const incoming = toInt(payload.subcategory_id, 0);
-  if (!incoming) {
-    payload.subcategory_id = null;
-    return payload;
-  }
-
-  // 1) Si ya es ID real de subcategories, lo dejamos
-  const [rows1] = await sequelize.query(
-    `
-    SELECT id, category_id
-    FROM subcategories
-    WHERE id = :id
-    LIMIT 1
-    `,
-    { replacements: { id: incoming }, transaction }
-  );
-
-  if (rows1 && rows1.length) {
-    payload.subcategory_id = toInt(rows1[0].id, incoming);
-    const catId = toInt(rows1[0].category_id, 0);
-    if (!payload.category_id && catId) payload.category_id = catId;
-    return payload;
-  }
-
-  // 2) Si no existe, asumimos que viene como categories.hija id
-  const catChild = await Category.findByPk(incoming, {
-    attributes: ["id", "name", "parent_id"],
-    transaction,
-  }).catch(() => null);
-
-  const parentId = toInt(catChild?.parent_id, 0);
-  const name = String(catChild?.name || "").trim();
-
-  if (!catChild || !parentId || !name) {
-    payload.subcategory_id = null;
-    return payload;
-  }
-
-  // coherencia: rubro = padre
-  payload.category_id = parentId;
-
-  // 3) buscar por UNIQUE(category_id, name)
-  const [rows2] = await sequelize.query(
-    `
-    SELECT id
-    FROM subcategories
-    WHERE category_id = :category_id
-      AND name = :name
-    LIMIT 1
-    `,
-    { replacements: { category_id: parentId, name }, transaction }
-  );
-
-  if (rows2 && rows2.length) {
-    payload.subcategory_id = toInt(rows2[0].id, null);
-    return payload;
-  }
-
-  // 4) crear si no existe
-  const [, meta] = await sequelize.query(
-    `
-    INSERT INTO subcategories (category_id, name, is_active, created_at, updated_at)
-    VALUES (:category_id, :name, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `,
-    { replacements: { category_id: parentId, name }, transaction }
-  );
-
-  const insertId = toInt(meta?.insertId, 0);
-  payload.subcategory_id = insertId || null;
 
   return payload;
 }
@@ -929,9 +834,6 @@ async function create(req, res, next) {
     }
 
     const createdId = await sequelize.transaction(async (t) => {
-      // ✅ FIX: convierte subcategory_id (categories hija) -> subcategories.id real (si corresponde)
-      await ensureSubcategoryFK(payload, { transaction: t });
-
       const p = await Product.create(payload, { transaction: t });
 
       const code = codeFromId(p.id);
@@ -997,9 +899,7 @@ async function update(req, res, next) {
     if (!admin) {
       const bid = ctxBranchId;
       if (!bid) {
-        return res
-          .status(400)
-          .json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." });
+        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." });
       }
 
       const [[ok]] = await sequelize.query(
@@ -1042,9 +942,6 @@ async function update(req, res, next) {
     }
 
     await sequelize.transaction(async (t) => {
-      // ✅ FIX: si vino subcategory_id, lo convertimos a subcategories.id real
-      await ensureSubcategoryFK(patch, { transaction: t });
-
       await p.update(patch, { transaction: t });
 
       if (!p.code) await p.update({ code: codeFromId(p.id) }, { transaction: t });
@@ -1130,8 +1027,7 @@ async function remove(req, res, next) {
       return res.status(409).json({
         ok: false,
         code: "STOCK_NOT_ZERO",
-        message:
-          "No se puede eliminar: el producto tiene stock. Primero dejá stock en 0 (ajuste/transferencia) y luego eliminá.",
+        message: "No se puede eliminar: el producto tiene stock. Primero dejá stock en 0 (ajuste/transferencia) y luego eliminá.",
         data: { product_id: id, total_qty: totalQty },
       });
     }
@@ -1179,8 +1075,7 @@ async function remove(req, res, next) {
         return res.status(200).json({
           ok: true,
           code: "SOFT_DELETED",
-          message:
-            "No se pudo borrar físicamente por referencias (ventas/movimientos). Se desactivó el producto (soft delete).",
+          message: "No se pudo borrar físicamente por referencias (ventas/movimientos). Se desactivó el producto (soft delete).",
           data: { product_id: id },
         });
       }
