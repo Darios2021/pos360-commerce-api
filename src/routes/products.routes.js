@@ -1,9 +1,9 @@
 // src/routes/products.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO (RBAC + orden correcto de rutas)
+// ✅ COPY-PASTE FINAL COMPLETO (RBAC + USERS CON SUCURSAL PUEDEN CREAR)
 //
 // IMPORTANTE:
-// - branchContext NO va acá porque YA se aplica en v1.routes.js:
-//   safeUse("/products", requireAuth, branchContext, productsRoutes);
+// - branchContext + attachAccessContext ya se aplican en v1.routes.js:
+//   safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
 
 const router = require("express").Router();
 const multer = require("multer");
@@ -11,11 +11,11 @@ const multer = require("multer");
 const productsCtrl = require("../controllers/products.controller.js");
 const productImagesCtrl = require("../controllers/productImages.controller.js");
 
-// ✅ RBAC
-const { attachAccessContext } = require("../middlewares/rbac.middleware");
+// ✅ NUEVO GUARD: permite operar si user tiene sucursal activa
+const { requireProductsOperate } = require("../middlewares/productsAccess.middleware");
 
 // =========================
-// Guard SAFE (no rompe prod)
+// Guard SAFE (lectura)
 // =========================
 function allowAdminOrPermission(permissionCode) {
   return (req, res, next) => {
@@ -26,7 +26,7 @@ function allowAdminOrPermission(permissionCode) {
     if (a.is_super_admin) return next();
     if (permissionCode && perms.includes(permissionCode)) return next();
 
-    // ✅ fallback por rol (por si role_permissions no está completo en prod)
+    // fallback por rol
     if (roles.includes("admin")) return next();
 
     return res.status(403).json({
@@ -40,9 +40,6 @@ function allowAdminOrPermission(permissionCode) {
   };
 }
 
-// 1) Adjunta contexto RBAC (roles/permisos/branches)
-router.use(attachAccessContext);
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 },
@@ -52,35 +49,36 @@ const upload = multer({
 // --- PRODUCTOS ---
 // =========================
 
-// ✅ SIEMPRE primero rutas literales (para que NO las agarre /:id)
+// ✅ SIEMPRE primero rutas literales
 router.get("/next-code", allowAdminOrPermission("products.read"), productsCtrl.getNextCode);
 
 // ✅ Listado
 router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);
 
-// ✅ Crear
-router.post("/", allowAdminOrPermission("products.write"), productsCtrl.create);
+// ✅ Crear (USER con sucursal permitida)
+router.post("/", requireProductsOperate, productsCtrl.create);
 
 // ✅ STOCK REAL por sucursal
-// GET /api/v1/products/:id/stock?branch_id=3
 router.get("/:id/stock", allowAdminOrPermission("products.read"), productsCtrl.getStock);
 
 // ✅ MATRIZ REAL por sucursal
-// GET /api/v1/products/:id/branches
 router.get("/:id/branches", allowAdminOrPermission("products.read"), productsCtrl.getBranchesMatrix);
 
-// ✅ Imágenes (GET/POST) antes de /:id (no es obligatorio, pero queda prolijo)
+// ✅ Imágenes: operar (USER con sucursal permitida)
 router.get("/:id/images", allowAdminOrPermission("products.read"), productImagesCtrl.listByProduct);
-router.post("/:id/images", allowAdminOrPermission("products.write"), upload.any(), productImagesCtrl.upload);
-router.delete("/:id/images/:imageId", allowAdminOrPermission("products.write"), productImagesCtrl.remove);
+router.post("/:id/images", requireProductsOperate, upload.any(), productImagesCtrl.upload);
+router.delete("/:id/images/:imageId", requireProductsOperate, productImagesCtrl.remove);
 
-// ✅ GetOne (siempre al final de las rutas paramétricas)
+// ✅ GetOne
 router.get("/:id", allowAdminOrPermission("products.read"), productsCtrl.getOne);
 
-// ✅ Update
-router.patch("/:id", allowAdminOrPermission("products.write"), productsCtrl.update);
+// ✅ Update (USER con sucursal permitida)
+router.patch("/:id", requireProductsOperate, productsCtrl.update);
 
 // ✅ Delete producto
-router.delete("/:id", allowAdminOrPermission("products.write"), productsCtrl.remove);
+// Nota: tu controller remove() ya tiene requireAdmin(req,res) adentro.
+// Igual lo dejo con requireProductsOperate para que si querés “soft delete” futuro por sucursal puedas,
+// pero HOY el controller lo va a cortar si no es admin.
+router.delete("/:id", requireProductsOperate, productsCtrl.remove);
 
 module.exports = router;

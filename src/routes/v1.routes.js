@@ -12,7 +12,7 @@
 // - /ecom/payments + webhooks
 //
 // Protected:
-// - /products (con branchContext)
+// - /products (con attachAccessContext + branchContext)
 // - /categories, /subcategories, /branches, /warehouses, /stock, /dashboard
 // - /pos (unificado)
 // - /me
@@ -31,15 +31,12 @@ function resolveFn(mod, candidates = []) {
   if (typeof mod === "function") return mod;
   if (!mod || typeof mod !== "object") return null;
 
-  // default export
   if (typeof mod.default === "function") return mod.default;
 
-  // named candidates
   for (const k of candidates) {
     if (typeof mod[k] === "function") return mod[k];
   }
 
-  // if the object has exactly one function, use it
   const fnKeys = Object.keys(mod).filter((k) => typeof mod[k] === "function");
   if (fnKeys.length === 1) return mod[fnKeys[0]];
 
@@ -55,7 +52,6 @@ function safeUse(path, ...mws) {
       continue;
     }
 
-    // intentar “desempaquetar” módulos que vienen como objeto
     const unwrapped = resolveFn(mw, ["middleware", "handler"]);
     if (typeof unwrapped === "function") {
       final.push(unwrapped);
@@ -97,10 +93,6 @@ router.get("/_whoami", requireAuth, (req, res) => {
 // =========================
 // Middlewares “resueltos” (blindado)
 // =========================
-
-// ✅ Branch Context (scope por sucursal + warehouse)
-// OJO: este require tiene que apuntar al archivo correcto.
-// Este resolver evita que explote si el export es default/named.
 const branchContextMod = require("../middlewares/branchContext.middleware");
 const branchContext = resolveFn(branchContextMod, ["branchContext"]);
 if (!branchContext) {
@@ -108,7 +100,6 @@ if (!branchContext) {
   throw new Error("BRANCH_CONTEXT_INVALID_EXPORT");
 }
 
-// ✅ RBAC context
 const rbacMod = require("../middlewares/rbac.middleware");
 const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
 if (!attachAccessContext) {
@@ -122,16 +113,10 @@ if (!attachAccessContext) {
 const healthRoutes = require("./health.routes");
 const authRoutes = require("./auth.routes");
 
-// 🛒 Ecommerce público
 const publicEcomRoutes = require("./public.routes");
-
-// ✅ Public shop config
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// 🧾 Checkout público
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
-
-// 💳 Payments público (preference + webhook + transfer proof)
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
 
 // =========================
@@ -145,10 +130,7 @@ const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 const dashboardRoutes = require("./dashboard.routes");
 
-// POS
 const posRoutes = require("./pos.routes");
-
-// Perfil
 const meRoutes = require("./me.routes");
 
 // Admin
@@ -173,10 +155,9 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // =========================
 // Mount: Protected (operación)
 // =========================
-// ✅ products con branchContext (scope real por sucursal + warehouse)
-safeUse("/products", requireAuth, branchContext, productsRoutes);
+// ✅ CLAVE: products con RBAC + branchContext
+safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
 
-// resto protegido (por ahora sin branchContext)
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
 safeUse("/branches", requireAuth, branchesRoutes);
@@ -184,10 +165,7 @@ safeUse("/warehouses", requireAuth, warehousesRoutes);
 safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
 
-// POS
 safeUse("/pos", requireAuth, posRoutes);
-
-// Perfil
 safeUse("/me", requireAuth, meRoutes);
 
 // =========================
