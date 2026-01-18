@@ -1,7 +1,9 @@
 // src/models/Product.js
-// ✅ COPY-PASTE FINAL (created_by + FIX timestamps reales de tu BD)
-// Tu tabla products tiene: created_at / updated_at (según SHOW CREATE TABLE)
-// Entonces mapeamos createdAt/updatedAt a esos nombres para evitar 500.
+// ✅ COPY-PASTE FINAL (DB MATCH + asociaciones CORRECTAS)
+// - products.created_at / updated_at
+// - category_id -> categories.id
+// - subcategory_id -> subcategories.id  ✅ CLAVE
+// - created_by -> users.id
 
 module.exports = (sequelize, DataTypes) => {
   const Product = sequelize.define(
@@ -18,7 +20,6 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
       },
 
-      // ✅ NUEVO: creador (FK users.id)
       created_by: {
         type: DataTypes.BIGINT.UNSIGNED,
         allowNull: true,
@@ -26,21 +27,17 @@ module.exports = (sequelize, DataTypes) => {
 
       code: { type: DataTypes.STRING(64), allowNull: true },
 
-      sku: {
-        type: DataTypes.STRING(64),
-        allowNull: false,
-      },
+      sku: { type: DataTypes.STRING(64), allowNull: false },
 
       barcode: { type: DataTypes.STRING(64), allowNull: true },
 
-      name: {
-        type: DataTypes.STRING(200),
-        allowNull: false,
-      },
+      name: { type: DataTypes.STRING(200), allowNull: false },
 
       description: { type: DataTypes.TEXT, allowNull: true },
 
       category_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
+
+      // ✅ FK REAL en tu DB: products.subcategory_id -> subcategories.id
       subcategory_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
 
       is_new: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
@@ -49,11 +46,7 @@ module.exports = (sequelize, DataTypes) => {
       brand: { type: DataTypes.STRING(120), allowNull: true },
       model: { type: DataTypes.STRING(120), allowNull: true },
 
-      warranty_months: {
-        type: DataTypes.INTEGER.UNSIGNED,
-        allowNull: false,
-        defaultValue: 0,
-      },
+      warranty_months: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
 
       track_stock: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
@@ -62,20 +55,19 @@ module.exports = (sequelize, DataTypes) => {
 
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
-      cost: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
-      price: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+      cost: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
+      price: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
 
-      price_list: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
-      price_discount: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
-      price_reseller: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+      price_list: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
+      price_discount: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
+      price_reseller: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
 
-      tax_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 21 },
+      tax_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: "21.00" },
     },
     {
       tableName: "products",
       underscored: true,
 
-      // ✅ CLAVE: en tu BD existen created_at / updated_at
       timestamps: true,
       createdAt: "created_at",
       updatedAt: "updated_at",
@@ -83,6 +75,49 @@ module.exports = (sequelize, DataTypes) => {
       paranoid: false,
     }
   );
+
+  // ✅ CLAVE: asociaciones
+  Product.associate = (models) => {
+    // category_id -> categories.id
+    if (models.Category) {
+      Product.belongsTo(models.Category, {
+        foreignKey: "category_id",
+        as: "category",
+      });
+    }
+
+    // ✅ subcategory_id -> subcategories.id (NO categories)
+    if (models.Subcategory) {
+      Product.belongsTo(models.Subcategory, {
+        foreignKey: "subcategory_id",
+        as: "subcategory",
+      });
+    }
+
+    // branch_id -> branches.id (opcional)
+    if (models.Branch) {
+      Product.belongsTo(models.Branch, {
+        foreignKey: "branch_id",
+        as: "branch",
+      });
+    }
+
+    // created_by -> users.id (opcional)
+    if (models.User) {
+      Product.belongsTo(models.User, {
+        foreignKey: "created_by",
+        as: "createdByUser",
+      });
+    }
+
+    // images (si existe el modelo)
+    if (models.ProductImage) {
+      Product.hasMany(models.ProductImage, {
+        foreignKey: "product_id",
+        as: "images",
+      });
+    }
+  };
 
   return Product;
 };
