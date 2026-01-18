@@ -253,9 +253,14 @@ async function sanitizeCategoryFKs(payload) {
  * - Si ya viene subcategories.id real, lo deja.
  * - Si viene categories.id hija, crea/busca subcategories por UNIQUE(category_id, name)
  */
+/**
+ * ✅ FIX REAL: evita colisión de IDs entre categories.id y subcategories.id
+ * Regla:
+ * 1) Si incoming existe en Category y tiene parent_id => ES HIJA (UI) => convertir a subcategories.id
+ * 2) Si no es category-hija, recién ahí permitir que sea subcategories.id real
+ */
 async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
   if (!payload) return payload;
-
   if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return payload;
 
   if (payload.subcategory_id === "" || payload.subcategory_id === undefined) payload.subcategory_id = null;
@@ -267,7 +272,37 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
     return payload;
   }
 
-  // 1) ¿ya es subcategories.id?
+  // 1) ✅ PRIORIDAD: interpretarlo como categories.id hija (lo que manda tu UI)
+  const catChild = await Category.findByPk(incoming, {
+    attributes: ["id", "name", "parent_id"],
+    transaction,
+  }).catch(() => null);
+
+  const childParentId = toInt(catChild?.parent_id, 0);
+  const childName = String(catChild?.name || "").trim();
+
+  if (catChild && childParentId > 0 && childName) {
+    // Si vino category_id, forzamos coherencia con el parent
+    payload.category_id = childParentId;
+
+    let sub = await Subcategory.findOne({
+      where: { category_id: childParentId, name: childName },
+      attributes: ["id"],
+      transaction,
+    });
+
+    if (!sub) {
+      sub = await Subcategory.create(
+        { category_id: childParentId, name: childName, is_active: 1 },
+        { transaction }
+      );
+    }
+
+    payload.subcategory_id = sub.id; // ✅ FK real a subcategories.id
+    return payload;
+  }
+
+  // 2) Solo si NO es category-hija, permitir que sea subcategories.id real
   const byPk = await Subcategory.findByPk(incoming, {
     attributes: ["id", "category_id"],
     transaction,
@@ -275,39 +310,23 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
 
   if (byPk) {
     payload.subcategory_id = byPk.id;
+
+    // Si no vino category_id, completamos desde la subcategory real
     if (!payload.category_id && byPk.category_id) payload.category_id = byPk.category_id;
+
+    // Si vino category_id y NO coincide, preferimos limpiar para evitar “cualquiera”
+    if (payload.category_id && toInt(payload.category_id, 0) !== toInt(byPk.category_id, 0)) {
+      payload.subcategory_id = null;
+    }
+
     return payload;
   }
 
-  // 2) interpretarlo como categories.id hija
-  const catChild = await Category.findByPk(incoming, {
-    attributes: ["id", "name", "parent_id"],
-    transaction,
-  }).catch(() => null);
-
-  const parentId = toInt(catChild?.parent_id, 0);
-  const name = String(catChild?.name || "").trim();
-
-  if (!catChild || !parentId || !name) {
-    payload.subcategory_id = null;
-    return payload;
-  }
-
-  payload.category_id = parentId;
-
-  let sub = await Subcategory.findOne({
-    where: { category_id: parentId, name },
-    attributes: ["id"],
-    transaction,
-  });
-
-  if (!sub) {
-    sub = await Subcategory.create({ category_id: parentId, name, is_active: 1 }, { transaction });
-  }
-
-  payload.subcategory_id = sub.id;
+  // 3) nada válido
+  payload.subcategory_id = null;
   return payload;
 }
+
 
 function validateProductPayload(payload, { isPatch = false } = {}) {
   const errors = [];
