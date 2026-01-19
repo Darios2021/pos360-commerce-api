@@ -1,6 +1,7 @@
 // src/controllers/categories.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 // Categories + Subcategories REALES (tabla subcategories)
+// + ✅ Reactivación automática si existe inactiva (Opción A)
 // - GET    /api/v1/categories
 // - GET    /api/v1/categories/:id
 // - POST   /api/v1/categories
@@ -8,7 +9,7 @@
 // - GET    /api/v1/categories/:id/subcategories
 // - POST   /api/v1/categories/:id/subcategories
 // - PATCH  /api/v1/categories/:id/subcategories/:subId
-// - DELETE /api/v1/categories/:id/subcategories/:subId
+// - DELETE /api/v1/categories/:id/subcategories/:subId  (soft delete)
 
 const { Category, Subcategory } = require("../models");
 
@@ -105,7 +106,11 @@ exports.create = async (req, res) => {
     const name = String(body.name || "").trim();
 
     if (!name) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "name es obligatorio" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "name es obligatorio",
+      });
     }
 
     const parent_id = normalizeParentId(body.parent_id);
@@ -115,10 +120,41 @@ exports.create = async (req, res) => {
     if (parent_id) {
       const parent = await Category.findByPk(parent_id, { attributes: ["id"] });
       if (!parent) {
-        return res
-          .status(400)
-          .json({ ok: false, code: "VALIDATION", message: "parent_id inválido: no existe la categoría padre" });
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION",
+          message: "parent_id inválido: no existe la categoría padre",
+        });
       }
+    }
+
+    // ✅ OPCIÓN A: si existe (aunque esté inactiva)
+    const existing = await Category.findOne({
+      where: { name },
+      attributes: ["id", "name", "parent_id", "is_active"],
+    });
+
+    if (existing) {
+      // ♻️ si está inactiva, reactivar y ajustar parent/is_active
+      if (Number(existing.is_active ?? 0) === 0) {
+        await existing.update({
+          parent_id,
+          is_active,
+        });
+
+        return res.status(200).json({
+          ok: true,
+          item: existing,
+          reactivated: true,
+        });
+      }
+
+      // si está activa => duplicado
+      return res.status(409).json({
+        ok: false,
+        code: "DUPLICATE",
+        message: "Ya existe una categoría con ese nombre.",
+      });
     }
 
     const item = await Category.create({ name, parent_id, is_active });
@@ -139,7 +175,11 @@ exports.update = async (req, res) => {
       body.name !== undefined && body.name !== null ? String(body.name).trim() : item.name;
 
     if (!name) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "name es obligatorio" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "name es obligatorio",
+      });
     }
 
     const parent_id =
@@ -149,17 +189,21 @@ exports.update = async (req, res) => {
       body.is_active !== undefined ? toBoolInt(body.is_active, item.is_active) : item.is_active;
 
     if (parent_id && parent_id === item.id) {
-      return res
-        .status(400)
-        .json({ ok: false, code: "VALIDATION", message: "parent_id inválido: no puede ser su propio padre" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "parent_id inválido: no puede ser su propio padre",
+      });
     }
 
     if (parent_id) {
       const parent = await Category.findByPk(parent_id, { attributes: ["id"] });
       if (!parent) {
-        return res
-          .status(400)
-          .json({ ok: false, code: "VALIDATION", message: "parent_id inválido: no existe la categoría padre" });
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION",
+          message: "parent_id inválido: no existe la categoría padre",
+        });
       }
     }
 
@@ -179,11 +223,21 @@ exports.listSubcategories = async (req, res, next) => {
   try {
     const categoryId = toInt(req.params.id, 0);
     if (!categoryId) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "id inválido" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "id inválido",
+      });
     }
 
     const cat = await Category.findByPk(categoryId, { attributes: ["id"] });
-    if (!cat) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Categoría no existe" });
+    if (!cat) {
+      return res.status(404).json({
+        ok: false,
+        code: "NOT_FOUND",
+        message: "Categoría no existe",
+      });
+    }
 
     const isActiveRaw = req.query.is_active;
     const where = { category_id: categoryId };
@@ -211,18 +265,56 @@ exports.createSubcategory = async (req, res) => {
   try {
     const categoryId = toInt(req.params.id, 0);
     if (!categoryId) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "id inválido" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "id inválido",
+      });
     }
 
     const cat = await Category.findByPk(categoryId, { attributes: ["id"] });
-    if (!cat) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Categoría no existe" });
+    if (!cat) {
+      return res.status(404).json({
+        ok: false,
+        code: "NOT_FOUND",
+        message: "Categoría no existe",
+      });
+    }
 
     const body = req.body || {};
     const name = String(body.name || "").trim();
     const is_active = toBoolInt(body.is_active, 1);
 
     if (!name) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "name es obligatorio" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "name es obligatorio",
+      });
+    }
+
+    // ✅ OPCIÓN A: si existe (activo o inactivo) por (category_id, name)
+    const existing = await Subcategory.findOne({
+      where: { category_id: categoryId, name },
+      attributes: ["id", "category_id", "name", "is_active"],
+    });
+
+    if (existing) {
+      if (Number(existing.is_active ?? 0) === 0) {
+        await existing.update({ is_active });
+
+        return res.status(200).json({
+          ok: true,
+          item: existing,
+          reactivated: true,
+        });
+      }
+
+      return res.status(409).json({
+        ok: false,
+        code: "DUPLICATE",
+        message: "Ya existe una subcategoría con ese nombre en este rubro.",
+      });
     }
 
     const item = await Subcategory.create({
@@ -244,11 +336,21 @@ exports.updateSubcategory = async (req, res) => {
     const subId = toInt(req.params.subId, 0);
 
     if (!categoryId || !subId) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "id/subId inválidos" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "id/subId inválidos",
+      });
     }
 
     const item = await Subcategory.findByPk(subId);
-    if (!item) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Subcategoría no existe" });
+    if (!item) {
+      return res.status(404).json({
+        ok: false,
+        code: "NOT_FOUND",
+        message: "Subcategoría no existe",
+      });
+    }
 
     if (toInt(item.category_id, 0) !== categoryId) {
       return res.status(400).json({
@@ -263,7 +365,11 @@ exports.updateSubcategory = async (req, res) => {
       body.name !== undefined && body.name !== null ? String(body.name).trim() : item.name;
 
     if (!name) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "name es obligatorio" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "name es obligatorio",
+      });
     }
 
     const is_active =
@@ -278,13 +384,18 @@ exports.updateSubcategory = async (req, res) => {
 };
 
 // DELETE /api/v1/categories/:id/subcategories/:subId
+// ✅ Soft delete: is_active = 0 (evita duplicados y permite reactivar)
 exports.removeSubcategory = async (req, res) => {
   try {
     const categoryId = toInt(req.params.id, 0);
     const subId = toInt(req.params.subId, 0);
 
     if (!categoryId || !subId) {
-      return res.status(400).json({ ok: false, code: "VALIDATION", message: "id/subId inválidos" });
+      return res.status(400).json({
+        ok: false,
+        code: "VALIDATION",
+        message: "id/subId inválidos",
+      });
     }
 
     const item = await Subcategory.findByPk(subId);
@@ -298,7 +409,7 @@ exports.removeSubcategory = async (req, res) => {
       });
     }
 
-    await item.destroy();
+    await item.update({ is_active: 0 });
     return res.json({ ok: true });
   } catch (e) {
     return handleSequelizeError(res, e);
