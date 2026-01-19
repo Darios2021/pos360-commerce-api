@@ -1,6 +1,7 @@
 // src/services/public.service.js
 // ✅ COPY-PASTE FINAL COMPLETO
-// - Subcategorías REALES (tabla subcategories)
+// - /public/categories => SOLO categorías PADRE (categories.parent_id IS NULL)
+// - /public/subcategories => tabla subcategories
 // - Filtro correcto por subcategory_id
 // - strict_search + exclude_terms
 // - Branding público + Config pagos
@@ -34,13 +35,14 @@ function toStr(v) {
 
 module.exports = {
   // =========================
-  // Categories (principales)
+  // Categories (SOLO PADRES)
   // =========================
   async listCategories() {
     const [rows] = await sequelize.query(`
-      SELECT id, name
+      SELECT id, name, parent_id
       FROM categories
       WHERE is_active = 1
+        AND parent_id IS NULL
       ORDER BY name ASC
     `);
     return rows || [];
@@ -325,9 +327,7 @@ module.exports = {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
       favicon_url: r.favicon_url || "",
-      updated_at: r.updated_at
-        ? new Date(r.updated_at).toISOString()
-        : new Date().toISOString(),
+      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
     };
   },
 
@@ -357,10 +357,7 @@ module.exports = {
         holder: String(process.env.TRANSFER_HOLDER || "").trim(),
       };
 
-      const finalTransfer =
-        transfer.alias || transfer.cbu || transfer.holder
-          ? transfer
-          : envTransfer;
+      const finalTransfer = transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
 
       return {
         transfer: finalTransfer,
