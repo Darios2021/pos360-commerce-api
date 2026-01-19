@@ -1,7 +1,9 @@
 // src/services/public.service.js
-// ✅ COPY-PASTE FINAL (agrega strict_search + exclude_terms + SHOP BRANDING + PAYMENT CONFIG)
-// - strict_search=1 => NO busca en description (evita “cargadores para auriculares”)
-// - exclude_terms => excluye palabras (ej: cargador,cable,energia,usb)
+// ✅ COPY-PASTE FINAL COMPLETO
+// - Subcategorías REALES (tabla subcategories)
+// - Filtro correcto por subcategory_id
+// - strict_search + exclude_terms
+// - Branding público + Config pagos
 
 const { sequelize } = require("../models");
 
@@ -31,32 +33,42 @@ function toStr(v) {
 }
 
 module.exports = {
+  // =========================
+  // Categories (principales)
+  // =========================
   async listCategories() {
     const [rows] = await sequelize.query(`
-      SELECT id, name, parent_id
+      SELECT id, name
       FROM categories
       WHERE is_active = 1
-      ORDER BY
-        CASE WHEN parent_id IS NULL THEN 0 ELSE 1 END,
-        parent_id ASC,
-        name ASC
+      ORDER BY name ASC
     `);
     return rows || [];
   },
 
+  // =========================
+  // Subcategories REALES
+  // =========================
   async listSubcategories({ category_id }) {
+    const cid = toInt(category_id, 0);
+    if (!cid) return [];
+
     const [rows] = await sequelize.query(
       `
-      SELECT id, name, parent_id
-      FROM categories
-      WHERE is_active = 1 AND parent_id = :category_id
+      SELECT id, name, category_id
+      FROM subcategories
+      WHERE is_active = 1
+        AND category_id = :category_id
       ORDER BY name ASC
       `,
-      { replacements: { category_id } }
+      { replacements: { category_id: cid } }
     );
     return rows || [];
   },
 
+  // =========================
+  // Branches públicas
+  // =========================
   async listBranches() {
     const [rows] = await sequelize.query(`
       SELECT id, name, code, address, city
@@ -67,6 +79,9 @@ module.exports = {
     return rows || [];
   },
 
+  // =========================
+  // Catálogo público
+  // =========================
   async listCatalog({
     branch_id,
     search,
@@ -76,12 +91,11 @@ module.exports = {
     in_stock,
     page,
     limit,
-
-    // ✅ NUEVO
     strict_search,
     exclude_terms,
   }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
+
     const lim = Math.min(100, Math.max(1, toInt(limit, 24)));
     const pg = Math.max(1, toInt(page, 1));
 
@@ -94,17 +108,21 @@ module.exports = {
     const cid = toInt(category_id, 0);
     const sid = toInt(subcategory_id, 0);
     const inc = toBoolLike(include_children, false);
-    void inc;
+    void inc; // reservado para futuro
 
+    // ✅ Filtro por subcategoría REAL
     if (sid) {
       where.push("vc.subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
 
       if (cid) {
         where.push(`
-          :subcategory_id IN (
-            SELECT id FROM categories
-            WHERE parent_id = :category_id AND is_active = 1
+          EXISTS (
+            SELECT 1
+            FROM subcategories s
+            WHERE s.id = :subcategory_id
+              AND s.category_id = :category_id
+              AND s.is_active = 1
           )
         `);
         repl.category_id = cid;
@@ -114,12 +132,12 @@ module.exports = {
       repl.category_id = cid;
     }
 
-    // ✅ stock filter
+    // ✅ Stock
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    // ✅ exclude_terms (coma separada)
+    // ✅ Excluir términos
     const ex = toStr(exclude_terms)
       .split(",")
       .map((x) => x.trim())
@@ -130,7 +148,6 @@ module.exports = {
       const key = `ex${i}`;
       repl[key] = `%${escLike(term)}%`;
 
-      // excluimos contra name + category/subcategory + brand/model
       where.push(`
         NOT (
           LOWER(COALESCE(vc.name,'')) LIKE :${key} ESCAPE '${ESC}'
@@ -142,14 +159,13 @@ module.exports = {
       `);
     }
 
-    // ✅ Search
+    // ✅ Búsqueda
     const q = toStr(search).toLowerCase();
     const strict = toBoolLike(strict_search, false);
 
     if (q.length) {
       repl.q = `%${escLike(q)}%`;
 
-      // strict_search=1 => NO incluye description
       where.push(`
         (
           LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
@@ -198,8 +214,12 @@ module.exports = {
     };
   },
 
+  // =========================
+  // Autocompletado
+  // =========================
   async listSuggestions({ branch_id, q, limit }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
+
     const repl = {
       branch_id: toInt(branch_id),
       limit: Math.min(15, Math.max(1, toInt(limit, 8))),
@@ -209,6 +229,7 @@ module.exports = {
     if (!qq.length) return [];
 
     repl.q = `%${escLike(qq)}%`;
+
     where.push(`
       (
         LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
@@ -256,20 +277,31 @@ module.exports = {
     return rows || [];
   },
 
+  // =========================
+  // Producto individual
+  // =========================
   async getProductById({ branch_id, product_id }) {
     const [rows] = await sequelize.query(
       `
       SELECT *
       FROM v_public_catalog
-      WHERE branch_id = :branch_id AND product_id = :product_id
+      WHERE branch_id = :branch_id
+        AND product_id = :product_id
       LIMIT 1
       `,
-      { replacements: { branch_id: toInt(branch_id), product_id: toInt(product_id) } }
+      {
+        replacements: {
+          branch_id: toInt(branch_id),
+          product_id: toInt(product_id),
+        },
+      }
     );
     return rows?.[0] || null;
   },
 
-  // ✅ Branding público para ShopHeader + favicon
+  // =========================
+  // Branding público
+  // =========================
   async getShopBranding() {
     const [rows] = await sequelize.query(`
       SELECT id, name, logo_url, favicon_url, updated_at
@@ -293,19 +325,19 @@ module.exports = {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
       favicon_url: r.favicon_url || "",
-      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+      updated_at: r.updated_at
+        ? new Date(r.updated_at).toISOString()
+        : new Date().toISOString(),
     };
   },
 
-  // ✅ NUEVO: Config pública para pagos (Transfer + flag MP)
+  // =========================
+  // Config pagos
+  // =========================
   async getPaymentConfig() {
-    // 1) Intentamos leer desde shop_branding (si existen columnas)
     try {
       const [rows] = await sequelize.query(`
-        SELECT
-          transfer_alias,
-          transfer_cbu,
-          transfer_holder
+        SELECT transfer_alias, transfer_cbu, transfer_holder
         FROM shop_branding
         WHERE id = 1
         LIMIT 1
@@ -319,7 +351,6 @@ module.exports = {
         holder: String(r?.transfer_holder || "").trim(),
       };
 
-      // fallback env si DB viene vacío
       const envTransfer = {
         alias: String(process.env.TRANSFER_ALIAS || "").trim(),
         cbu: String(process.env.TRANSFER_CBU || "").trim(),
@@ -327,7 +358,9 @@ module.exports = {
       };
 
       const finalTransfer =
-        transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
+        transfer.alias || transfer.cbu || transfer.holder
+          ? transfer
+          : envTransfer;
 
       return {
         transfer: finalTransfer,
@@ -336,7 +369,6 @@ module.exports = {
         },
       };
     } catch (e) {
-      // 2) Si no existen columnas/tabla => ENV
       return {
         transfer: {
           alias: String(process.env.TRANSFER_ALIAS || "").trim(),
