@@ -1,9 +1,11 @@
-// src/controllers/productImages.controller.js
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
 const sharp = require("sharp");
 const { ProductImage } = require("../models");
 
+/* =====================
+   Helpers básicos
+   ===================== */
 function mustEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env ${name}`);
@@ -15,6 +17,9 @@ function toInt(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+/* =====================
+   S3 / MinIO
+   ===================== */
 function s3Client() {
   return new AWS.S3({
     endpoint: mustEnv("S3_ENDPOINT"),
@@ -34,7 +39,7 @@ function publicUrlFor(key) {
   return `${cleanBase}/${bucket}/${key}`;
 }
 
-// (opcional) intentar inferir Key desde URL pública
+// inferir Key desde URL pública (para delete)
 function keyFromPublicUrl(url) {
   if (!url) return null;
   const bucket = process.env.S3_BUCKET;
@@ -55,18 +60,9 @@ function keyFromPublicUrl(url) {
   }
 }
 
-/**
- * =========================
- * NORMALIZACIÓN DE IMÁGENES
- * =========================
- * Entrada permitida (detectada por sharp): jpeg/png/webp
- * Guarda SIEMPRE: WebP
- *
- * Env opcionales:
- * - IMG_MAX_UPLOAD_BYTES (default 6MB)
- * - IMG_MAX_WIDTH (default 1200)
- * - IMG_WEBP_QUALITY (default 75)
- */
+/* =====================
+   Normalización imágenes
+   ===================== */
 const IMG_MAX_UPLOAD_BYTES = Number(process.env.IMG_MAX_UPLOAD_BYTES || 6 * 1024 * 1024);
 const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 1200);
 const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 75);
@@ -91,8 +87,6 @@ async function detectFormatOrThrow(buffer) {
   if (!ALLOWED_FORMATS.has(fmt)) {
     throw httpError(415, `IMG_FORMAT_NOT_ALLOWED_${fmt || "unknown"}`);
   }
-
-  return fmt;
 }
 
 async function normalizeToWebp(buffer) {
@@ -107,6 +101,9 @@ async function normalizeToWebp(buffer) {
     .toBuffer();
 }
 
+/* =====================
+   UPLOAD (ANTI DUPES)
+   ===================== */
 async function upload(req, res) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -120,12 +117,14 @@ async function upload(req, res) {
 
     let files = [];
     if (req.files) {
-      files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
+      files = Array.isArray(req.files)
+        ? req.files
+        : Object.values(req.files).flat();
     } else if (req.file) {
       files = [req.file];
     }
 
-    if (files.length === 0) {
+    if (!files.length) {
       return res.status(400).json({
         ok: false,
         code: "NO_FILES",
@@ -133,32 +132,52 @@ async function upload(req, res) {
       });
     }
 
+    // 🔍 LOG para detectar duplicados desde multer / front
+    console.log("📸 [productImages.upload]", {
+      productId,
+      files: files.map((f) => ({
+        field: f.fieldname,
+        name: f.originalname,
+        size: f.size,
+        type: f.mimetype,
+      })),
+    });
+
+    // ✅ DEDUPE por hash del buffer original
+    const seen = new Set();
+    const uniqFiles = [];
+
+    for (const f of files) {
+      if (!f?.buffer || !Buffer.isBuffer(f.buffer)) continue;
+      const hash = crypto.createHash("sha1").update(f.buffer).digest("hex");
+      if (seen.has(hash)) continue;
+      seen.add(hash);
+      uniqFiles.push(f);
+    }
+
+    if (!uniqFiles.length) {
+      return res.status(400).json({
+        ok: false,
+        code: "BAD_FILE",
+        message: "Archivos inválidos (sin buffer)",
+      });
+    }
+
     const s3 = s3Client();
     const bucket = mustEnv("S3_BUCKET");
     const results = [];
 
-    for (const file of files) {
-      if (!file?.buffer || !Buffer.isBuffer(file.buffer)) {
-        return res.status(400).json({
-          ok: false,
-          code: "BAD_FILE",
-          message: "Archivo inválido (sin buffer). Revisá multer memoryStorage().",
-        });
-      }
-
+    for (const file of uniqFiles) {
       if (file.buffer.length > IMG_MAX_UPLOAD_BYTES) {
-        return res.status(413).json({
-          ok: false,
-          code: "IMG_TOO_LARGE",
-          message: `Imagen demasiado grande. Máximo ${IMG_MAX_UPLOAD_BYTES} bytes.`,
-        });
+        throw httpError(413, "IMG_TOO_LARGE");
       }
 
       await detectFormatOrThrow(file.buffer);
-
       const webpBuffer = await normalizeToWebp(file.buffer);
 
-      const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}.webp`;
+      const key = `products/${productId}/${Date.now()}-${crypto
+        .randomBytes(6)
+        .toString("hex")}.webp`;
 
       await s3
         .putObject({
@@ -166,7 +185,6 @@ async function upload(req, res) {
           Key: key,
           Body: webpBuffer,
           ContentType: "image/webp",
-          // Si tu MinIO/policy ya es pública y te llega a fallar, borrá la línea ACL.
           ACL: "public-read",
           CacheControl: "public, max-age=31536000, immutable",
         })
@@ -187,16 +205,24 @@ async function upload(req, res) {
       items: results,
     });
   } catch (e) {
-    console.error("❌ [productImages.upload] ERROR:", e);
+    console.error("❌ [productImages.upload]", e);
     const status = e.statusCode || 500;
     return res.status(status).json({
       ok: false,
-      code: status === 415 ? "INVALID_IMAGE" : status === 413 ? "IMG_TOO_LARGE" : "UPLOAD_ERROR",
+      code:
+        status === 415
+          ? "INVALID_IMAGE"
+          : status === 413
+          ? "IMG_TOO_LARGE"
+          : "UPLOAD_ERROR",
       message: e.message,
     });
   }
 }
 
+/* =====================
+   LIST
+   ===================== */
 async function listByProduct(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -219,6 +245,9 @@ async function listByProduct(req, res, next) {
   }
 }
 
+/* =====================
+   REMOVE
+   ===================== */
 async function remove(req, res, next) {
   try {
     const productId = toInt(req.params.id, 0);
@@ -257,7 +286,7 @@ async function remove(req, res, next) {
             })
             .promise();
         } catch (e) {
-          console.warn("⚠️ No se pudo borrar objeto en S3/MinIO:", e?.message || e);
+          console.warn("⚠️ No se pudo borrar objeto S3:", e?.message || e);
         }
       }
     }
@@ -269,4 +298,8 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { listByProduct, upload, remove };
+module.exports = {
+  upload,
+  listByProduct,
+  remove,
+};
