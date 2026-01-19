@@ -5,6 +5,7 @@
 // - Filtro correcto por subcategory_id
 // - strict_search + exclude_terms
 // - Branding público + Config pagos
+// - ✅ Producto individual devuelve MÚLTIPLES IMÁGENES (product_images)
 
 const { sequelize } = require("../models");
 
@@ -110,9 +111,8 @@ module.exports = {
     const cid = toInt(category_id, 0);
     const sid = toInt(subcategory_id, 0);
     const inc = toBoolLike(include_children, false);
-    void inc; // reservado para futuro
+    void inc;
 
-    // ✅ Filtro por subcategoría REAL
     if (sid) {
       where.push("vc.subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
@@ -134,12 +134,10 @@ module.exports = {
       repl.category_id = cid;
     }
 
-    // ✅ Stock
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
     }
 
-    // ✅ Excluir términos
     const ex = toStr(exclude_terms)
       .split(",")
       .map((x) => x.trim())
@@ -161,7 +159,6 @@ module.exports = {
       `);
     }
 
-    // ✅ Búsqueda
     const q = toStr(search).toLowerCase();
     const strict = toBoolLike(strict_search, false);
 
@@ -263,14 +260,7 @@ module.exports = {
       FROM v_public_catalog vc
       ${whereSql}
       GROUP BY vc.product_id
-      ORDER BY
-        CASE
-          WHEN LOWER(MAX(COALESCE(vc.name,''))) LIKE :q ESCAPE '${ESC}' THEN 0
-          WHEN LOWER(MAX(COALESCE(vc.brand,''))) LIKE :q ESCAPE '${ESC}' THEN 1
-          WHEN LOWER(MAX(COALESCE(vc.model,''))) LIKE :q ESCAPE '${ESC}' THEN 2
-          ELSE 3
-        END,
-        vc.product_id DESC
+      ORDER BY vc.product_id DESC
       LIMIT :limit
       `,
       { replacements: repl }
@@ -280,9 +270,13 @@ module.exports = {
   },
 
   // =========================
-  // Producto individual
+  // Producto individual (✅ con imágenes múltiples)
   // =========================
   async getProductById({ branch_id, product_id }) {
+    const bid = toInt(branch_id, 0);
+    const pid = toInt(product_id, 0);
+    if (!bid || !pid) return null;
+
     const [rows] = await sequelize.query(
       `
       SELECT *
@@ -291,14 +285,38 @@ module.exports = {
         AND product_id = :product_id
       LIMIT 1
       `,
-      {
-        replacements: {
-          branch_id: toInt(branch_id),
-          product_id: toInt(product_id),
-        },
-      }
+      { replacements: { branch_id: bid, product_id: pid } }
     );
-    return rows?.[0] || null;
+
+    const item = rows?.[0] || null;
+    if (!item) return null;
+
+    const [imgs] = await sequelize.query(
+      `
+      SELECT id, url, sort_order
+      FROM product_images
+      WHERE product_id = :product_id
+      ORDER BY sort_order ASC, id ASC
+      `,
+      { replacements: { product_id: pid } }
+    );
+
+    const images = (imgs || [])
+      .map((r) => ({
+        id: Number(r.id),
+        url: String(r.url || "").trim(),
+        sort_order: Number(r.sort_order || 0),
+      }))
+      .filter((x) => x.url);
+
+    item.images = images;
+    item.image_urls = images.map((x) => x.url);
+
+    if (!String(item.image_url || "").trim() && item.image_urls.length) {
+      item.image_url = item.image_urls[0];
+    }
+
+    return item;
   },
 
   // =========================
@@ -327,7 +345,9 @@ module.exports = {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
       favicon_url: r.favicon_url || "",
-      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+      updated_at: r.updated_at
+        ? new Date(r.updated_at).toISOString()
+        : new Date().toISOString(),
     };
   },
 
@@ -357,7 +377,8 @@ module.exports = {
         holder: String(process.env.TRANSFER_HOLDER || "").trim(),
       };
 
-      const finalTransfer = transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
+      const finalTransfer =
+        transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
 
       return {
         transfer: finalTransfer,
