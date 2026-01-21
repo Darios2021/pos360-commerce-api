@@ -1,28 +1,24 @@
 // src/controllers/mediaImages.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (ANTI-304 + S3/MinIO + usos en DB)
+// ✅ COPY-PASTE FINAL COMPLETO
 //
 // Fuente de verdad:
 // - Storage: lista de archivos (S3/MinIO) => "galería"
 // - DB: product_images.url               => "usos"
 //
 // Endpoints:
-// - GET    /api/v1/admin/media/images?page&limit&q
+// - GET    /api/v1/admin/media/images?page&limit&q&debug=1
 // - POST   /api/v1/admin/media/images  (multipart file)
 // - DELETE /api/v1/admin/media/images/:id
+//
+// ✅ FIXES:
+// - Si falta S3_BUCKET => devuelve 500 (no más "total 0" silencioso)
+// - ?debug=1 => devuelve config efectiva para diagnosticar (bucket/prefixes/etc.)
+// - DELETE por filename: resuelve el key real buscando en PREFIXES + UPLOAD_PREFIX (no borra "al aire")
 
 const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
 const { ProductImage, sequelize } = require("../models");
 const AWS = require("aws-sdk");
-
-// ====== Anti-cache helpers (evita 304 sin body) ======
-function setNoCache(res) {
-  // Esto evita cache en browser/proxies y reduce chance de 304
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  res.setHeader("Surrogate-Control", "no-store");
-}
 
 // ====== ENV / S3 ======
 function mustEnv(name) {
@@ -44,8 +40,6 @@ function s3Client() {
 }
 
 const BUCKET = process.env.S3_BUCKET || process.env.S3_BUCKET_PUBLIC || process.env.S3_BUCKET_NAME;
-if (!BUCKET) console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (list/upload/delete dependen de esto).");
-
 const PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
 
 // ✅ IMPORTANTE: por defecto listamos products + media
@@ -74,7 +68,19 @@ function pickFilename(urlOrKey) {
 
 function buildPublicUrl(key) {
   if (PUBLIC_BASE) return `${PUBLIC_BASE}/${key}`;
-  return key; // fallback (no ideal, pero mantiene compat)
+  return key;
+}
+
+function runtimeConfig() {
+  return {
+    bucket: BUCKET || null,
+    public_base: PUBLIC_BASE || null,
+    prefixes: PREFIXES,
+    upload_prefix: UPLOAD_PREFIX || null,
+    endpoint: process.env.S3_ENDPOINT || null,
+    ssl_enabled: String(process.env.S3_SSL_ENABLED ?? "true"),
+    region: process.env.S3_REGION || "us-east-1",
+  };
 }
 
 // ====== DB: usos por filename ======
@@ -82,7 +88,7 @@ async function mapUsedCountsByFilename() {
   const rows = await sequelize.query(
     `
     SELECT
-      SUBSTRING_INDEX(url, '/', -1) AS filename,
+      SUBSTRING_INDEX(SUBSTRING_INDEX(url, '?', 1), '/', -1) AS filename,
       COUNT(*) AS used_count
     FROM product_images
     GROUP BY filename
@@ -97,11 +103,8 @@ async function mapUsedCountsByFilename() {
 
 // ====== STORAGE: listar objetos por múltiples prefixes ======
 async function listStorageObjects({ q }) {
-  if (!BUCKET) return [];
-
   const s3 = s3Client();
   const qLower = String(q || "").trim().toLowerCase();
-
   const all = [];
 
   for (const pref of PREFIXES) {
@@ -138,24 +141,69 @@ async function listStorageObjects({ q }) {
     }
   }
 
-  // newest first (admin)
+  // orden newest first
   all.sort((a, b) => String(b.last_modified || "").localeCompare(String(a.last_modified || "")));
 
   return all;
 }
 
+// ✅ Resolver key real por filename (busca en prefixes y devuelve el primer match)
+async function resolveKeyByFilename(filename) {
+  const s3 = s3Client();
+  const needle = `/${filename}`;
+
+  const candidates = [
+    ...(UPLOAD_PREFIX ? [UPLOAD_PREFIX] : []),
+    ...PREFIXES,
+  ].filter(Boolean);
+
+  for (const pref of candidates) {
+    const Prefix = pref ? `${pref}/` : "";
+    let token = null;
+    let isTruncated = true;
+
+    while (isTruncated) {
+      const resp = await s3
+        .listObjectsV2({
+          Bucket: BUCKET,
+          Prefix,
+          ContinuationToken: token || undefined,
+          MaxKeys: 1000,
+        })
+        .promise();
+
+      token = resp.NextContinuationToken || null;
+      isTruncated = Boolean(resp.IsTruncated);
+
+      const found = (resp.Contents || []).find((x) => x?.Key && x.Key.endsWith(needle));
+      if (found?.Key) return found.Key;
+    }
+  }
+
+  return null;
+}
+
 // ====== HANDLERS ======
 
 /**
- * GET /api/v1/admin/media/images?page=1&limit=60&q=...
+ * GET /api/v1/admin/media/images?page=1&limit=60&q=...&debug=1
  */
 exports.listAll = async (req, res) => {
-  setNoCache(res);
-
   try {
+    // ✅ no más silencioso
+    if (!BUCKET) {
+      return res.status(500).json({
+        ok: false,
+        message:
+          "Falta S3_BUCKET (o S3_BUCKET_PUBLIC / S3_BUCKET_NAME). Sin bucket no se puede listar el storage.",
+        config: runtimeConfig(),
+      });
+    }
+
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.max(1, Math.min(200, toInt(req.query.limit, 60)));
     const q = String(req.query.q || "").trim();
+    const debug = String(req.query.debug || "") === "1";
 
     const usedMap = await mapUsedCountsByFilename();
     const all = await listStorageObjects({ q });
@@ -169,11 +217,18 @@ exports.listAll = async (req, res) => {
       return { ...img, used_count, is_used: used_count > 0 };
     });
 
-    // ✅ status 200 explícito + json
-    return res.status(200).json({ ok: true, page, limit, total, items: pageItems });
+    const payload = { ok: true, page, limit, total, items: pageItems };
+
+    // ✅ debug útil para ver bucket/prefixes reales
+    if (debug) {
+      payload.config = runtimeConfig();
+      payload.sample_keys = all.slice(0, 10).map((x) => x.key);
+    }
+
+    res.json(payload);
   } catch (err) {
     console.error("❌ [admin media] listAll:", err);
-    return res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
+    res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
   }
 };
 
@@ -181,10 +236,14 @@ exports.listAll = async (req, res) => {
  * POST /api/v1/admin/media/images (multipart/form-data file=...)
  */
 exports.uploadOne = async (req, res) => {
-  setNoCache(res);
-
   try {
-    if (!BUCKET) return res.status(500).json({ ok: false, message: "Falta S3_BUCKET en env" });
+    if (!BUCKET) {
+      return res.status(500).json({
+        ok: false,
+        message: "Falta S3_BUCKET (o S3_BUCKET_PUBLIC / S3_BUCKET_NAME) en env",
+        config: runtimeConfig(),
+      });
+    }
 
     const file = req.file;
     if (!file) return res.status(400).json({ ok: false, message: "Falta archivo (field: file)" });
@@ -207,10 +266,10 @@ exports.uploadOne = async (req, res) => {
       })
       .promise();
 
-    return res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
+    res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
   } catch (err) {
     console.error("❌ [admin media] uploadOne:", err);
-    return res.status(500).json({ ok: false, message: err.message || "Error subiendo imagen" });
+    res.status(500).json({ ok: false, message: err.message || "Error subiendo imagen" });
   }
 };
 
@@ -219,10 +278,14 @@ exports.uploadOne = async (req, res) => {
  * Bloquea si está usada por productos (409).
  */
 exports.removeById = async (req, res) => {
-  setNoCache(res);
-
   try {
-    if (!BUCKET) return res.status(500).json({ ok: false, message: "Falta S3_BUCKET en env" });
+    if (!BUCKET) {
+      return res.status(500).json({
+        ok: false,
+        message: "Falta S3_BUCKET (o S3_BUCKET_PUBLIC / S3_BUCKET_NAME) en env",
+        config: runtimeConfig(),
+      });
+    }
 
     const raw = String(req.params.id || "").trim();
     if (!raw) return res.status(400).json({ ok: false, message: "Falta id" });
@@ -245,7 +308,7 @@ exports.removeById = async (req, res) => {
     // Resolver key:
     // - si vino URL -> sacamos pathname
     // - si vino key -> lo usamos
-    // - si vino filename -> intentamos borrar en upload prefix (media)
+    // - si vino filename -> buscamos el key real en prefixes
     let key = null;
 
     if (/^https?:\/\//i.test(raw)) {
@@ -254,15 +317,23 @@ exports.removeById = async (req, res) => {
     } else if (raw.includes("/") && raw.includes(".")) {
       key = raw.replace(/^\/+/, "");
     } else {
-      key = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${filename}` : filename;
+      key = await resolveKeyByFilename(filename);
+      if (!key) {
+        return res.status(404).json({
+          ok: false,
+          message: "No se encontró el archivo en el bucket con los prefixes configurados",
+          filename,
+          config: runtimeConfig(),
+        });
+      }
     }
 
     const s3 = s3Client();
     await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
 
-    return res.json({ ok: true, deleted: true, filename, key });
+    res.json({ ok: true, deleted: true, filename, key });
   } catch (err) {
     console.error("❌ [admin media] removeById:", err);
-    return res.status(500).json({ ok: false, message: err.message || "Error eliminando imagen" });
+    res.status(500).json({ ok: false, message: err.message || "Error eliminando imagen" });
   }
 };
