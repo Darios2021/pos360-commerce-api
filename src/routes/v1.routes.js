@@ -1,26 +1,5 @@
 // src/routes/v1.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO (ANTI-CRASH + alineado al esquema actual)
-//
-// Public:
-// - GET  /api/v1/_version
-// - GET  /api/v1/_whoami (opcional)
-// - /health
-// - /auth
-// - /public (ecommerce público)
-// - /public/shop/payment-config
-// - /ecom/checkout
-// - /ecom/payments + webhooks
-//
-// Protected:
-// - /products (con attachAccessContext + branchContext)
-// - /categories, /subcategories, /branches, /warehouses, /stock, /dashboard
-// - /pos (unificado)
-// - /me
-//
-// Admin (con RBAC context):
-// - /admin/users
-// - /admin/shop/* (branding/orders/settings/payments)
-// - ✅ /admin/media/* (galería multimedia)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -141,8 +120,15 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
-// ✅ NUEVO: Admin Media (Galería multimedia)
-const adminMediaRoutes = require("../routes/admin.media.routes");
+// ✅ Admin Media (Galería multimedia)
+// ✅ FIX: v1.routes.js YA ESTÁ en /src/routes => se importa con "./..."
+// ✅ Tolerante a ambos nombres por si en tu repo quedó distinto.
+let adminMediaRoutes;
+try {
+  adminMediaRoutes = require("./adminMedia.routes");
+} catch (e1) {
+  adminMediaRoutes = require("./admin.media.routes");
+}
 
 // =========================
 // Mount: Public primero
@@ -159,7 +145,6 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // =========================
 // Mount: Protected (operación)
 // =========================
-// ✅ CLAVE: products con RBAC + branchContext
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
 
 safeUse("/categories", requireAuth, categoriesRoutes);
@@ -182,7 +167,7 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
 
-// ✅ NUEVO: /admin/media (galería)
+// ✅ /admin/media (galería)
 safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
 
 module.exports = router;
