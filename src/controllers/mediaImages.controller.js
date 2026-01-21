@@ -1,7 +1,6 @@
 // src/controllers/mediaImages.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// Este controller NO usa tabla media_images.
 // Fuente de verdad:
 // - Storage: lista total de archivos (S3/MinIO)   => "galería"
 // - DB: product_images.url                       => "usos"
@@ -9,23 +8,51 @@
 // Endpoints:
 // - GET    /api/v1/admin/media/images?page&limit&q
 // - POST   /api/v1/admin/media/images  (multipart file)
-// - DELETE /api/v1/admin/media/images/:id (filename o url o id dummy)
+// - DELETE /api/v1/admin/media/images/:id (filename o url o key)
 
 const crypto = require("crypto");
+const AWS = require("aws-sdk");
 const { Sequelize } = require("sequelize");
 const { ProductImage, sequelize } = require("../models");
 
-// ====== CONFIG STORAGE ======
-// Si ya tenés un cliente S3 central, cambialo acá.
-// Este ejemplo usa aws-sdk v2 (como venías usando).
-const AWS = require("aws-sdk");
-
+// ====== HELPERS ======
 function mustEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env ${name}`);
   return v;
 }
 
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+
+function pickFilename(urlOrKey) {
+  const s = String(urlOrKey || "");
+  const last = s.split("?")[0].split("#")[0];
+  return last.substring(last.lastIndexOf("/") + 1) || last;
+}
+
+function stripSlashes(s) {
+  return String(s || "").replace(/^\/+|\/+$/g, "");
+}
+
+function ensureNoDoublePrefix(base, key) {
+  // Evita: base ".../pos360" + key "pos360/products/..." => ".../pos360/pos360/products/..."
+  const b = stripSlashes(base);
+  const k = stripSlashes(key);
+
+  if (!b) return k;
+
+  const bLast = b.split("/").slice(-1)[0]; // ej: "pos360"
+  if (bLast && k.startsWith(`${bLast}/`)) {
+    // Si base termina en pos360 y key empieza con pos360/, sacamos el prefijo duplicado del key
+    return k.substring(bLast.length + 1);
+  }
+  return k;
+}
+
+// ====== CONFIG STORAGE ======
 function s3Client() {
   return new AWS.S3({
     endpoint: mustEnv("S3_ENDPOINT"),
@@ -40,39 +67,36 @@ function s3Client() {
 
 const BUCKET = process.env.S3_BUCKET || process.env.S3_BUCKET_PUBLIC || process.env.S3_BUCKET_NAME;
 if (!BUCKET) {
-  // no tiramos error acá para no crashear en dev si solo querés listar desde FS,
-  // pero para subir/borrar lo vas a necesitar.
-  console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (upload/delete no funcionarán).");
+  console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (list/upload/delete no funcionarán).");
 }
 
-// Base pública para armar URL (tu dominio storage-files.cingulado.org)
-const PUBLIC_BASE =
-  (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
+// Base pública para armar URL
+// ✅ RECOMENDADO: "https://storage-files.cingulado.org" (sin /pos360)
+const PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
 
-// Prefijo de carpeta donde guardás (ej: pos360/products o pos360/media)
-const MEDIA_PREFIX = (process.env.S3_MEDIA_PREFIX || "pos360/media").replace(/^\/+|\/+$/g, "");
+// Prefijos donde buscar imágenes
+// ✅ Default: pos360/products (porque tus urls reales vienen de ahí)
+// Podés setear: S3_MEDIA_PREFIXS="pos360/products,pos360/media"
+const MEDIA_PREFIXS_RAW = String(process.env.S3_MEDIA_PREFIXS || "").trim();
+const MEDIA_PREFIX_RAW = String(process.env.S3_MEDIA_PREFIX || "").trim();
 
-// ====== HELPERS ======
-function toInt(v, d = 0) {
-  const n = parseInt(String(v ?? ""), 10);
-  return Number.isFinite(n) ? n : d;
-}
+const MEDIA_PREFIXS = (MEDIA_PREFIXS_RAW
+  ? MEDIA_PREFIXS_RAW.split(",")
+  : [MEDIA_PREFIX_RAW || "pos360/products"]
+)
+  .map((x) => stripSlashes(x))
+  .filter(Boolean);
 
-function pickFilename(urlOrKey) {
-  const s = String(urlOrKey || "");
-  const last = s.split("?")[0].split("#")[0];
-  return last.substring(last.lastIndexOf("/") + 1) || last;
-}
-
+// ====== URL builder ======
 function buildPublicUrl(key) {
-  if (PUBLIC_BASE) return `${PUBLIC_BASE}/${key}`;
-  // fallback: si no hay base pública, devolvemos key
-  return key;
+  const k = stripSlashes(key);
+  if (!PUBLIC_BASE) return k; // fallback
+  const safeKey = ensureNoDoublePrefix(PUBLIC_BASE, k);
+  return `${PUBLIC_BASE}/${safeKey}`;
 }
 
 // ====== DB: usos por filename ======
 async function mapUsedCountsByFilename() {
-  // SELECT SUBSTRING_INDEX(url,'/',-1) filename, COUNT(*) used_count FROM product_images GROUP BY filename
   const rows = await sequelize.query(
     `
     SELECT
@@ -89,79 +113,74 @@ async function mapUsedCountsByFilename() {
   return m;
 }
 
-// ====== STORAGE: listar objetos ======
-async function listStorageObjects({ q, page, limit }) {
-  // Listado por S3 ListObjectsV2 (paginado por ContinuationToken)
+// ====== STORAGE: listar objetos (multiprefix) ======
+async function listAllFromStorage({ q }) {
+  if (!BUCKET) throw new Error("Falta S3_BUCKET en env");
+
   const s3 = s3Client();
+  const all = [];
 
-  const Prefix = MEDIA_PREFIX ? `${MEDIA_PREFIX}/` : "";
-  let token = null;
+  for (const pref of MEDIA_PREFIXS) {
+    const Prefix = pref ? `${pref}/` : "";
+    let token = null;
+    let isTruncated = true;
 
-  // Para paginar tipo "page X", caminamos tokens (simple y suficiente para admin)
-  // Si querés performance top, lo cambiamos a "cursor".
-  const targetPage = Math.max(1, page);
-  const perPage = Math.max(1, Math.min(200, limit));
+    while (isTruncated) {
+      const resp = await s3
+        .listObjectsV2({
+          Bucket: BUCKET,
+          Prefix,
+          ContinuationToken: token || undefined,
+          MaxKeys: 1000,
+        })
+        .promise();
 
-  let currentPage = 1;
-  let lastPageItems = [];
-  let isTruncated = true;
+      token = resp.NextContinuationToken || null;
+      isTruncated = Boolean(resp.IsTruncated);
 
-  while (isTruncated && currentPage <= targetPage) {
-    const resp = await s3
-      .listObjectsV2({
-        Bucket: BUCKET,
-        Prefix,
-        ContinuationToken: token || undefined,
-        MaxKeys: 1000, // traemos "mucho" y luego filtramos
-      })
-      .promise();
+      const batch = (resp.Contents || [])
+        .map((x) => ({
+          key: x.Key,
+          filename: pickFilename(x.Key),
+          size: Number(x.Size || 0),
+          last_modified: x.LastModified ? new Date(x.LastModified).toISOString() : null,
+          url: buildPublicUrl(x.Key),
+        }))
+        .filter((x) => x.key && !x.key.endsWith("/"));
 
-    token = resp.NextContinuationToken || null;
-    isTruncated = Boolean(resp.IsTruncated);
+      all.push(...batch);
 
-    // items
-    const items = (resp.Contents || [])
-      .map((x) => ({
-        key: x.Key,
-        filename: pickFilename(x.Key),
-        size: Number(x.Size || 0),
-        last_modified: x.LastModified ? new Date(x.LastModified).toISOString() : null,
-        url: buildPublicUrl(x.Key),
-      }))
-      .filter((x) => x.key && !x.key.endsWith("/"));
-
-    // filtro por q (filename contiene)
-    const filtered = q
-      ? items.filter((x) => x.filename.toLowerCase().includes(q.toLowerCase()))
-      : items;
-
-    // paginado manual dentro del batch
-    // armamos un array global solo de esta página objetivo:
-    // - calculamos slice para la página actual sobre el stream acumulado (simple approach)
-    // Para no complicarla: juntamos todo y recortamos (admin normalmente no tiene 1M imágenes).
-    // Si vos tenés muchísimas, lo pasamos a cursor.
-    lastPageItems = lastPageItems.concat(filtered);
-
-    currentPage++;
+      // safety: si hay muchísimos, lo cambiamos a cursor luego
+      if (all.length > 200000) break;
+    }
   }
 
-  // ahora sacamos la página pedida del acumulado
-  const start = (targetPage - 1) * perPage;
-  const end = start + perPage;
+  const filtered = q
+    ? all.filter((x) => x.filename.toLowerCase().includes(q.toLowerCase()))
+    : all;
 
-  const pageItems = lastPageItems.slice(start, end);
+  // ✅ más nuevo primero
+  filtered.sort((a, b) => {
+    const da = a.last_modified ? new Date(a.last_modified).getTime() : 0;
+    const db = b.last_modified ? new Date(b.last_modified).getTime() : 0;
+    return db - da;
+  });
 
-  // total aproximado = lo acumulado hasta lo que listamos; si querés exacto, hay que listar todo.
-  const totalApprox = lastPageItems.length;
+  return filtered;
+}
 
-  return { items: pageItems, total: totalApprox };
+function paginate(items, page, limit) {
+  const p = Math.max(1, page);
+  const l = Math.max(1, Math.min(200, limit));
+  const start = (p - 1) * l;
+  const end = start + l;
+  return { page: p, limit: l, slice: items.slice(start, end), total: items.length };
 }
 
 // ====== HANDLERS ======
 
 /**
  * GET /api/v1/admin/media/images?page=1&limit=60&q=...
- * Devuelve: { items:[{url,filename,size,last_modified,used_count,is_used}], page, limit, total }
  */
 exports.listAll = async (req, res) => {
   try {
@@ -170,9 +189,11 @@ exports.listAll = async (req, res) => {
     const q = String(req.query.q || "").trim();
 
     const usedMap = await mapUsedCountsByFilename();
-    const { items, total } = await listStorageObjects({ q, page, limit });
+    const all = await listAllFromStorage({ q });
 
-    const merged = items.map((img) => {
+    const { slice, total, page: p, limit: l } = paginate(all, page, limit);
+
+    const merged = slice.map((img) => {
       const used_count = usedMap.get(img.filename) || 0;
       return {
         ...img,
@@ -181,13 +202,7 @@ exports.listAll = async (req, res) => {
       };
     });
 
-    res.json({
-      ok: true,
-      page,
-      limit,
-      total,
-      items: merged,
-    });
+    res.json({ ok: true, page: p, limit: l, total, items: merged });
   } catch (err) {
     console.error("❌ [admin media] listAll:", err);
     res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
@@ -195,8 +210,7 @@ exports.listAll = async (req, res) => {
 };
 
 /**
- * POST /api/v1/admin/media/images (multipart/form-data file=...)
- * Guarda en S3/MinIO y devuelve {url, key, filename}
+ * POST /api/v1/admin/media/images (multipart file=...)
  */
 exports.uploadOne = async (req, res) => {
   try {
@@ -211,7 +225,9 @@ exports.uploadOne = async (req, res) => {
     const rnd = crypto.randomBytes(6).toString("hex");
     const filename = `${stamp}-${rnd}.${ext}`;
 
-    const key = MEDIA_PREFIX ? `${MEDIA_PREFIX}/${filename}` : filename;
+    // subimos a primer prefijo (por defecto pos360/products o el que definas)
+    const basePrefix = MEDIA_PREFIXS[0] || "pos360/products";
+    const key = basePrefix ? `${basePrefix}/${filename}` : filename;
 
     const s3 = s3Client();
     await s3
@@ -220,18 +236,13 @@ exports.uploadOne = async (req, res) => {
         Key: key,
         Body: file.buffer,
         ContentType: file.mimetype || "application/octet-stream",
-        ACL: "public-read", // si tu bucket es público
+        ACL: "public-read",
       })
       .promise();
 
     const url = buildPublicUrl(key);
 
-    res.json({
-      ok: true,
-      key,
-      filename,
-      url,
-    });
+    res.json({ ok: true, key, filename, url });
   } catch (err) {
     console.error("❌ [admin media] uploadOne:", err);
     res.status(500).json({ ok: false, message: err.message || "Error subiendo imagen" });
@@ -240,12 +251,8 @@ exports.uploadOne = async (req, res) => {
 
 /**
  * DELETE /api/v1/admin/media/images/:id
- * Acepta:
- * - filename (ej 1767...webp)
- * - key completo (pos360/media/...)
- * - url completa (https://...)
- *
- * Bloquea si está usada por productos (409).
+ * Acepta filename / key / url
+ * Bloquea si está usada (409)
  */
 exports.removeById = async (req, res) => {
   try {
@@ -276,25 +283,20 @@ exports.removeById = async (req, res) => {
     // resolver key
     let key = null;
 
-    // Si vino url pública: sacamos path
     if (/^https?:\/\//i.test(raw)) {
       const u = new URL(raw);
-      key = u.pathname.replace(/^\/+/, ""); // sin leading /
+      key = u.pathname.replace(/^\/+/, "");
     } else if (raw.includes("/") && raw.includes(".")) {
-      // key completo
       key = raw.replace(/^\/+/, "");
     } else {
-      // solo filename
-      key = MEDIA_PREFIX ? `${MEDIA_PREFIX}/${filename}` : filename;
+      // si viene solo filename, probamos en cada prefijo y borramos el primero que exista
+      // (en S3 deleteObject no falla si no existe, pero acá intentamos una key razonable)
+      const basePrefix = MEDIA_PREFIXS[0] || "pos360/products";
+      key = basePrefix ? `${basePrefix}/${filename}` : filename;
     }
 
     const s3 = s3Client();
-    await s3
-      .deleteObject({
-        Bucket: BUCKET,
-        Key: key,
-      })
-      .promise();
+    await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
 
     res.json({ ok: true, deleted: true, filename, key });
   } catch (err) {
