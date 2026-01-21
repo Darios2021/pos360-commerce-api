@@ -20,6 +20,7 @@
 // Admin (con RBAC context):
 // - /admin/users
 // - /admin/shop/* (branding/orders/settings/payments)
+// - ✅ /admin/media/* (galería multimedia)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -140,6 +141,9 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
+// ✅ NUEVO: Admin Media (Galería multimedia)
+const adminMediaRoutes = require("./admin.media.routes");
+
 // =========================
 // Mount: Public primero
 // =========================
@@ -177,5 +181,8 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
+
+// ✅ NUEVO: /admin/media (galería)
+safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
 
 module.exports = router;
