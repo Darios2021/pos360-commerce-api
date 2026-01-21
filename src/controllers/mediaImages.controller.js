@@ -9,11 +9,6 @@
 // - GET    /api/v1/admin/media/images?page&limit&q&debug=1
 // - POST   /api/v1/admin/media/images  (multipart file)
 // - DELETE /api/v1/admin/media/images/:id
-//
-// ✅ FIXES:
-// - Si falta S3_BUCKET => devuelve 500 (no más "total 0" silencioso)
-// - ?debug=1 => devuelve config efectiva para diagnosticar (bucket/prefixes/etc.)
-// - DELETE por filename: resuelve el key real buscando en PREFIXES + UPLOAD_PREFIX (no borra "al aire")
 
 const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
@@ -42,14 +37,11 @@ function s3Client() {
 const BUCKET = process.env.S3_BUCKET || process.env.S3_BUCKET_PUBLIC || process.env.S3_BUCKET_NAME;
 const PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
 
-// ✅ IMPORTANTE: por defecto listamos products + media
-// Podés overridearlo con env: S3_MEDIA_PREFIXES="pos360/products,pos360/media"
 const PREFIXES = String(process.env.S3_MEDIA_PREFIXES || "pos360/products,pos360/media")
   .split(",")
   .map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
   .filter(Boolean);
 
-// ✅ Donde se suben las imágenes del admin (si no querés subir a products)
 const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "pos360/media")
   .trim()
   .replace(/^\/+|\/+$/g, "");
@@ -84,6 +76,7 @@ function runtimeConfig() {
 }
 
 // ====== DB: usos por filename ======
+// ✅ corta querystring antes de extraer filename (como tu ejemplo)
 async function mapUsedCountsByFilename() {
   const rows = await sequelize.query(
     `
@@ -141,9 +134,7 @@ async function listStorageObjects({ q }) {
     }
   }
 
-  // orden newest first
   all.sort((a, b) => String(b.last_modified || "").localeCompare(String(a.last_modified || "")));
-
   return all;
 }
 
@@ -152,10 +143,7 @@ async function resolveKeyByFilename(filename) {
   const s3 = s3Client();
   const needle = `/${filename}`;
 
-  const candidates = [
-    ...(UPLOAD_PREFIX ? [UPLOAD_PREFIX] : []),
-    ...PREFIXES,
-  ].filter(Boolean);
+  const candidates = [...(UPLOAD_PREFIX ? [UPLOAD_PREFIX] : []), ...PREFIXES].filter(Boolean);
 
   for (const pref of candidates) {
     const Prefix = pref ? `${pref}/` : "";
@@ -190,7 +178,6 @@ async function resolveKeyByFilename(filename) {
  */
 exports.listAll = async (req, res) => {
   try {
-    // ✅ no más silencioso
     if (!BUCKET) {
       return res.status(500).json({
         ok: false,
@@ -219,7 +206,6 @@ exports.listAll = async (req, res) => {
 
     const payload = { ok: true, page, limit, total, items: pageItems };
 
-    // ✅ debug útil para ver bucket/prefixes reales
     if (debug) {
       payload.config = runtimeConfig();
       payload.sample_keys = all.slice(0, 10).map((x) => x.key);
@@ -292,8 +278,17 @@ exports.removeById = async (req, res) => {
 
     const filename = pickFilename(raw);
 
+    // ✅ FIX: cortar querystring antes de comparar (consistente con tu SQL)
     const used = await ProductImage.count({
-      where: sequelize.where(sequelize.fn("SUBSTRING_INDEX", sequelize.col("url"), "/", -1), filename),
+      where: sequelize.where(
+        sequelize.fn(
+          "SUBSTRING_INDEX",
+          sequelize.fn("SUBSTRING_INDEX", sequelize.col("url"), "?", 1),
+          "/",
+          -1
+        ),
+        filename
+      ),
     });
 
     if (used > 0) {
@@ -305,10 +300,6 @@ exports.removeById = async (req, res) => {
       });
     }
 
-    // Resolver key:
-    // - si vino URL -> sacamos pathname
-    // - si vino key -> lo usamos
-    // - si vino filename -> buscamos el key real en prefixes
     let key = null;
 
     if (/^https?:\/\//i.test(raw)) {
