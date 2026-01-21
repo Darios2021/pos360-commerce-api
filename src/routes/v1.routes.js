@@ -96,6 +96,9 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
+// ✅ NUEVO: Instagram public feed
+const publicInstagramRoutes = require("./publicInstagram.routes");
+
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
 
@@ -136,6 +139,10 @@ safeUse("/auth", authRoutes);
 
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
+
+// ✅ Montar Instagram dentro de /public
+// Queda: GET /api/v1/public/instagram/latest?limit=8
+safeUse("/public", publicInstagramRoutes);
 
 safeUse("/ecom", ecomCheckoutRoutes);
 safeUse("/ecom", ecomPaymentsRoutes);
