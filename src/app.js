@@ -8,6 +8,7 @@
 // - 404
 // - ✅ Error handler con sqlMessage real (db)
 // - ✅ Headers globales: X-Service-Name / X-Build-Id
+// - ✅ FIX: desactiva ETag + fuerza no-store para evitar 304 con body vacío
 
 const express = require("express");
 const cors = require("cors");
@@ -20,6 +21,11 @@ function isMiddleware(fn) {
 
 function createApp() {
   const app = express();
+
+  // =====================
+  // ✅ FIX CLAVE: desactivar ETag (evita 304 Not Modified)
+  // =====================
+  app.set("etag", false);
 
   // =====================
   // CORS
@@ -57,7 +63,7 @@ function createApp() {
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 
-    // ✅ FIX CLAVE: permitir headers que Chrome/IG WebView mandan en preflight
+    // ✅ permitir headers que Chrome/IG WebView mandan en preflight
     allowedHeaders: [
       "Content-Type",
       "Authorization",
@@ -68,9 +74,10 @@ function createApp() {
       "Cache-Control",
       "Pragma",
       "Expires",
+      "If-None-Match",
+      "If-Modified-Since",
     ],
 
-    // (opcional) por compat con proxies viejos
     optionsSuccessStatus: 204,
   };
 
@@ -84,13 +91,26 @@ function createApp() {
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
   // =====================
-  // ✅ Headers globales (verificación deploy)
+  // ✅ Headers globales (verificación deploy) + Anti-cache para API
   // =====================
   app.use((req, res, next) => {
     const serviceName = process.env.SERVICE_NAME || "pos360-commerce-api";
     const buildId = process.env.BUILD_ID || "dev";
     res.setHeader("X-Service-Name", serviceName);
     res.setHeader("X-Build-Id", buildId);
+
+    // ✅ FIX: no-cache/no-store en TODO lo que sea API (y también para admin media)
+    // Esto mata 304/ETag/caches intermedios.
+    if (req.originalUrl.startsWith("/api/")) {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      res.setHeader("Surrogate-Control", "no-store");
+
+      // por si algún middleware/proxy lo setea igual
+      res.removeHeader("ETag");
+    }
+
     next();
   });
 
