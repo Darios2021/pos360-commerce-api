@@ -1,49 +1,43 @@
-// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/publicLinks.controller.js
+// ✅ COPY-PASTE FINAL COMPLETO
+
 const { Op } = require("sequelize");
 const { ShopLink } = require("../models");
 
-function normKind(v) {
-  const s = String(v ?? "").trim().toUpperCase();
-  return s;
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
 }
 
-// GET /api/v1/public/links?kind=INSTAGRAM_POST
-async function list(req, res) {
+async function listPublic(req, res) {
   try {
-    const kind = normKind(req.query.kind);
-    if (!kind) {
-      return res.status(400).json({ ok: false, error: "Missing kind. Ej: ?kind=INSTAGRAM_POST" });
+    if (!ShopLink) {
+      return res.status(500).json({ ok: false, error: "ShopLink model no cargado" });
     }
 
-    const items = await ShopLink.findAll({
-      where: {
-        kind,
-        is_active: 1,
-        url: { [Op.ne]: "" },
-      },
+    const kind = String(req.query.kind || "").trim();
+    const limit = Math.min(Math.max(toInt(req.query.limit, 12), 1), 50);
+
+    const where = { is_active: 1 };
+    if (kind) where.kind = kind;
+
+    const rows = await ShopLink.findAll({
+      where,
       order: [
         ["sort_order", "ASC"],
-        ["id", "DESC"],
+        ["id", "ASC"],
       ],
-      limit: 200,
+      limit,
+      attributes: ["id", "kind", "title", "subtitle", "url", "sort_order"],
     });
 
-    return res.json({
-      ok: true,
-      kind,
-      items: items.map((x) => ({
-        id: x.id,
-        kind: x.kind,
-        label: x.label,
-        url: x.url,
-        sort_order: x.sort_order,
-      })),
-    });
+    return res.json({ ok: true, items: rows });
   } catch (e) {
-    console.error("❌ publicLinks.list", e);
-    return res.status(500).json({ ok: false, error: e?.message || "Server error" });
+    return res.status(500).json({
+      ok: false,
+      error: e?.message || "No se pudo listar links",
+    });
   }
 }
 
-module.exports = { list };
+module.exports = { listPublic };
