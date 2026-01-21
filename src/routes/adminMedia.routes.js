@@ -4,7 +4,7 @@
 const router = require("express").Router();
 const media = require("../controllers/mediaImages.controller");
 
-// GET /api/v1/admin/media/images
+// GET /api/v1/admin/media/images?page=1&limit=60&q=...
 router.get("/images", media.listAll);
 
 // DELETE /api/v1/admin/media/images/:id
