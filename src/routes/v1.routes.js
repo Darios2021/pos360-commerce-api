@@ -142,7 +142,7 @@ const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
 // ✅ NUEVO: Admin Media (Galería multimedia)
-const adminMediaRoutes = require("./admin.media.routes");
+const adminMediaRoutes = require("../routes/admin.media.routes");
 
 // =========================
 // Mount: Public primero
