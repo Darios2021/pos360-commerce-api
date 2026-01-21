@@ -121,8 +121,6 @@ const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
 // ✅ Admin Media (Galería multimedia)
-// ✅ FIX: v1.routes.js YA ESTÁ en /src/routes => se importa con "./..."
-// ✅ Tolerante a ambos nombres por si en tu repo quedó distinto.
 let adminMediaRoutes;
 try {
   adminMediaRoutes = require("./adminMedia.routes");
