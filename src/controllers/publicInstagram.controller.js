@@ -1,6 +1,6 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/publicInstagram.controller.js
-const axios = require("axios");
+// Node 20+ => fetch nativo (SIN axios)
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -16,7 +16,6 @@ function mustEnv(name) {
 function mapMediaItem(x) {
   const media_type = String(x?.media_type || "").toUpperCase();
 
-  // VIDEO => preferir thumbnail_url
   const thumb =
     media_type === "VIDEO"
       ? x?.thumbnail_url || x?.media_url || null
@@ -53,7 +52,6 @@ async function latest(req, res) {
     ].join(",");
 
     let url;
-
     if (igUserId) {
       const base = process.env.IG_GRAPH_BASE_URL || "https://graph.facebook.com/v19.0";
       url = `${base}/${encodeURIComponent(igUserId)}/media`;
@@ -61,27 +59,40 @@ async function latest(req, res) {
       url = "https://graph.instagram.com/me/media";
     }
 
-    const { data } = await axios.get(url, {
-      params: { fields, limit, access_token: accessToken },
-      timeout: 15000,
+    const qs = new URLSearchParams({
+      fields,
+      limit: String(limit),
+      access_token: accessToken,
     });
+
+    const resp = await fetch(`${url}?${qs.toString()}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text();
+      throw new Error(`Instagram HTTP ${resp.status}: ${txt}`);
+    }
+
+    const data = await resp.json();
 
     const raw = Array.isArray(data?.data) ? data.data : [];
     const items = raw
       .map(mapMediaItem)
       .filter((it) => !!it.permalink && !!it.thumb_url);
 
-    return res.json({ ok: true, items, source: igUserId ? "graph" : "basic" });
+    return res.json({
+      ok: true,
+      source: igUserId ? "graph" : "basic",
+      items,
+    });
   } catch (err) {
-    console.error("❌ publicInstagram.latest", err?.response?.data || err);
-
-    const msg =
-      err?.response?.data?.error?.message ||
-      err?.response?.data?.message ||
-      err?.message ||
-      "Instagram error";
-
-    return res.status(500).json({ ok: false, error: msg });
+    console.error("❌ publicInstagram.latest", err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "Instagram error",
+    });
   }
 }
 
