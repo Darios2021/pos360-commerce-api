@@ -1,5 +1,5 @@
 // src/controllers/mediaImages.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (ANTI-304 + S3/MinIO + usos en DB)
 //
 // Fuente de verdad:
 // - Storage: lista de archivos (S3/MinIO) => "galería"
@@ -14,6 +14,15 @@ const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
 const { ProductImage, sequelize } = require("../models");
 const AWS = require("aws-sdk");
+
+// ====== Anti-cache helpers (evita 304 sin body) ======
+function setNoCache(res) {
+  // Esto evita cache en browser/proxies y reduce chance de 304
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+}
 
 // ====== ENV / S3 ======
 function mustEnv(name) {
@@ -37,8 +46,7 @@ function s3Client() {
 const BUCKET = process.env.S3_BUCKET || process.env.S3_BUCKET_PUBLIC || process.env.S3_BUCKET_NAME;
 if (!BUCKET) console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (list/upload/delete dependen de esto).");
 
-const PUBLIC_BASE =
-  (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
+const PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
 
 // ✅ IMPORTANTE: por defecto listamos products + media
 // Podés overridearlo con env: S3_MEDIA_PREFIXES="pos360/products,pos360/media"
@@ -66,7 +74,7 @@ function pickFilename(urlOrKey) {
 
 function buildPublicUrl(key) {
   if (PUBLIC_BASE) return `${PUBLIC_BASE}/${key}`;
-  return key;
+  return key; // fallback (no ideal, pero mantiene compat)
 }
 
 // ====== DB: usos por filename ======
@@ -130,7 +138,7 @@ async function listStorageObjects({ q }) {
     }
   }
 
-  // orden newest first (para que tenga sentido en admin)
+  // newest first (admin)
   all.sort((a, b) => String(b.last_modified || "").localeCompare(String(a.last_modified || "")));
 
   return all;
@@ -142,6 +150,8 @@ async function listStorageObjects({ q }) {
  * GET /api/v1/admin/media/images?page=1&limit=60&q=...
  */
 exports.listAll = async (req, res) => {
+  setNoCache(res);
+
   try {
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.max(1, Math.min(200, toInt(req.query.limit, 60)));
@@ -159,10 +169,11 @@ exports.listAll = async (req, res) => {
       return { ...img, used_count, is_used: used_count > 0 };
     });
 
-    res.json({ ok: true, page, limit, total, items: pageItems });
+    // ✅ status 200 explícito + json
+    return res.status(200).json({ ok: true, page, limit, total, items: pageItems });
   } catch (err) {
     console.error("❌ [admin media] listAll:", err);
-    res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
+    return res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
   }
 };
 
@@ -170,6 +181,8 @@ exports.listAll = async (req, res) => {
  * POST /api/v1/admin/media/images (multipart/form-data file=...)
  */
 exports.uploadOne = async (req, res) => {
+  setNoCache(res);
+
   try {
     if (!BUCKET) return res.status(500).json({ ok: false, message: "Falta S3_BUCKET en env" });
 
@@ -194,10 +207,10 @@ exports.uploadOne = async (req, res) => {
       })
       .promise();
 
-    res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
+    return res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
   } catch (err) {
     console.error("❌ [admin media] uploadOne:", err);
-    res.status(500).json({ ok: false, message: err.message || "Error subiendo imagen" });
+    return res.status(500).json({ ok: false, message: err.message || "Error subiendo imagen" });
   }
 };
 
@@ -206,6 +219,8 @@ exports.uploadOne = async (req, res) => {
  * Bloquea si está usada por productos (409).
  */
 exports.removeById = async (req, res) => {
+  setNoCache(res);
+
   try {
     if (!BUCKET) return res.status(500).json({ ok: false, message: "Falta S3_BUCKET en env" });
 
@@ -245,9 +260,9 @@ exports.removeById = async (req, res) => {
     const s3 = s3Client();
     await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
 
-    res.json({ ok: true, deleted: true, filename, key });
+    return res.json({ ok: true, deleted: true, filename, key });
   } catch (err) {
     console.error("❌ [admin media] removeById:", err);
-    res.status(500).json({ ok: false, message: err.message || "Error eliminando imagen" });
+    return res.status(500).json({ ok: false, message: err.message || "Error eliminando imagen" });
   }
 };
