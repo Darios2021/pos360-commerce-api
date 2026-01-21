@@ -9,10 +9,11 @@
 // - GET    /api/v1/admin/media/images?page&limit&q
 // - POST   /api/v1/admin/media/images  (multipart file)
 // - DELETE /api/v1/admin/media/images/:id
+// - ✅ GET /api/v1/admin/media/images/used-by/:filename
 
 const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
-const { ProductImage, sequelize } = require("../models");
+const { ProductImage, Product, sequelize } = require("../models"); // ✅ Product para el join
 const AWS = require("aws-sdk");
 
 // ====== ENV / S3 ======
@@ -38,9 +39,7 @@ const PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL
   ""
 );
 
-// ✅ IMPORTANTE:
-// En tu infra, los objetos están como: products/9/xxx.webp dentro del bucket pos360
-// Por eso el default correcto es "products,media" (NO "pos360/products")
+// ✅ En tu infra, los objetos están como: products/9/xxx.webp dentro del bucket pos360
 const PREFIXES = String(process.env.S3_MEDIA_PREFIXES || "products,media")
   .split(",")
   .map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
@@ -51,7 +50,6 @@ const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media")
   .trim()
   .replace(/^\/+|\/+$/g, "");
 
-// Compat: tu env usa S3_SSL=false (no S3_SSL_ENABLED)
 function s3Client() {
   const forcePath = envBool("S3_FORCE_PATH_STYLE", true);
   const sslEnabled = envBool("S3_SSL_ENABLED", envBool("S3_SSL", false));
@@ -83,18 +81,15 @@ function normalizeKeyFromRaw(raw) {
   const s = String(raw || "").trim();
   if (!s) return "";
 
-  // si viene URL -> pathname sin leading slash
   if (/^https?:\/\//i.test(s)) {
     const u = new URL(s);
     let key = u.pathname.replace(/^\/+/, ""); // ej: pos360/products/9/x.webp
-    if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice((`${BUCKET}/`).length); // -> products/9/x.webp
+    if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice((`${BUCKET}/`).length);
     return key;
   }
 
-  // si viene "pos360/products/..." lo limpiamos
   let key = s.replace(/^\/+/, "");
   if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice((`${BUCKET}/`).length);
-
   return key;
 }
 
@@ -102,8 +97,7 @@ function buildPublicUrl(key) {
   const cleanKey = String(key || "").replace(/^\/+/, "");
   if (!PUBLIC_BASE) return cleanKey;
 
-  // Tu público funciona como: https://storage-files.cingulado.org/<bucket>/<key>
-  // Entonces armamos siempre con bucket incluido.
+  // público: https://storage-files.cingulado.org/<bucket>/<key>
   if (BUCKET) return `${PUBLIC_BASE}/${BUCKET}/${cleanKey}`;
   return `${PUBLIC_BASE}/${cleanKey}`;
 }
@@ -169,9 +163,7 @@ async function listStorageObjects({ q }) {
     }
   }
 
-  // newest first
   all.sort((a, b) => String(b.last_modified || "").localeCompare(String(a.last_modified || "")));
-
   return all;
 }
 
@@ -202,6 +194,50 @@ exports.listAll = async (req, res) => {
   } catch (err) {
     console.error("❌ [admin media] listAll:", err);
     res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
+  }
+};
+
+/**
+ * ✅ GET /api/v1/admin/media/images/used-by/:filename
+ * Devuelve productos que usan ese filename en product_images.url
+ */
+exports.usedByFilename = async (req, res) => {
+  try {
+    const filename = pickFilename(req.params.filename || "");
+    if (!filename) return res.status(400).json({ ok: false, message: "Falta filename" });
+
+    // Query directo como tu ejemplo (y más rápido que include con fn)
+    const rows = await sequelize.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        pi.url
+      FROM product_images pi
+      JOIN products p ON p.id = pi.product_id
+      WHERE SUBSTRING_INDEX(pi.url, '/', -1) = :filename
+      ORDER BY p.id DESC
+      LIMIT 200
+      `,
+      {
+        type: Sequelize.QueryTypes.SELECT,
+        replacements: { filename },
+      }
+    );
+
+    res.json({
+      ok: true,
+      filename,
+      used_count: rows.length,
+      products: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        url: r.url,
+      })),
+    });
+  } catch (err) {
+    console.error("❌ [admin media] usedByFilename:", err);
+    res.status(500).json({ ok: false, message: err.message || "Error buscando usos" });
   }
 };
 
@@ -266,11 +302,7 @@ exports.removeById = async (req, res) => {
       });
     }
 
-    // Resolver key:
-    // - si vino URL o key con bucket -> normaliza y saca "pos360/"
-    // - si vino sólo filename -> asume upload prefix
     let key = normalizeKeyFromRaw(raw);
-
     if (!key || (!key.includes("/") && key === filename)) {
       key = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${filename}` : filename;
     }
