@@ -1,12 +1,16 @@
 // src/controllers/mediaImages.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO
 //
-// Endpoints (adminMedia.routes.js):
+// Fuente de verdad:
+// - Storage: lista de archivos (S3/MinIO) => "galería"
+// - DB: product_images.url               => "usos"
+//
+// Endpoints:
 // - GET    /api/v1/admin/media/images?page&limit&q&used&product_id&category_id&subcategory_id
-// - GET    /api/v1/admin/media/images/used-by/:filename
-// - POST   /api/v1/admin/media/images
-// - PUT    /api/v1/admin/media/images/:filename         ✅ overwrite (MISMO filename)
+// - POST   /api/v1/admin/media/images  (multipart file)
+// - PUT    /api/v1/admin/media/images/:id   (multipart overwrite: key/url/filename -> mismo key)
 // - DELETE /api/v1/admin/media/images/:id
+// - GET    /api/v1/admin/media/images/used-by/:filename
 
 const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
@@ -19,7 +23,6 @@ function mustEnv(name) {
   if (!v) throw new Error(`Missing env ${name}`);
   return v;
 }
-
 function envBool(name, fallback = false) {
   const v = process.env[name];
   if (v === undefined || v === null || v === "") return fallback;
@@ -27,20 +30,17 @@ function envBool(name, fallback = false) {
 }
 
 const BUCKET = process.env.S3_BUCKET || process.env.S3_BUCKET_PUBLIC || process.env.S3_BUCKET_NAME;
-if (!BUCKET) console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (list/upload/delete/overwrite dependen de esto).");
+if (!BUCKET) console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (list/upload/delete dependen de esto).");
 
 const PUBLIC_BASE = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_PUBLIC_URL || "").replace(/\/+$/, "");
 
-// Prefijos que se listan (storage)
+// objetos típicos: products/9/xxx.webp + media/xxx.webp
 const PREFIXES = String(process.env.S3_MEDIA_PREFIXES || "products,media")
   .split(",")
   .map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
   .filter(Boolean);
 
-// Donde sube el admin
-const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media")
-  .trim()
-  .replace(/^\/+|\/+$/g, "");
+const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media").trim().replace(/^\/+|\/+$/g, "");
 
 function s3Client() {
   const forcePath = envBool("S3_FORCE_PATH_STYLE", true);
@@ -73,6 +73,7 @@ function normalizeKeyFromRaw(raw) {
   const s = String(raw || "").trim();
   if (!s) return "";
 
+  // URL
   if (/^https?:\/\//i.test(s)) {
     const u = new URL(s);
     let key = u.pathname.replace(/^\/+/, ""); // ej: pos360/products/9/x.webp
@@ -80,6 +81,7 @@ function normalizeKeyFromRaw(raw) {
     return key;
   }
 
+  // key o "bucket/key"
   let key = s.replace(/^\/+/, "");
   if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice((`${BUCKET}/`).length);
   return key;
@@ -92,91 +94,43 @@ function buildPublicUrl(key) {
   return `${PUBLIC_BASE}/${cleanKey}`;
 }
 
-// ====== DB: usos + sample por filename (con filtros) ======
-async function getUsedStats({ q, product_id, category_id, subcategory_id }) {
-  const where = [];
-  const repl = {};
-
-  // filtros por producto/categoría/subcategoría (asume products.category_id / products.subcategory_id)
-  if (product_id) {
-    where.push("p.id = :product_id");
-    repl.product_id = Number(product_id);
-  }
-  if (category_id) {
-    where.push("p.category_id = :category_id");
-    repl.category_id = Number(category_id);
-  }
-  if (subcategory_id) {
-    where.push("p.subcategory_id = :subcategory_id");
-    repl.subcategory_id = Number(subcategory_id);
-  }
-
-  // q sobre nombres (producto/categoría/subcategoría) además del filename (filename lo filtramos luego también)
-  const qStr = String(q || "").trim().toLowerCase();
-  if (qStr) {
-    where.push(`(
-      LOWER(p.name) LIKE :q
-      OR LOWER(c.name) LIKE :q
-      OR LOWER(s.name) LIKE :q
-      OR LOWER(SUBSTRING_INDEX(pi.url,'/',-1)) LIKE :q
-    )`);
-    repl.q = `%${qStr}%`;
-  }
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
+// ====== DB: usos + sample (para filtrar por producto/cat/subcat) ======
+async function mapUsedInfoByFilename() {
   const rows = await sequelize.query(
     `
     SELECT
       SUBSTRING_INDEX(pi.url, '/', -1) AS filename,
       COUNT(*) AS used_count,
-      MAX(pi.id) AS max_pi_id
+      MAX(p.id) AS product_id,
+      MAX(p.name) AS product_name,
+      MAX(p.category_id) AS category_id,
+      MAX(c.name) AS category_name,
+      MAX(p.subcategory_id) AS subcategory_id,
+      MAX(sc.name) AS subcategory_name
     FROM product_images pi
     JOIN products p ON p.id = pi.product_id
     LEFT JOIN categories c ON c.id = p.category_id
-    LEFT JOIN subcategories s ON s.id = p.subcategory_id
-    ${whereSql}
+    LEFT JOIN subcategories sc ON sc.id = p.subcategory_id
     GROUP BY filename
-    `,
-    { type: Sequelize.QueryTypes.SELECT, replacements: repl }
+  `,
+    { type: Sequelize.QueryTypes.SELECT }
   );
 
-  const usedMap = new Map();
-  const maxPiByFilename = new Map();
+  const m = new Map();
   for (const r of rows) {
-    usedMap.set(String(r.filename), Number(r.used_count || 0));
-    maxPiByFilename.set(String(r.filename), Number(r.max_pi_id || 0));
+    m.set(String(r.filename), {
+      used_count: Number(r.used_count || 0),
+      used_sample: {
+        product_id: r.product_id,
+        product_name: r.product_name,
+        category_id: r.category_id,
+        category_name: r.category_name,
+        subcategory_id: r.subcategory_id,
+        subcategory_name: r.subcategory_name,
+      },
+    });
   }
-
-  // sample (1 producto por filename, el de max pi.id)
-  const sampleIds = Array.from(maxPiByFilename.values()).filter((n) => Number(n) > 0);
-  let sampleMap = new Map();
-
-  if (sampleIds.length) {
-    const samples = await sequelize.query(
-      `
-      SELECT
-        pi.id AS product_image_id,
-        SUBSTRING_INDEX(pi.url, '/', -1) AS filename,
-        p.id AS product_id,
-        p.name AS product_name,
-        c.id AS category_id,
-        c.name AS category_name,
-        s.id AS subcategory_id,
-        s.name AS subcategory_name
-      FROM product_images pi
-      JOIN products p ON p.id = pi.product_id
-      LEFT JOIN categories c ON c.id = p.category_id
-      LEFT JOIN subcategories s ON s.id = p.subcategory_id
-      WHERE pi.id IN (:ids)
-      `,
-      { type: Sequelize.QueryTypes.SELECT, replacements: { ids: sampleIds } }
-    );
-
-    sampleMap = new Map(samples.map((x) => [String(x.filename), x]));
-  }
-
-  return { usedMap, sampleMap };
+  return m;
 }
 
 // ====== STORAGE: listar objetos por múltiples prefixes ======
@@ -187,6 +141,7 @@ async function listStorageObjects({ q }) {
   const qLower = String(q || "").trim().toLowerCase();
 
   const all = [];
+
   for (const pref of PREFIXES) {
     const Prefix = pref ? `${pref}/` : "";
     let token = null;
@@ -216,7 +171,6 @@ async function listStorageObjects({ q }) {
         .filter((x) => x.key && !x.key.endsWith("/"));
 
       for (const it of items) {
-        // filtro por filename básico (q también lo usamos en DB para búsquedas textuales)
         if (!qLower || it.filename.toLowerCase().includes(qLower)) all.push(it);
       }
     }
@@ -224,6 +178,75 @@ async function listStorageObjects({ q }) {
 
   all.sort((a, b) => String(b.last_modified || "").localeCompare(String(a.last_modified || "")));
   return all;
+}
+
+// ====== STORAGE: resolver key exacto para overwrite ======
+async function resolveKeyForOverwrite(rawId) {
+  const raw = String(rawId || "").trim();
+  if (!raw) return "";
+
+  const s3 = s3Client();
+
+  // 1) si parece key (tiene /), probamos directo
+  const maybeKey = normalizeKeyFromRaw(raw);
+  if (maybeKey && maybeKey.includes("/")) {
+    try {
+      await s3.headObject({ Bucket: BUCKET, Key: maybeKey }).promise();
+      return maybeKey;
+    } catch {}
+  }
+
+  // 2) si es filename, probamos ubicaciones comunes:
+  const filename = pickFilename(raw);
+  if (!filename) return "";
+
+  const candidates = [];
+
+  // primero el upload_prefix
+  if (UPLOAD_PREFIX) candidates.push(`${UPLOAD_PREFIX}/${filename}`);
+
+  // después todos los prefixes
+  for (const p of PREFIXES) {
+    if (!p) continue;
+    candidates.push(`${p}/${filename}`);
+  }
+
+  // y por si acaso, raíz
+  candidates.push(filename);
+
+  for (const k of candidates) {
+    try {
+      await s3.headObject({ Bucket: BUCKET, Key: k }).promise();
+      return k;
+    } catch {}
+  }
+
+  // 3) fallback: búsqueda (caro pero robusto)
+  // buscamos por cada prefix listando y matcheando endsWith
+  for (const pref of PREFIXES) {
+    const Prefix = pref ? `${pref}/` : "";
+    let token = null;
+    let isTruncated = true;
+
+    while (isTruncated) {
+      const resp = await s3
+        .listObjectsV2({
+          Bucket: BUCKET,
+          Prefix,
+          ContinuationToken: token || undefined,
+          MaxKeys: 1000,
+        })
+        .promise();
+
+      token = resp.NextContinuationToken || null;
+      isTruncated = Boolean(resp.IsTruncated);
+
+      const hit = (resp.Contents || []).find((x) => String(x.Key || "").endsWith(`/${filename}`));
+      if (hit?.Key) return hit.Key;
+    }
+  }
+
+  return "";
 }
 
 // ====== HANDLERS ======
@@ -237,49 +260,33 @@ exports.listAll = async (req, res) => {
     const limit = Math.max(1, Math.min(200, toInt(req.query.limit, 60)));
 
     const q = String(req.query.q || "").trim();
-    const used = String(req.query.used || "all"); // all | used | free
+    const used = String(req.query.used || "all"); // all|used|free
 
-    const product_id = req.query.product_id ? toInt(req.query.product_id, 0) : 0;
-    const category_id = req.query.category_id ? toInt(req.query.category_id, 0) : 0;
-    const subcategory_id = req.query.subcategory_id ? toInt(req.query.subcategory_id, 0) : 0;
+    const product_id = toInt(req.query.product_id, 0);
+    const category_id = toInt(req.query.category_id, 0);
+    const subcategory_id = toInt(req.query.subcategory_id, 0);
 
-    // DB stats con filtros (si filtras por producto/cat/subcat, limita el set de filenames "relevantes")
-    const { usedMap, sampleMap } = await getUsedStats({
-      q,
-      product_id: product_id || "",
-      category_id: category_id || "",
-      subcategory_id: subcategory_id || "",
+    const usedInfoMap = await mapUsedInfoByFilename();
+    const all = await listStorageObjects({ q });
+
+    // enrich + filtros por used / product / cat / subcat
+    let enriched = all.map((img) => {
+      const u = usedInfoMap.get(img.filename) || { used_count: 0, used_sample: null };
+      return { ...img, used_count: u.used_count, is_used: u.used_count > 0, used_sample: u.used_sample };
     });
 
-    // listar storage (siempre), luego cruzar con usedMap
-    let all = await listStorageObjects({ q });
+    if (used === "used") enriched = enriched.filter((x) => !!x.is_used);
+    if (used === "free") enriched = enriched.filter((x) => !x.is_used);
 
-    // si hay filtros por producto/cat/subcat => solo mostramos imágenes que están en ese set (usadas por esos filtros)
-    const usingHardFilter = !!(product_id || category_id || subcategory_id);
-    if (usingHardFilter) {
-      const allowed = new Set(Array.from(usedMap.keys())); // filenames que matchean en DB por esos filtros
-      all = all.filter((x) => allowed.has(x.filename));
-    }
+    if (product_id) enriched = enriched.filter((x) => x.used_sample?.product_id === product_id);
+    if (category_id) enriched = enriched.filter((x) => x.used_sample?.category_id === category_id);
+    if (subcategory_id) enriched = enriched.filter((x) => x.used_sample?.subcategory_id === subcategory_id);
 
-    // aplicar filtro used/free/all
-    all = all
-      .map((img) => {
-        const used_count = usedMap.get(img.filename) || 0;
-        const used_sample = sampleMap.get(img.filename) || null;
-        return { ...img, used_count, is_used: used_count > 0, used_sample };
-      })
-      .filter((img) => {
-        if (used === "used") return img.is_used;
-        if (used === "free") return !img.is_used;
-        return true;
-      });
-
-    const total = all.length;
+    const total = enriched.length;
     const start = (page - 1) * limit;
     const end = start + limit;
-    const pageItems = all.slice(start, end);
 
-    res.json({ ok: true, page, limit, total, items: pageItems });
+    res.json({ ok: true, page, limit, total, items: enriched.slice(start, end) });
   } catch (err) {
     console.error("❌ [admin media] listAll:", err);
     res.status(500).json({ ok: false, message: err.message || "Error listando imágenes" });
@@ -296,10 +303,7 @@ exports.usedByFilename = async (req, res) => {
 
     const rows = await sequelize.query(
       `
-      SELECT
-        p.id,
-        p.name,
-        pi.url
+      SELECT p.id, p.name, pi.url
       FROM product_images pi
       JOIN products p ON p.id = pi.product_id
       WHERE SUBSTRING_INDEX(pi.url, '/', -1) = :filename
@@ -322,7 +326,7 @@ exports.usedByFilename = async (req, res) => {
 };
 
 /**
- * POST /api/v1/admin/media/images (multipart file)
+ * POST /api/v1/admin/media/images  (sube nuevo)
  */
 exports.uploadOne = async (req, res) => {
   try {
@@ -357,35 +361,44 @@ exports.uploadOne = async (req, res) => {
 };
 
 /**
- * ✅ PUT /api/v1/admin/media/images/:filename  (overwrite)
- * Reescribe el MISMO key => UPLOAD_PREFIX/filename
+ * ✅ PUT /api/v1/admin/media/images/:id
+ * Overwrite REAL del mismo objeto (no crea copias)
  */
-exports.overwriteByFilename = async (req, res) => {
+exports.overwriteById = async (req, res) => {
   try {
     if (!BUCKET) return res.status(500).json({ ok: false, message: "Falta S3_BUCKET en env" });
-
-    const filename = pickFilename(req.params.filename || "");
-    if (!filename) return res.status(400).json({ ok: false, message: "Falta filename" });
 
     const file = req.file;
     if (!file) return res.status(400).json({ ok: false, message: "Falta archivo (field: file)" });
 
-    const key = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${filename}` : filename;
+    const raw = String(req.params.id || "").trim();
+    if (!raw) return res.status(400).json({ ok: false, message: "Falta id" });
+
+    const key = await resolveKeyForOverwrite(raw);
+    if (!key) {
+      return res.status(404).json({
+        ok: false,
+        message: "No se encontró el objeto a reemplazar (key/filename no existe en storage).",
+      });
+    }
+
+    const filename = pickFilename(key);
 
     const s3 = s3Client();
     await s3
       .putObject({
         Bucket: BUCKET,
-        Key: key,
+        Key: key, // ✅ MISMO KEY = reemplaza
         Body: file.buffer,
-        ContentType: file.mimetype || "image/webp",
+        ContentType: "image/webp", // forzamos salida ecommerce
         ACL: "public-read",
+        CacheControl: "no-cache",
       })
       .promise();
 
-    res.json({ ok: true, key, filename, url: buildPublicUrl(key), overwritten: true });
+    res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
   } catch (err) {
-    console.error("❌ [admin media] overwriteByFilename:", err);
+    console.error("❌ [admin media] overwriteById:", err);
     res.status(500).json({ ok: false, message: err.message || "Error reemplazando imagen" });
   }
 };

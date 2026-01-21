@@ -7,7 +7,7 @@
 // Endpoints:
 // GET    /images?page&limit&q&used&product_id&category_id&subcategory_id
 // POST   /images
-// PUT    /images/:filename           (overwrite)
+// PUT    /images/:id               (overwrite REAL por key/url/filename)
 // DELETE /images/:id
 // GET    /images/used-by/:filename
 
@@ -29,30 +29,19 @@ router.use((req, res, next) => {
   next();
 });
 
-// =======================
-// LIST (con filtros)
-// =======================
+// LIST
 router.get("/images", mediaCtrl.listAll);
 
-// =======================
-// USED BY  🔥🔥🔥
-// ⚠️ TIENE QUE IR ANTES DE RUTAS PARAMETRIZADAS QUE PUEDAN CHOCAR
-// =======================
+// USED BY (antes de /:id por seguridad)
 router.get("/images/used-by/:filename", mediaCtrl.usedByFilename);
 
-// =======================
 // UPLOAD
-// =======================
 router.post("/images", upload.single("file"), mediaCtrl.uploadOne);
 
-// =======================
-// OVERWRITE (reescribe)
-// =======================
-router.put("/images/:filename", upload.single("file"), mediaCtrl.overwriteByFilename);
+// ✅ OVERWRITE REAL (mismo objeto)
+router.put("/images/:id", upload.single("file"), mediaCtrl.overwriteById);
 
-// =======================
 // DELETE
-// =======================
 router.delete("/images/:id", mediaCtrl.removeById);
 
 module.exports = router;
