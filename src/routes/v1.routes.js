@@ -96,8 +96,22 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// ✅ NUEVO: Instagram public feed
-const publicInstagramRoutes = require("./publicInstagram.routes");
+// ✅ CAMINO B: Links públicos (Instagram posts, etc.)
+let publicLinksRoutes;
+try {
+  publicLinksRoutes = require("./publicLinks.routes");
+} catch (e) {
+  // opcional, no romper
+  publicLinksRoutes = null;
+}
+
+// ✅ (tu intento IG Graph) si lo seguís usando
+let publicInstagramRoutes;
+try {
+  publicInstagramRoutes = require("./publicInstagram.routes");
+} catch (e) {
+  publicInstagramRoutes = null;
+}
 
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
@@ -123,6 +137,14 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
+// ✅ CAMINO B: Admin links (cambiar links desde plataforma)
+let adminShopLinksRoutes;
+try {
+  adminShopLinksRoutes = require("./admin.shopLinks.routes");
+} catch (e) {
+  adminShopLinksRoutes = null;
+}
+
 // ✅ Admin Media (Galería multimedia)
 let adminMediaRoutes;
 try {
@@ -140,9 +162,11 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ Montar Instagram dentro de /public
-// Queda: GET /api/v1/public/instagram/latest?limit=8
-safeUse("/public", publicInstagramRoutes);
+// ✅ CAMINO B: /api/v1/public/links?kind=INSTAGRAM_POST
+if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
+
+// ✅ (opcional) /api/v1/public/instagram/latest
+if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
 
 safeUse("/ecom", ecomCheckoutRoutes);
 safeUse("/ecom", ecomPaymentsRoutes);
@@ -171,6 +195,9 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
+
+// ✅ CAMINO B: /api/v1/admin/shop/links
+if (adminShopLinksRoutes) safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
 
 // ✅ /admin/media (galería)
 safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);

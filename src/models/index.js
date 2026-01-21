@@ -1,5 +1,5 @@
 // src/models/index.js
-// ✅ COPY-PASTE FINAL (Subcategory + Product->createdByUser + SaleRefund/SaleExchange + blindado)
+// ✅ COPY-PASTE FINAL (Subcategory + Product->createdByUser + SaleRefund/SaleExchange + blindado + ShopLink opcional)
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -52,6 +52,15 @@ try {
 } catch (e) {
   // eslint-disable-next-line no-console
   console.log("⚠️ SaleExchange no cargado (models/SaleExchange.js no encontrado o falló)");
+}
+
+// ✅ CAMINO B: ShopLink (puede no existir todavía)
+let ShopLink = null;
+try {
+  ShopLink = require("./ShopLink")(sequelize, DataTypes);
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.log("⚠️ ShopLink no cargado (models/ShopLink.js no encontrado o falló)");
 }
 
 // ==========================================
@@ -182,12 +191,10 @@ if (SaleRefund) {
   safeBelongsTo(SaleRefund, Branch, { foreignKey: "branch_id", as: "branch" });
   safeBelongsTo(SaleRefund, User, { foreignKey: "user_id", as: "user" });
 
-  // si querés el include desde Sale -> refunds:
   safeHasMany(Sale, SaleRefund, { foreignKey: "sale_id", as: "refunds" });
 }
 
 if (SaleExchange) {
-  // OJO: tabla real usa original_sale_id y new_sale_id (no sale_id)
   safeBelongsTo(SaleExchange, Sale, { foreignKey: "original_sale_id", as: "originalSale" });
   safeBelongsTo(SaleExchange, Sale, { foreignKey: "new_sale_id", as: "newSale" });
   safeBelongsTo(SaleExchange, User, { foreignKey: "created_by", as: "creator" });
@@ -223,4 +230,7 @@ module.exports = {
   // POS EXT
   SaleRefund,
   SaleExchange,
+
+  // ✅ CAMINO B
+  ShopLink,
 };
