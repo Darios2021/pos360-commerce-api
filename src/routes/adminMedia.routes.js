@@ -5,8 +5,9 @@
 // /api/v1/admin/media
 //
 // Endpoints:
-// GET    /images?page&limit&q
+// GET    /images?page&limit&q&used&product_id&category_id&subcategory_id
 // POST   /images
+// PUT    /images/:filename           (overwrite)
 // DELETE /images/:id
 // GET    /images/used-by/:filename
 
@@ -29,7 +30,7 @@ router.use((req, res, next) => {
 });
 
 // =======================
-// LIST
+// LIST (con filtros)
 // =======================
 router.get("/images", mediaCtrl.listAll);
 
@@ -43,6 +44,13 @@ router.get("/images/used-by/:filename", mediaCtrl.usedByFilename);
 // UPLOAD
 // =======================
 router.post("/images", upload.single("file"), mediaCtrl.uploadOne);
+
+// =======================
+// OVERWRITE (reescribe)
+// ⚠️ también antes del :id si compartís el mismo patrón
+// (acá no choca porque :id está en DELETE)
+// =======================
+router.put("/images/:filename", upload.single("file"), mediaCtrl.overwriteByFilename);
 
 // =======================
 // DELETE
