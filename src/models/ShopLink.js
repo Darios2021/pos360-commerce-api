@@ -1,21 +1,22 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/models/ShopLink.js
+
 module.exports = (sequelize, DataTypes) => {
   const ShopLink = sequelize.define(
     "ShopLink",
     {
       id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true, autoIncrement: true },
 
-      // Tipos sugeridos: INSTAGRAM_POST | INSTAGRAM_PROFILE | PROMO | OTHER
-      kind: { type: DataTypes.STRING(64), allowNull: false },
+      kind: { type: DataTypes.STRING(32), allowNull: false },
+      label: { type: DataTypes.STRING(128), allowNull: true },
 
-      title: { type: DataTypes.STRING(255), allowNull: true },
-      subtitle: { type: DataTypes.STRING(255), allowNull: true },
-
-      url: { type: DataTypes.TEXT, allowNull: false },
+      url: { type: DataTypes.STRING(512), allowNull: false },
 
       sort_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+
+      created_at: { type: DataTypes.DATE, allowNull: false },
+      updated_at: { type: DataTypes.DATE, allowNull: false },
     },
     {
       tableName: "shop_links",

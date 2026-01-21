@@ -4,35 +4,29 @@
 const { Op } = require("sequelize");
 const { ShopLink } = require("../models");
 
-// ------------------
-// Helpers
-// ------------------
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
 
-function isAdminReq(req) {
-  // Soportar varios formatos de auth context (por tus middlewares)
-  const u = req.usuario || req.user || req.auth || {};
-  const roles = Array.isArray(u?.roles) ? u.roles : Array.isArray(req.roles) ? req.roles : [];
-  const access = req.access || req.accessContext || {};
-  return (
-    access?.isAdmin === true ||
-    roles.includes("admin") ||
-    roles.includes("super_admin") ||
-    u?.is_admin === 1 ||
-    u?.is_admin === true
-  );
+function cleanStr(v) {
+  const s = String(v ?? "").trim();
+  return s.length ? s : null;
 }
 
 function normalizeUrl(u) {
-  let s = String(u || "").trim();
+  let s = String(u ?? "").trim();
   if (!s) return "";
   try {
     const url = new URL(s);
-    url.search = "";
     url.hash = "";
+    // opcional: limpiar utm
+    url.searchParams.delete("utm_source");
+    url.searchParams.delete("utm_medium");
+    url.searchParams.delete("utm_campaign");
+    url.searchParams.delete("igsh");
+    // si querés volar TODO query:
+    // url.search = "";
     s = url.toString();
   } catch {
     // ok
@@ -40,36 +34,21 @@ function normalizeUrl(u) {
   return s;
 }
 
-function mustAdmin(req, res) {
-  if (!isAdminReq(req)) {
-    res.status(403).json({ ok: false, error: "Forbidden (admin only)" });
-    return false;
-  }
-  return true;
-}
-
-// ------------------
-// GET /admin/shop-links
-// query: kind, q, page, limit
-// ------------------
 async function list(req, res) {
   try {
-    if (!mustAdmin(req, res)) return;
+    if (!ShopLink) return res.status(500).json({ ok: false, error: "ShopLink model no cargado" });
 
-    const kind = String(req.query.kind || "").trim();
-    const q = String(req.query.q || "").trim();
-
+    const kind = cleanStr(req.query.kind);
+    const q = cleanStr(req.query.q);
     const page = Math.max(toInt(req.query.page, 1), 1);
     const limit = Math.min(Math.max(toInt(req.query.limit, 50), 1), 200);
     const offset = (page - 1) * limit;
 
     const where = {};
     if (kind) where.kind = kind;
-
     if (q) {
       where[Op.or] = [
-        { title: { [Op.like]: `%${q}%` } },
-        { subtitle: { [Op.like]: `%${q}%` } },
+        { label: { [Op.like]: `%${q}%` } },
         { url: { [Op.like]: `%${q}%` } },
       ];
     }
@@ -92,33 +71,26 @@ async function list(req, res) {
       items: rows,
     });
   } catch (err) {
-    console.error("❌ adminShopLinks.list", err);
-    return res.status(500).json({ ok: false, error: err?.message || "Server error" });
+    return res.status(500).json({ ok: false, error: err?.message || "Error listando links" });
   }
 }
 
-// ------------------
-// POST /admin/shop-links
-// body: kind, title, subtitle, url, sort_order, is_active
-// ------------------
 async function create(req, res) {
   try {
-    if (!mustAdmin(req, res)) return;
+    if (!ShopLink) return res.status(500).json({ ok: false, error: "ShopLink model no cargado" });
 
-    const kind = String(req.body?.kind || "").trim();
-    const title = String(req.body?.title || "").trim();
-    const subtitle = String(req.body?.subtitle || "").trim();
-    const url = normalizeUrl(req.body?.url);
-    const sort_order = toInt(req.body?.sort_order, 0);
-    const is_active = req.body?.is_active === 0 || req.body?.is_active === false ? false : true;
+    const kind = cleanStr(req.body.kind);
+    const label = cleanStr(req.body.label);
+    const url = normalizeUrl(req.body.url);
+    const sort_order = toInt(req.body.sort_order, 0);
+    const is_active = req.body.is_active === 0 || req.body.is_active === false ? 0 : 1;
 
-    if (!kind) return res.status(400).json({ ok: false, error: "Missing kind" });
-    if (!url) return res.status(400).json({ ok: false, error: "Missing url" });
+    if (!kind) return res.status(400).json({ ok: false, error: "Falta kind" });
+    if (!url) return res.status(400).json({ ok: false, error: "Falta url" });
 
     const row = await ShopLink.create({
       kind,
-      title: title || null,
-      subtitle: subtitle || null,
+      label,
       url,
       sort_order,
       is_active,
@@ -126,70 +98,50 @@ async function create(req, res) {
 
     return res.json({ ok: true, item: row });
   } catch (err) {
-    console.error("❌ adminShopLinks.create", err);
-    return res.status(500).json({ ok: false, error: err?.message || "Server error" });
+    return res.status(500).json({ ok: false, error: err?.message || "Error creando link" });
   }
 }
 
-// ------------------
-// PATCH /admin/shop-links/:id
-// body: partial fields
-// ------------------
-async function patch(req, res) {
+async function update(req, res) {
   try {
-    if (!mustAdmin(req, res)) return;
+    if (!ShopLink) return res.status(500).json({ ok: false, error: "ShopLink model no cargado" });
 
     const id = toInt(req.params.id, 0);
-    if (!id) return res.status(400).json({ ok: false, error: "Invalid id" });
+    if (!id) return res.status(400).json({ ok: false, error: "ID inválido" });
 
     const row = await ShopLink.findByPk(id);
-    if (!row) return res.status(404).json({ ok: false, error: "Not found" });
+    if (!row) return res.status(404).json({ ok: false, error: "No existe" });
 
-    const payload = {};
+    const patch = {};
+    if (req.body.kind != null) patch.kind = cleanStr(req.body.kind) || row.kind;
+    if (req.body.label != null) patch.label = cleanStr(req.body.label);
+    if (req.body.url != null) patch.url = normalizeUrl(req.body.url) || row.url;
+    if (req.body.sort_order != null) patch.sort_order = toInt(req.body.sort_order, row.sort_order);
+    if (req.body.is_active != null) patch.is_active = req.body.is_active ? 1 : 0;
 
-    if (req.body?.kind != null) payload.kind = String(req.body.kind || "").trim();
-    if (req.body?.title != null) payload.title = String(req.body.title || "").trim() || null;
-    if (req.body?.subtitle != null) payload.subtitle = String(req.body.subtitle || "").trim() || null;
-
-    if (req.body?.url != null) payload.url = normalizeUrl(req.body.url);
-    if (req.body?.sort_order != null) payload.sort_order = toInt(req.body.sort_order, row.sort_order || 0);
-
-    if (req.body?.is_active != null) {
-      payload.is_active = req.body.is_active === 1 || req.body.is_active === true;
-    }
-
-    // Validaciones mínimas
-    if (payload.kind === "") return res.status(400).json({ ok: false, error: "kind vacío" });
-    if (payload.url === "") return res.status(400).json({ ok: false, error: "url vacía" });
-
-    await row.update(payload);
+    await row.update(patch);
 
     return res.json({ ok: true, item: row });
   } catch (err) {
-    console.error("❌ adminShopLinks.patch", err);
-    return res.status(500).json({ ok: false, error: err?.message || "Server error" });
+    return res.status(500).json({ ok: false, error: err?.message || "Error actualizando link" });
   }
 }
 
-// ------------------
-// DELETE /admin/shop-links/:id
-// ------------------
 async function remove(req, res) {
   try {
-    if (!mustAdmin(req, res)) return;
+    if (!ShopLink) return res.status(500).json({ ok: false, error: "ShopLink model no cargado" });
 
     const id = toInt(req.params.id, 0);
-    if (!id) return res.status(400).json({ ok: false, error: "Invalid id" });
+    if (!id) return res.status(400).json({ ok: false, error: "ID inválido" });
 
     const row = await ShopLink.findByPk(id);
-    if (!row) return res.status(404).json({ ok: false, error: "Not found" });
+    if (!row) return res.status(404).json({ ok: false, error: "No existe" });
 
     await row.destroy();
     return res.json({ ok: true });
   } catch (err) {
-    console.error("❌ adminShopLinks.remove", err);
-    return res.status(500).json({ ok: false, error: err?.message || "Server error" });
+    return res.status(500).json({ ok: false, error: err?.message || "Error borrando link" });
   }
 }
 
-module.exports = { list, create, patch, remove };
+module.exports = { list, create, update, remove };
