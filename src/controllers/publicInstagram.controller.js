@@ -1,6 +1,6 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/publicInstagram.controller.js
-// Node 20+ => fetch nativo (SIN axios)
+// Node 20+ => fetch nativo. Respuesta SIEMPRE JSON.
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -13,25 +13,17 @@ function mustEnv(name) {
   return v;
 }
 
-// ✅ Quita comillas, espacios, saltos de línea y basura típica de envs
 function sanitizeToken(v) {
-  let s = String(v ?? "");
-  s = s.trim();
-
-  // si quedó pegado con comillas
+  let s = String(v ?? "").trim();
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
     s = s.slice(1, -1).trim();
   }
-
-  // por si CapRover pegó con saltos
   s = s.replace(/\r?\n/g, "").trim();
-
   return s;
 }
 
 function mapMediaItem(x) {
   const media_type = String(x?.media_type || "").toUpperCase();
-
   const thumb =
     media_type === "VIDEO"
       ? x?.thumbnail_url || x?.media_url || null
@@ -49,7 +41,6 @@ function mapMediaItem(x) {
   };
 }
 
-// GET /api/v1/public/instagram/latest?limit=8
 async function latest(req, res) {
   try {
     const limit = Math.min(Math.max(toInt(req.query.limit, 8), 1), 24);
@@ -57,11 +48,15 @@ async function latest(req, res) {
     const rawToken = mustEnv("IG_ACCESS_TOKEN");
     const accessToken = sanitizeToken(rawToken);
 
-    if (!accessToken || accessToken.length < 20) {
-      throw new Error("IG_ACCESS_TOKEN inválido (vacío o muy corto)");
-    }
-
     const igUserId = process.env.IG_USER_ID ? String(process.env.IG_USER_ID).trim() : null;
+    const base = (process.env.IG_GRAPH_BASE_URL || "https://graph.facebook.com/v19.0").trim();
+
+    if (!accessToken || accessToken.length < 40) {
+      return res.status(500).json({
+        ok: false,
+        error: "IG_ACCESS_TOKEN inválido (vacío/corto). Pegalo SIN comillas y en 1 sola línea.",
+      });
+    }
 
     const fields = [
       "id",
@@ -73,13 +68,9 @@ async function latest(req, res) {
       "timestamp",
     ].join(",");
 
-    let url;
-    if (igUserId) {
-      const base = (process.env.IG_GRAPH_BASE_URL || "https://graph.facebook.com/v19.0").trim();
-      url = `${base}/${encodeURIComponent(igUserId)}/media`;
-    } else {
-      url = "https://graph.instagram.com/me/media";
-    }
+    const url = igUserId
+      ? `${base}/${encodeURIComponent(igUserId)}/media`
+      : `https://graph.instagram.com/me/media`;
 
     const qs = new URLSearchParams({
       fields,
@@ -93,29 +84,45 @@ async function latest(req, res) {
     });
 
     const bodyText = await resp.text();
+
     let data = null;
     try {
       data = bodyText ? JSON.parse(bodyText) : null;
     } catch {
-      data = null;
+      // Instagram devolvió algo raro (HTML, texto)
+      return res.status(500).json({
+        ok: false,
+        error: `Instagram respondió no-JSON (HTTP ${resp.status})`,
+        debug: bodyText.slice(0, 250),
+      });
     }
 
     if (!resp.ok) {
-      const message =
+      const igMsg =
         data?.error?.message ||
         data?.message ||
-        `Instagram HTTP ${resp.status}: ${bodyText.slice(0, 200)}`;
+        `Instagram HTTP ${resp.status}`;
 
-      return res.status(500).json({ ok: false, error: message });
+      return res.status(500).json({
+        ok: false,
+        error: igMsg,
+        ig: data?.error || data,
+      });
     }
 
     const raw = Array.isArray(data?.data) ? data.data : [];
     const items = raw.map(mapMediaItem).filter((it) => !!it.permalink && !!it.thumb_url);
 
-    return res.json({ ok: true, items, source: igUserId ? "graph" : "basic" });
+    return res.json({
+      ok: true,
+      source: igUserId ? "graph" : "basic",
+      items,
+    });
   } catch (err) {
-    console.error("❌ publicInstagram.latest", err);
-    return res.status(500).json({ ok: false, error: err.message || "Instagram error" });
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Instagram error",
+    });
   }
 }
 
