@@ -36,7 +36,7 @@ router.get("/images", mediaCtrl.listAll);
 
 // =======================
 // USED BY  🔥🔥🔥
-// ⚠️ TIENE QUE IR ANTES DEL :id
+// ⚠️ TIENE QUE IR ANTES DE RUTAS PARAMETRIZADAS QUE PUEDAN CHOCAR
 // =======================
 router.get("/images/used-by/:filename", mediaCtrl.usedByFilename);
 
@@ -47,8 +47,6 @@ router.post("/images", upload.single("file"), mediaCtrl.uploadOne);
 
 // =======================
 // OVERWRITE (reescribe)
-// ⚠️ también antes del :id si compartís el mismo patrón
-// (acá no choca porque :id está en DELETE)
 // =======================
 router.put("/images/:filename", upload.single("file"), mediaCtrl.overwriteByFilename);
 
