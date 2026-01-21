@@ -97,15 +97,9 @@ const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
 // ✅ CAMINO B: Links públicos (Instagram posts, etc.)
-let publicLinksRoutes;
-try {
-  publicLinksRoutes = require("./publicLinks.routes");
-} catch (e) {
-  // opcional, no romper
-  publicLinksRoutes = null;
-}
+const publicLinksRoutes = require("./publicLinks.routes");
 
-// ✅ (tu intento IG Graph) si lo seguís usando
+// (opcional) si lo seguís usando
 let publicInstagramRoutes;
 try {
   publicInstagramRoutes = require("./publicInstagram.routes");
@@ -138,12 +132,7 @@ const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
 // ✅ CAMINO B: Admin links (cambiar links desde plataforma)
-let adminShopLinksRoutes;
-try {
-  adminShopLinksRoutes = require("./admin.shopLinks.routes");
-} catch (e) {
-  adminShopLinksRoutes = null;
-}
+const adminShopLinksRoutes = require("./adminShopLinks.routes");
 
 // ✅ Admin Media (Galería multimedia)
 let adminMediaRoutes;
@@ -163,7 +152,7 @@ safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
 // ✅ CAMINO B: /api/v1/public/links?kind=INSTAGRAM_POST
-if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
+safeUse("/public", publicLinksRoutes);
 
 // ✅ (opcional) /api/v1/public/instagram/latest
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
@@ -196,8 +185,8 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
 
-// ✅ CAMINO B: /api/v1/admin/shop/links
-if (adminShopLinksRoutes) safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
+// ✅ CAMINO B: /api/v1/admin/shop-links
+safeUse("/admin/shop-links", requireAuth, attachAccessContext, adminShopLinksRoutes);
 
 // ✅ /admin/media (galería)
 safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);

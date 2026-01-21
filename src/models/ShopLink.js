@@ -6,23 +6,22 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true, autoIncrement: true },
 
-      kind: { type: DataTypes.STRING(32), allowNull: false }, // 'INSTAGRAM_POST' | 'INSTAGRAM_PROFILE' | etc
-      label: { type: DataTypes.STRING(128), allowNull: true },
-      url: { type: DataTypes.STRING(512), allowNull: false },
+      // Tipos sugeridos: INSTAGRAM_POST | INSTAGRAM_PROFILE | PROMO | OTHER
+      kind: { type: DataTypes.STRING(64), allowNull: false },
+
+      title: { type: DataTypes.STRING(255), allowNull: true },
+      subtitle: { type: DataTypes.STRING(255), allowNull: true },
+
+      url: { type: DataTypes.TEXT, allowNull: false },
 
       sort_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
       is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
-
-      created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
-      updated_at: {
-        type: DataTypes.DATE,
-        allowNull: false,
-        defaultValue: sequelize.literal("CURRENT_TIMESTAMP"),
-      },
     },
     {
       tableName: "shop_links",
-      timestamps: false, // usamos created_at/updated_at manuales
+      timestamps: true,
+      createdAt: "created_at",
+      updatedAt: "updated_at",
       underscored: true,
     }
   );
