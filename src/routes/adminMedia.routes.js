@@ -7,7 +7,7 @@
 // Endpoints:
 // GET    /images?page&limit&q&used&product_id&category_id&subcategory_id
 // POST   /images
-// PUT    /images/:id               (overwrite REAL por key/url/filename)
+// PUT    /images/:id               (overwrite REAL por key/url/filename/stem)
 // DELETE /images/:id
 // GET    /images/used-by/:filename
 
@@ -38,10 +38,10 @@ router.get("/images/used-by/:filename", mediaCtrl.usedByFilename);
 // UPLOAD
 router.post("/images", upload.single("file"), mediaCtrl.uploadOne);
 
-// ✅ OVERWRITE REAL (mismo objeto)
+// ✅ OVERWRITE REAL (regenera variantes del mismo stem)
 router.put("/images/:id", upload.single("file"), mediaCtrl.overwriteById);
 
-// DELETE
+// DELETE (borra paquete completo si no está usado)
 router.delete("/images/:id", mediaCtrl.removeById);
 
 module.exports = router;
