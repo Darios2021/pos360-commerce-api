@@ -5,10 +5,16 @@
 // - Storage: lista de archivos (S3/MinIO) => "galería"
 // - DB: product_images.url               => "usos"
 //
+// Mejora clave:
+// - Subida/overwrite: genera 3 variantes:
+//   1) WEBP (UI):          <stem>.webp
+//   2) OG Preview (JPG):   <stem>_og.jpg   (1200x630, ideal WhatsApp/Facebook/IG preview)
+//   3) Square (JPG):       <stem>_sq.jpg   (1080x1080)
+//
 // Endpoints:
 // - GET    /api/v1/admin/media/images?page&limit&q&used&product_id&category_id&subcategory_id
 // - POST   /api/v1/admin/media/images  (multipart file)
-// - PUT    /api/v1/admin/media/images/:id   (multipart overwrite: key/url/filename -> mismo key)
+// - PUT    /api/v1/admin/media/images/:id   (multipart overwrite: key/url/filename -> regenera variantes)
 // - DELETE /api/v1/admin/media/images/:id
 // - GET    /api/v1/admin/media/images/used-by/:filename
 
@@ -16,6 +22,7 @@ const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
 const { ProductImage, sequelize } = require("../models");
 const AWS = require("aws-sdk");
+const sharp = require("sharp");
 
 // ====== ENV / S3 ======
 function mustEnv(name) {
@@ -42,6 +49,7 @@ const PREFIXES = String(process.env.S3_MEDIA_PREFIXES || "products,media")
 
 const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media").trim().replace(/^\/+|\/+$/g, "");
 
+// ====== S3 CLIENT ======
 function s3Client() {
   const forcePath = envBool("S3_FORCE_PATH_STYLE", true);
   const sslEnabled = envBool("S3_SSL_ENABLED", envBool("S3_SSL", false));
@@ -92,6 +100,41 @@ function buildPublicUrl(key) {
   if (!PUBLIC_BASE) return cleanKey;
   if (BUCKET) return `${PUBLIC_BASE}/${BUCKET}/${cleanKey}`;
   return `${PUBLIC_BASE}/${cleanKey}`;
+}
+
+function isImageKey(key) {
+  return /\.(png|jpe?g|webp|gif|avif)$/i.test(String(key || ""));
+}
+
+function stripExt(name) {
+  return String(name || "").replace(/\.[a-z0-9]+$/i, "");
+}
+
+/**
+ * Dado cualquier key/filename/url (webp/jpg/_og/_sq),
+ * devuelve el "stem" base (sin sufijos) y los keys esperados.
+ *
+ * Ej:
+ *  media/abc.webp -> stemKey media/abc
+ *  media/abc_og.jpg -> stemKey media/abc
+ *  media/abc_sq.jpg -> stemKey media/abc
+ */
+function deriveStemFromKey(key) {
+  const k = String(key || "");
+  const filename = pickFilename(k);
+  const dir = k.includes("/") ? k.slice(0, k.lastIndexOf("/") + 1) : "";
+
+  let base = stripExt(filename);
+  base = base.replace(/(_og|_sq)$/i, ""); // quita sufijo si venía del OG/SQ
+
+  const stemKey = `${dir}${base}`.replace(/^\/+/, "");
+
+  return {
+    stemKey,
+    webpKey: `${stemKey}.webp`,
+    ogKey: `${stemKey}_og.jpg`,
+    sqKey: `${stemKey}_sq.jpg`,
+  };
 }
 
 // ====== DB: usos + sample (para filtrar por producto/cat/subcat) ======
@@ -168,7 +211,8 @@ async function listStorageObjects({ q }) {
           last_modified: x.LastModified ? new Date(x.LastModified).toISOString() : null,
           url: buildPublicUrl(x.Key),
         }))
-        .filter((x) => x.key && !x.key.endsWith("/"));
+        .filter((x) => x.key && !x.key.endsWith("/"))
+        .filter((x) => isImageKey(x.key));
 
       for (const it of items) {
         if (!qLower || it.filename.toLowerCase().includes(qLower)) all.push(it);
@@ -222,7 +266,6 @@ async function resolveKeyForOverwrite(rawId) {
   }
 
   // 3) fallback: búsqueda (caro pero robusto)
-  // buscamos por cada prefix listando y matcheando endsWith
   for (const pref of PREFIXES) {
     const Prefix = pref ? `${pref}/` : "";
     let token = null;
@@ -247,6 +290,157 @@ async function resolveKeyForOverwrite(rawId) {
   }
 
   return "";
+}
+
+// ====== IMAGE PIPELINE ======
+async function decodeImage(buffer) {
+  // rotate() respeta EXIF orientation -> previene previews “girados”
+  return sharp(buffer, { failOn: "none", animated: false }).rotate();
+}
+
+function ensureMinimum(meta) {
+  const w = toInt(meta?.width, 0);
+  const h = toInt(meta?.height, 0);
+
+  // WhatsApp: ancho >= 300 para preview decente.
+  // (y no aceptamos cosas súper chicas porque después falla el scraper)
+  if (w < 300 || h < 200) {
+    const err = new Error(
+      `Imagen demasiado chica (${w}x${h}). Mínimo recomendado: ancho ≥ 300px y alto ≥ 200px.`
+    );
+    err.status = 400;
+    err.friendlyMessage = err.message;
+    throw err;
+  }
+}
+
+async function buildOgJpg(buffer) {
+  // 1200x630 (1.91:1) => la más compatible para previews
+  const W = 1200;
+  const H = 630;
+
+  const img = await decodeImage(buffer);
+
+  // Fondo blur (cover)
+  const bg = await img
+    .clone()
+    .resize(W, H, { fit: "cover" })
+    .blur(28)
+    .jpeg({ quality: 72, mozjpeg: true, progressive: true })
+    .toBuffer();
+
+  // Foreground (contain) para NO recortar producto
+  const fg = await img
+    .clone()
+    .resize(W, H, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .toBuffer();
+
+  return sharp(bg)
+    .composite([{ input: fg, top: 0, left: 0 }])
+    .jpeg({ quality: 86, mozjpeg: true, progressive: true })
+    .toBuffer();
+}
+
+async function buildSquareJpg(buffer) {
+  const W = 1080;
+  const H = 1080;
+
+  const img = await decodeImage(buffer);
+
+  const bg = await img
+    .clone()
+    .resize(W, H, { fit: "cover" })
+    .blur(28)
+    .jpeg({ quality: 72, mozjpeg: true, progressive: true })
+    .toBuffer();
+
+  const fg = await img
+    .clone()
+    .resize(W, H, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .toBuffer();
+
+  return sharp(bg)
+    .composite([{ input: fg, top: 0, left: 0 }])
+    .jpeg({ quality: 86, mozjpeg: true, progressive: true })
+    .toBuffer();
+}
+
+async function buildWebp(buffer) {
+  const img = await decodeImage(buffer);
+  const meta = await img.metadata();
+
+  const w = toInt(meta.width, 0);
+  const h = toInt(meta.height, 0);
+
+  const maxSide = 1600;
+  let pipe = img.clone();
+
+  if (w > maxSide || h > maxSide) {
+    pipe = pipe.resize({ width: maxSide, height: maxSide, fit: "inside", withoutEnlargement: true });
+  }
+
+  // strip metadata implícito en sharp al re-encode
+  return pipe.webp({ quality: 82, effort: 5 }).toBuffer();
+}
+
+async function generateVariants(fileBuffer) {
+  const base = await decodeImage(fileBuffer);
+  const meta = await base.metadata();
+  ensureMinimum(meta);
+
+  // 1) OG JPG
+  const og = await buildOgJpg(fileBuffer);
+  // 2) Square JPG
+  const sq = await buildSquareJpg(fileBuffer);
+  // 3) Webp
+  const webp = await buildWebp(fileBuffer);
+
+  return { meta, og, sq, webp };
+}
+
+async function putObject({ key, body, contentType, cacheControl }) {
+  const s3 = s3Client();
+
+  await s3
+    .putObject({
+      Bucket: BUCKET,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      // immutable para assets (si reemplazás, el cache bust lo maneja el front con ?v=)
+      CacheControl: cacheControl || "public, max-age=31536000, immutable",
+      ACL: "public-read",
+    })
+    .promise();
+
+  return {
+    key,
+    filename: pickFilename(key),
+    url: buildPublicUrl(key),
+    size: Buffer.byteLength(body),
+  };
+}
+
+async function uploadVariantsToS3({ stemKey, ogKey, sqKey, webpKey, variants }) {
+  const ogUp = await putObject({
+    key: ogKey,
+    body: variants.og,
+    contentType: "image/jpeg",
+  });
+
+  const sqUp = await putObject({
+    key: sqKey,
+    body: variants.sq,
+    contentType: "image/jpeg",
+  });
+
+  const webpUp = await putObject({
+    key: webpKey,
+    body: variants.webp,
+    contentType: "image/webp",
+  });
+
+  return { stemKey, og: ogUp, sq: sqUp, webp: webpUp };
 }
 
 // ====== HANDLERS ======
@@ -327,6 +521,8 @@ exports.usedByFilename = async (req, res) => {
 
 /**
  * POST /api/v1/admin/media/images  (sube nuevo)
+ * ✅ ahora genera variantes y guarda:
+ *   <stem>.webp, <stem>_og.jpg, <stem>_sq.jpg
  */
 exports.uploadOne = async (req, res) => {
   try {
@@ -335,34 +531,43 @@ exports.uploadOne = async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ ok: false, message: "Falta archivo (field: file)" });
 
-    const ext = (file.originalname || "").split(".").pop()?.toLowerCase() || "bin";
     const stamp = Date.now();
-    const rnd = crypto.randomBytes(6).toString("hex");
-    const filename = `${stamp}-${rnd}.${ext}`;
+    const rnd = crypto.randomBytes(8).toString("hex");
 
-    const key = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${filename}` : filename;
+    // stem SIN extensión (queda más prolijo y estable)
+    const stemName = `${stamp}-${rnd}`;
+    const stemKey = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${stemName}` : stemName;
 
-    const s3 = s3Client();
-    await s3
-      .putObject({
-        Bucket: BUCKET,
-        Key: key,
-        Body: file.buffer,
-        ContentType: file.mimetype || "application/octet-stream",
-        ACL: "public-read",
-      })
-      .promise();
+    const keys = deriveStemFromKey(`${stemKey}.webp`); // para usar helper (deriva og/sq/webp)
+    const variants = await generateVariants(file.buffer);
 
-    res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
+    const uploaded = await uploadVariantsToS3({ ...keys, variants });
+
+    res.json({
+      ok: true,
+      stem_key: uploaded.stemKey,
+      webp: uploaded.webp,
+      og: uploaded.og,
+      sq: uploaded.sq,
+      // por conveniencia:
+      filename: uploaded.webp.filename,
+      url: uploaded.webp.url,
+      og_url: uploaded.og.url,
+      sq_url: uploaded.sq.url,
+      meta: { width: variants.meta.width, height: variants.meta.height, format: variants.meta.format },
+    });
   } catch (err) {
     console.error("❌ [admin media] uploadOne:", err);
-    res.status(500).json({ ok: false, message: err.message || "Error subiendo imagen" });
+    res.status(err.status || 500).json({ ok: false, message: err.friendlyMessage || err.message || "Error subiendo imagen" });
   }
 };
 
 /**
  * ✅ PUT /api/v1/admin/media/images/:id
- * Overwrite REAL del mismo objeto (no crea copias)
+ * Overwrite REAL:
+ * - resuelve key existente
+ * - deriva stem
+ * - regenera y pisa: .webp + _og.jpg + _sq.jpg
  */
 exports.overwriteById = async (req, res) => {
   try {
@@ -382,30 +587,57 @@ exports.overwriteById = async (req, res) => {
       });
     }
 
-    const filename = pickFilename(key);
+    const keys = deriveStemFromKey(key);
+    const variants = await generateVariants(file.buffer);
 
-    const s3 = s3Client();
-    await s3
-      .putObject({
-        Bucket: BUCKET,
-        Key: key, // ✅ MISMO KEY = reemplaza
-        Body: file.buffer,
-        ContentType: "image/webp", // forzamos salida ecommerce
-        ACL: "public-read",
-        CacheControl: "no-cache",
-      })
-      .promise();
+    // ⚠️ Overwrite: para asegurar que los scrapers vean el cambio,
+    // ponemos CacheControl no-cache (igual tu front usa ?v=cachebust)
+    const ogUp = await putObject({
+      key: keys.ogKey,
+      body: variants.og,
+      contentType: "image/jpeg",
+      cacheControl: "no-cache",
+    });
 
-    res.json({ ok: true, key, filename, url: buildPublicUrl(key) });
+    const sqUp = await putObject({
+      key: keys.sqKey,
+      body: variants.sq,
+      contentType: "image/jpeg",
+      cacheControl: "no-cache",
+    });
+
+    const webpUp = await putObject({
+      key: keys.webpKey,
+      body: variants.webp,
+      contentType: "image/webp",
+      cacheControl: "no-cache",
+    });
+
+    res.json({
+      ok: true,
+      replaced_from: key,
+      stem_key: keys.stemKey,
+      webp: webpUp,
+      og: ogUp,
+      sq: sqUp,
+      filename: webpUp.filename,
+      url: webpUp.url,
+      og_url: ogUp.url,
+      sq_url: sqUp.url,
+      meta: { width: variants.meta.width, height: variants.meta.height, format: variants.meta.format },
+    });
   } catch (err) {
     console.error("❌ [admin media] overwriteById:", err);
-    res.status(500).json({ ok: false, message: err.message || "Error reemplazando imagen" });
+    res.status(err.status || 500).json({ ok: false, message: err.friendlyMessage || err.message || "Error reemplazando imagen" });
   }
 };
 
 /**
  * DELETE /api/v1/admin/media/images/:id
  * Bloquea si está usada por productos (409).
+ *
+ * Nota: si borrás una variante (webp/og/sq), por defecto intentamos borrar SOLO esa.
+ * Si querés borrar “el paquete”, mandá el id del stem (o el webp) y borramos las 3.
  */
 exports.removeById = async (req, res) => {
   try {
@@ -429,15 +661,33 @@ exports.removeById = async (req, res) => {
       });
     }
 
-    let key = normalizeKeyFromRaw(raw);
-    if (!key || (!key.includes("/") && key === filename)) {
-      key = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${filename}` : filename;
+    const s3 = s3Client();
+
+    // si existe el key exacto -> lo borramos, si no intentamos paquete por stem
+    let key = await resolveKeyForOverwrite(raw);
+    if (!key) key = normalizeKeyFromRaw(raw);
+
+    if (key) {
+      // si es una variante conocida, borramos el paquete completo (webp+og+sq)
+      const keys = deriveStemFromKey(key);
+
+      // borramos best-effort (si alguno no existe, ignoramos)
+      const targets = [keys.webpKey, keys.ogKey, keys.sqKey];
+
+      for (const k of targets) {
+        try {
+          await s3.deleteObject({ Bucket: BUCKET, Key: k }).promise();
+        } catch {}
+      }
+
+      return res.json({ ok: true, deleted: true, stem_key: keys.stemKey, deleted_keys: targets });
     }
 
-    const s3 = s3Client();
-    await s3.deleteObject({ Bucket: BUCKET, Key: key }).promise();
+    // fallback: intenta por filename en upload_prefix
+    const fallbackKey = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${filename}` : filename;
+    await s3.deleteObject({ Bucket: BUCKET, Key: fallbackKey }).promise();
 
-    res.json({ ok: true, deleted: true, filename, key });
+    res.json({ ok: true, deleted: true, filename, key: fallbackKey });
   } catch (err) {
     console.error("❌ [admin media] removeById:", err);
     res.status(500).json({ ok: false, message: err.message || "Error eliminando imagen" });
