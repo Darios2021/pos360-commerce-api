@@ -3,7 +3,8 @@
 //
 // - ✅ Mantiene: module.exports = { createApp }
 // - ✅ API en /api/v1
-// - ✅ SHOP en / (sirve dist estático + inyección de <head> desde DB)
+// - ✅ FIX CLAVE: soporta reverse-proxy que “strippea” /api/v1 (monta también en "/")
+// - ✅ SHOP en / (sirve dist estático + inyección de <head> desde DB) (si ENABLE_SHOP=true y hay dist)
 // - ✅ /api health en /api (para no pisar el home)
 // - ✅ FIX: desactiva ETag global + no-store para /api
 // - ✅ /favicon.ico dinámico (branding)
@@ -253,13 +254,16 @@ function createApp() {
     throw new Error("INVALID_V1_ROUTES_EXPORT");
   }
 
+  // ✅ Montamos v1 en DOS lugares:
+  // 1) /api/v1  -> cuando llega completo (sin strip)
+  // 2) /        -> cuando el reverse proxy (CapRover path routing) strippea /api/v1
   app.use("/api/v1", v1Routes);
+  app.use("/", v1Routes);
 
   // =====================
   // 404
   // =====================
   app.use((req, res) => {
-    // si alguien pide una ruta del shop pero no está montado, igual devolvemos JSON
     res.status(404).json({
       ok: false,
       code: "NOT_FOUND",
