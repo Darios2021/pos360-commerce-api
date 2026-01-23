@@ -3,12 +3,11 @@ const fs = require("fs");
 const path = require("path");
 
 /**
- * Carga branding desde DB. Adaptalo a tu modelo real.
- * - Ideal: ShopBranding (1 fila).
- * - Debe devolver: name, favicon_url, og_image_url (o logo_url si querés), updated_at
+ * Carga branding desde DB.
+ * - Ideal: ShopBranding (1 fila)
+ * - Debe devolver: name, favicon_url, og_image_url (o logo_url), updated_at
  */
 async function fetchBranding(models) {
-  // AJUSTAR segun tu proyecto (ej: models.ShopBranding)
   const { ShopBranding } = models;
 
   let row = null;
@@ -18,7 +17,6 @@ async function fetchBranding(models) {
 
   const safe = (v) => String(v || "").trim();
 
-  // Defaults (por si no hay nada en DB)
   const name = safe(row?.name) || "San Juan Tecnología";
   const favicon = safe(row?.favicon_url) || "";
   const ogImage = safe(row?.og_image_url) || safe(row?.logo_url) || favicon || "";
@@ -49,24 +47,49 @@ function absUrl(basePublic, u) {
   return `${b}${s.startsWith("/") ? "" : "/"}${s}`;
 }
 
+function shouldInjectHtml(req) {
+  const accept = String(req.headers.accept || "");
+  const xrw = String(req.headers["x-requested-with"] || "");
+  const secFetchDest = String(req.headers["sec-fetch-dest"] || "");
+  const secFetchMode = String(req.headers["sec-fetch-mode"] || "");
+
+  // ✅ Sólo navegación HTML real
+  const wantsHtml =
+    accept.includes("text/html") ||
+    secFetchDest === "document" ||
+    secFetchMode === "navigate";
+
+  // ✅ Evitar XHR/fetch típicos
+  if (!wantsHtml) return false;
+  if (accept.includes("application/json")) return false;
+  if (xrw.toLowerCase() === "xmlhttprequest") return false;
+
+  return true;
+}
+
+function isAssetOrFilePath(p) {
+  if (p.startsWith("/api")) return true;
+  if (p.startsWith("/assets/")) return true;
+  if (p.startsWith("/favicon")) return true;
+  if (p.startsWith("/robots.txt")) return true;
+  if (p.startsWith("/sitemap")) return true;
+  if (p.startsWith("/.well-known/")) return true;
+  if (/\.[a-z0-9]{2,6}$/i.test(p) && !p.endsWith(".html")) return true;
+  return false;
+}
+
 function createShopHeadInjector({
   distDir,
   models,
-  publicBaseUrl, // ej: https://sanjuantecnologia.com
+  publicBaseUrl,
   defaultTitle = "San Juan Tecnología | Electrónica, ecommerce y sistemas POS",
   defaultDescription = "San Juan Tecnología · Electrónica, ecommerce, sistemas POS y soluciones tecnológicas para empresas.",
   cacheSeconds = 60,
 }) {
   const indexPath = path.join(distDir, "index.html");
-  let indexTemplate = "";
+  let indexTemplate = fs.readFileSync(indexPath, "utf8");
 
-  // Cache del template
-  function loadIndexTemplate() {
-    indexTemplate = fs.readFileSync(indexPath, "utf8");
-  }
-  loadIndexTemplate();
-
-  // Cache del branding
+  // Cache branding
   let cached = null;
   let cachedAt = 0;
 
@@ -79,44 +102,24 @@ function createShopHeadInjector({
     return b;
   }
 
-  // Relee template si cambió en disco (opcional: dev/hot)
-  function maybeReloadTemplate() {
-    // simple: siempre usar el que cargó al arranque (producción)
-    // si querés, podés re-leer cada X seg en dev.
-  }
-
   return async function shopHeadInjector(req, res, next) {
     try {
-      // Solo inyectamos en HTML requests de navegación (no assets)
-      const accept = String(req.headers.accept || "");
-      const isHtml = accept.includes("text/html") || accept.includes("*/*");
-      if (!isHtml) return next();
-
-      // Evitar assets /api / archivos
-      if (req.path.startsWith("/api")) return next();
-      if (req.path.includes(".") && !req.path.endsWith(".html")) return next();
-
-      maybeReloadTemplate();
+      // ✅ Sólo HTML real
+      if (!shouldInjectHtml(req)) return next();
+      if (isAssetOrFilePath(req.path)) return next();
 
       const branding = await getBrandingCached();
-
       const siteName = branding.name || "San Juan Tecnología";
 
-      // Base URLs
       const basePublic = String(publicBaseUrl || "").replace(/\/+$/, "");
-      const canonical = `${basePublic}${req.path === "/" ? "/" : req.path}`;
+      const canonical = `${basePublic}${req.originalUrl || req.path || "/"}`;
 
-      // Favicon absoluto
       const faviconAbs = absUrl(basePublic, branding.favicon_url);
-
-      // OG image absoluto (ideal 1200x630)
       const ogImageAbs = absUrl(basePublic, branding.og_image_url);
 
-      // Títulos/desc
       const title = siteName ? `${siteName} | Tienda` : defaultTitle;
       const desc = defaultDescription;
 
-      // Reemplazos
       let html = indexTemplate;
 
       const rep = (k, v) => {
@@ -136,7 +139,6 @@ function createShopHeadInjector({
 
       rep("__FAVICON__", faviconAbs || `${basePublic}/favicon.png`);
 
-      // Headers: que no quede pegado por caches intermedios
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
       res.setHeader("Pragma", "no-cache");
