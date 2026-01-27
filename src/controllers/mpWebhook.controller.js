@@ -1,394 +1,329 @@
 // src/controllers/mpWebhook.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (Mercado Pago Webhook ROBUSTO + LOGS + DB sync)
+// ✅ COPY-PASTE FINAL COMPLETO (SIN AXIOS) — Webhook MercadoPago robusto
 //
-// Mount sugerido (routes):
-// POST /api/v1/ecom/mp/webhook
-// GET  /api/v1/ecom/mp/webhook   (health/ping)
+// Objetivo:
+// - Recibir notificaciones de MP (payment / merchant_order)
+// - Consultar el detalle a MP vía API (fetch nativo Node 20)
+// - Actualizar ecom_payments + ecom_orders según status
 //
-// Qué hace:
-// - Recibe notificaciones de MP (payment / merchant_order / etc.)
-// - Si puede extraer payment_id => consulta MP API (server-side) y sincroniza:
-//   - ecom_payments (provider=mercadopago): status/external_status/status_detail/external_payload/payer_email/external_id
-//   - ecom_orders.payment_status (unpaid|pending|paid|failed)
-// - Idempotente y con logs por request_id
-//
-// Requiere ENV:
+// ENV requeridas:
 // - MERCADOPAGO_ACCESS_TOKEN
 //
-// Opcional (seguridad):
-// - MP_WEBHOOK_SECRET  (si está seteado, valida firma X-Signature + X-Request-Id)
-//   Si no está, procesa igual (pero deja log WARNING).
+// Opcionales:
+// - MP_WEBHOOK_LOG_PAYLOAD=1  (loggea body completo)
+// - MP_WEBHOOK_STRICT=1       (si falta topic/id => 400)
 //
-// Notas:
-// - MP suele mandar:
-//   - query: ?type=payment&data.id=123
-//   - o body: { type:"payment", data:{ id:"123" } }
-// - Este controlador soporta varios formatos.
+// Tablas esperadas (mínimo):
+// - ecom_payments: id, provider, status, external_id, external_reference, external_status, status_detail,
+//                 external_payload (JSON), payer_email, mp_preference_id, updated_at
+// - ecom_orders: id, payment_status, status, updated_at
+//
+// NOTA:
+// - Este controller no depende de rutas específicas. Lo podés montar en:
+//   POST /api/v1/ecom/webhooks/mercadopago
 
 const crypto = require("crypto");
-const axios = require("axios");
 const { sequelize } = require("../models");
 
-// =====================
-// Helpers
-// =====================
+// ---------------------
+// helpers
+// ---------------------
 function reqId() {
   return crypto.randomBytes(8).toString("hex");
 }
-
-function log(rid, ...args) {
-  console.log(`[MP WEBHOOK] [${rid}]`, ...args);
-}
-
 function toStr(v) {
   return String(v ?? "").trim();
 }
-
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
-
-function safeJson(v) {
-  try {
-    return v && typeof v === "object" ? v : JSON.parse(String(v));
-  } catch {
-    return null;
-  }
+function log(rid, ...args) {
+  console.log(`[MP WEBHOOK] [${rid}]`, ...args);
 }
 
-// Extrae payment_id de query/body
-function extractPaymentId(req) {
-  // query style
-  const qDataId = req?.query?.["data.id"] || req?.query?.["data_id"] || req?.query?.data_id;
-  const qId = req?.query?.id;
-
-  // body style
-  const b = req?.body || {};
-  const bDataId = b?.data?.id || b?.data_id || b?.dataId;
-  const bId = b?.id;
-
-  const id = qDataId || bDataId || qId || bId;
-  const pid = toInt(id, 0);
-
-  return pid > 0 ? pid : null;
+function mpToken() {
+  return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN);
 }
 
-function extractType(req) {
-  const qType = req?.query?.type || req?.query?.topic;
-  const bType = req?.body?.type || req?.body?.topic;
-  return String(qType || bType || "").trim().toLowerCase();
-}
-
-// =====================
-// (Opcional) Firma Webhook
-// =====================
-//
-// MP envía headers típicos:
-// - x-signature: "ts=...,v1=..."
-// - x-request-id: "...uuid..."
-// Y se valida con tu secret (MP_WEBHOOK_SECRET)
-//
-// Como MP puede cambiar formatos, esto es "best-effort":
-// - Si MP_WEBHOOK_SECRET NO está => no bloquea (solo log warning).
-// - Si está => valida y si falla => 401.
-//
-function parseXSignature(xSignature) {
-  const out = { ts: "", v1: "" };
-  const s = String(xSignature || "").trim();
-  // formato: ts=1700000000,v1=abcdef...
-  for (const part of s.split(",")) {
-    const [k, v] = part.split("=").map((x) => String(x || "").trim());
-    if (k === "ts") out.ts = v || "";
-    if (k === "v1") out.v1 = v || "";
-  }
-  return out;
-}
-
-function timingSafeEq(a, b) {
-  try {
-    const ba = Buffer.from(String(a || ""), "utf8");
-    const bb = Buffer.from(String(b || ""), "utf8");
-    if (ba.length !== bb.length) return false;
-    return crypto.timingSafeEqual(ba, bb);
-  } catch {
-    return false;
-  }
-}
-
-// Construcción típica de firma (según docs de MP para webhooks):
-// HMAC-SHA256(secret, `${ts}.${requestId}.${rawBody}`) o variantes.
-// Como en Node/Express normalmente no tenemos rawBody por defecto,
-// hacemos una validación "segura pero no frágil":
-// - Firmamos `${ts}.${requestId}.${JSON.stringify(body)}`
-// Si querés 100% exacto, tenés que capturar rawBody en middleware.
-// Este esquema igual te sirve para detectar la mayoría de falsificaciones
-// cuando vos controlás el pipeline.
-function verifyWebhookSignature(req, rid) {
-  const secret = toStr(process.env.MP_WEBHOOK_SECRET);
-  if (!secret) {
-    log(rid, "⚠️ MP_WEBHOOK_SECRET no seteado: webhook sin verificación de firma.");
-    return { ok: true, skipped: true };
-  }
-
-  const xSig = req?.headers?.["x-signature"] || req?.headers?.["X-Signature"];
-  const xReqId = req?.headers?.["x-request-id"] || req?.headers?.["X-Request-Id"];
-
-  const { ts, v1 } = parseXSignature(xSig);
-  const requestId = toStr(xReqId);
-
-  if (!ts || !v1 || !requestId) {
-    return { ok: false, reason: "MISSING_SIGNATURE_HEADERS" };
-  }
-
-  const bodyStr = JSON.stringify(req?.body || {});
-  const payload = `${ts}.${requestId}.${bodyStr}`;
-  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-
-  const ok = timingSafeEq(expected, v1);
-  return ok ? { ok: true } : { ok: false, reason: "INVALID_SIGNATURE" };
-}
-
-// =====================
-// MP API (server-side)
-// =====================
-async function mpGetPayment(paymentId) {
-  const token = toStr(process.env.MERCADOPAGO_ACCESS_TOKEN);
+async function mpGetJson(url, rid) {
+  const token = mpToken();
   if (!token) {
     const err = new Error("Falta MERCADOPAGO_ACCESS_TOKEN");
-    err.statusCode = 400;
     err.code = "MP_TOKEN_MISSING";
     throw err;
   }
 
-  const url = `https://api.mercadopago.com/v1/payments/${paymentId}`;
-  const { data } = await axios.get(url, {
+  const r = await fetch(url, {
+    method: "GET",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      "User-Agent": "pos360-commerce-api/1.0",
+      "X-Request-Id": rid,
     },
-    timeout: 20000,
   });
-  return data;
-}
 
-function mapMpToInternal(mpStatus, mpStatusDetail) {
-  const s = String(mpStatus || "").toLowerCase();
-  const d = String(mpStatusDetail || "").toLowerCase();
-
-  // internal: created|pending|paid|failed
-  // order.payment_status: unpaid|pending|paid|failed
-  if (s === "approved") return { payStatus: "paid", orderPayStatus: "paid", detail: d || "approved" };
-
-  if (s === "in_process" || s === "pending") return { payStatus: "pending", orderPayStatus: "pending", detail: d || s };
-
-  if (s === "authorized") return { payStatus: "pending", orderPayStatus: "pending", detail: d || "authorized" };
-
-  if (s === "rejected" || s === "cancelled" || s === "refunded" || s === "charged_back") {
-    return { payStatus: "failed", orderPayStatus: "failed", detail: d || s };
+  const text = await r.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
   }
 
-  // fallback conservador
-  return { payStatus: "pending", orderPayStatus: "pending", detail: d || s || "unknown" };
+  if (!r.ok) {
+    const err = new Error(`MP API error ${r.status}`);
+    err.statusCode = r.status;
+    err.payload = json || text;
+    err.code = "MP_API_ERROR";
+    throw err;
+  }
+
+  return json;
 }
 
-async function findPaymentRow({ mpPaymentId, mpExternalReference }, t) {
-  // 1) Por external_id (mp payment id)
-  if (mpPaymentId) {
-    const [r1] = await sequelize.query(
+// Deriva paymentId/topic/id desde distintas formas que manda MP
+function parseMpNotification(req) {
+  // MP a veces manda por query:
+  // ?type=payment&data.id=123
+  // ?topic=payment&id=123
+  // o body json con { type, data: { id } }
+  const q = req.query || {};
+  const b = req.body || {};
+
+  const type =
+    toStr(q.type) ||
+    toStr(q.topic) ||
+    toStr(b.type) ||
+    toStr(b.topic) ||
+    toStr(b.action); // a veces viene action
+
+  const dataId =
+    toStr(q["data.id"]) ||
+    toStr(q["data_id"]) ||
+    toStr(q["id"]) ||
+    toStr(b?.data?.id) ||
+    toStr(b?.data_id) ||
+    toStr(b?.id);
+
+  // Normalizamos topic/type
+  const t = toStr(type).toLowerCase();
+  let topic = "";
+  if (t.includes("payment")) topic = "payment";
+  else if (t.includes("merchant_order") || t.includes("merchantorder")) topic = "merchant_order";
+  else topic = t || "";
+
+  return { topic, id: dataId };
+}
+
+function mapPaymentStatus(mpStatus) {
+  const s = toStr(mpStatus).toLowerCase();
+  // MP statuses comunes: approved, pending, in_process, rejected, cancelled, refunded, charged_back
+  if (s === "approved") return "paid";
+  if (s === "pending" || s === "in_process") return "pending";
+  if (s === "refunded" || s === "charged_back") return "refunded";
+  if (s === "cancelled") return "cancelled";
+  if (s === "rejected") return "rejected";
+  return "pending";
+}
+
+async function findPaymentByMpExternal({ mp_payment_id, external_reference, t }) {
+  // 1) match por external_id
+  if (mp_payment_id) {
+    const [rows] = await sequelize.query(
       `
-      SELECT id, order_id
+      SELECT id, order_id, provider
       FROM ecom_payments
-      WHERE provider='mercadopago'
-        AND (external_id = :mp_payment_id OR external_id = :mp_payment_id_str)
+      WHERE (external_id = :external_id OR mp_payment_id = :external_id)
+      LIMIT 1
+      `,
+      { replacements: { external_id: String(mp_payment_id) }, transaction: t }
+    );
+    if (rows?.length) return rows[0];
+  }
+
+  // 2) match por external_reference (public_code)
+  if (external_reference) {
+    const [rows] = await sequelize.query(
+      `
+      SELECT id, order_id, provider
+      FROM ecom_payments
+      WHERE external_reference = :external_reference
       ORDER BY id DESC
       LIMIT 1
       `,
-      {
-        replacements: {
-          mp_payment_id: Number(mpPaymentId),
-          mp_payment_id_str: String(mpPaymentId),
-        },
-        transaction: t,
-      }
+      { replacements: { external_reference: String(external_reference) }, transaction: t }
     );
-    if (r1 && r1.length) return { payment_id: Number(r1[0].id), order_id: Number(r1[0].order_id) };
+    if (rows?.length) return rows[0];
   }
 
-  // 2) Por external_reference (public_code) y provider mercadopago
-  if (mpExternalReference) {
-    const [r2] = await sequelize.query(
-      `
-      SELECT id, order_id
-      FROM ecom_payments
-      WHERE provider='mercadopago'
-        AND external_reference = :ext
-      ORDER BY id DESC
-      LIMIT 1
-      `,
-      { replacements: { ext: String(mpExternalReference) }, transaction: t }
-    );
-    if (r2 && r2.length) return { payment_id: Number(r2[0].id), order_id: Number(r2[0].order_id) };
-  }
-
-  return { payment_id: null, order_id: null };
+  return null;
 }
 
-async function updatePaymentFromMp({ payment_id, mp, internalPayStatus, statusDetail, t }) {
-  if (!payment_id) return;
+async function updatePaymentAndOrder({ paymentRow, mp, mappedStatus, rid, t }) {
+  const payment_id = Number(paymentRow.id);
+  const order_id = Number(paymentRow.order_id);
 
-  const payerEmail = toStr(mp?.payer?.email || mp?.payer_email || "");
-
-  // Guardamos payload completo en external_payload
-  const mpPayloadStr = JSON.stringify(mp || {});
+  // Datos relevantes
+  const mp_payment_id = mp?.id ? String(mp.id) : null;
+  const external_reference = mp?.external_reference ? String(mp.external_reference) : null;
+  const mp_status = toStr(mp?.status);
+  const mp_status_detail = toStr(mp?.status_detail);
+  const payer_email = toStr(mp?.payer?.email || mp?.payer_email || "");
 
   await sequelize.query(
     `
     UPDATE ecom_payments
     SET
+      provider = 'mercadopago',
       status = :status,
-      external_id = :external_id,
+      external_id = COALESCE(:external_id, external_id),
+      external_reference = COALESCE(:external_reference, external_reference),
       external_status = :external_status,
       status_detail = :status_detail,
       payer_email = COALESCE(NULLIF(:payer_email,''), payer_email),
-      external_reference = COALESCE(NULLIF(:external_reference,''), external_reference),
-      external_payload = JSON_SET(COALESCE(external_payload, JSON_OBJECT()), '$.mp_payment', CAST(:mp_payload AS JSON)),
+      external_payload = JSON_SET(COALESCE(external_payload, JSON_OBJECT()),
+                                 '$.mp_payment', CAST(:mp_payload AS JSON)),
       updated_at = CURRENT_TIMESTAMP
     WHERE id = :id
     `,
     {
       replacements: {
         id: payment_id,
-        status: internalPayStatus,
-        external_id: mp?.id ? String(mp.id) : null,
-        external_status: toStr(mp?.status || "") || null,
-        status_detail: toStr(statusDetail || "") || null,
-        payer_email: payerEmail ? payerEmail.toLowerCase() : "",
-        external_reference: toStr(mp?.external_reference || ""),
-        mp_payload: mpPayloadStr,
+        status: mappedStatus,
+        external_id: mp_payment_id,
+        external_reference,
+        external_status: mp_status || null,
+        status_detail: mp_status_detail || null,
+        payer_email,
+        mp_payload: JSON.stringify(mp || {}),
       },
       transaction: t,
     }
   );
-}
 
-async function updateOrderPaymentStatus({ order_id, orderPayStatus, t }) {
-  if (!order_id) return;
+  // Orden: payment_status coherente
+  let orderPaymentStatus = mappedStatus;
+  if (mappedStatus === "paid") orderPaymentStatus = "paid";
+  else if (mappedStatus === "pending") orderPaymentStatus = "pending";
+  else orderPaymentStatus = "unpaid";
 
   await sequelize.query(
     `
     UPDATE ecom_orders
-    SET payment_status = :payment_status,
-        updated_at = CURRENT_TIMESTAMP
+    SET
+      payment_status = :payment_status,
+      updated_at = CURRENT_TIMESTAMP
     WHERE id = :id
     `,
     {
-      replacements: { id: order_id, payment_status: String(orderPayStatus || "pending").toLowerCase() },
+      replacements: { id: order_id, payment_status: orderPaymentStatus },
       transaction: t,
     }
   );
+
+  log(rid, "updated", { payment_id, order_id, mp_payment_id, mp_status, mappedStatus });
 }
 
-// =====================
-// Controllers
-// =====================
-async function mpWebhook(req, res) {
-  const request_id = reqId();
+// ---------------------
+// Controller
+// ---------------------
+async function mercadopagoWebhook(req, res) {
+  const rid = reqId();
 
-  // 1) Firma (opcional)
-  const sig = verifyWebhookSignature(req, request_id);
-  if (!sig.ok) {
-    log(request_id, "❌ signature invalid:", sig.reason);
-    return res.status(401).json({ ok: false, code: sig.reason || "INVALID_SIGNATURE", request_id });
-  }
+  const strict = toStr(process.env.MP_WEBHOOK_STRICT) === "1";
+  const logPayload = toStr(process.env.MP_WEBHOOK_LOG_PAYLOAD) === "1";
 
-  const type = extractType(req);
-  const paymentId = extractPaymentId(req);
+  const { topic, id } = parseMpNotification(req);
 
-  log(request_id, "IN", {
-    type,
-    paymentId,
-    query: req?.query || {},
-    body_keys: Object.keys(req?.body || {}),
+  log(rid, "incoming", {
+    method: req.method,
+    path: req.originalUrl,
+    topic,
+    id,
+    hasBody: !!req.body,
   });
 
-  // Respuesta rápida si no hay payment id (no rompemos)
-  if (!paymentId) {
-    log(request_id, "⚠️ No paymentId found. ACK.");
-    return res.json({ ok: true, request_id, ack: true, note: "no payment id" });
+  if (logPayload) {
+    log(rid, "payload.body=", req.body || null);
+    log(rid, "payload.query=", req.query || null);
+  }
+
+  if (strict && (!topic || !id)) {
+    return res.status(400).json({
+      ok: false,
+      code: "INVALID_WEBHOOK",
+      message: "Falta topic/type o id/data.id",
+      rid,
+    });
+  }
+
+  // Si no puedo determinar -> ACK 200 igual (MP reintenta, pero no quiero tumbar)
+  if (!topic || !id) {
+    return res.status(200).json({ ok: true, rid, ignored: true });
   }
 
   try {
-    // 2) Consultar pago real en MP
-    let mp;
-    try {
-      mp = await mpGetPayment(paymentId);
-    } catch (mpErr) {
-      const status = Number(mpErr?.response?.status || mpErr?.statusCode || 502);
-      const payload = mpErr?.response?.data || mpErr?.payload || mpErr?.message || String(mpErr);
+    // 1) Consultar a MP
+    let mpData = null;
 
-      log(request_id, "❌ MP API error", { status, payload });
-
-      // Igual devolvemos 200 para que MP no reintente en loop infinito si tu token está mal,
-      // pero lo dejamos auditado en logs.
-      return res.status(200).json({ ok: true, request_id, ack: true, mp_error: { status, payload } });
+    if (topic === "payment") {
+      mpData = await mpGetJson(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(id)}`, rid);
+    } else if (topic === "merchant_order") {
+      // merchant order: traemos la orden y, si tiene payments, tomamos el último
+      const mo = await mpGetJson(
+        `https://api.mercadopago.com/merchant_orders/${encodeURIComponent(id)}`,
+        rid
+      );
+      const lastPay = Array.isArray(mo?.payments) && mo.payments.length ? mo.payments[mo.payments.length - 1] : null;
+      if (lastPay?.id) {
+        mpData = await mpGetJson(
+          `https://api.mercadopago.com/v1/payments/${encodeURIComponent(lastPay.id)}`,
+          rid
+        );
+      } else {
+        mpData = mo; // fallback
+      }
+    } else {
+      // topic desconocido => ACK
+      return res.status(200).json({ ok: true, rid, ignored: true, topic });
     }
 
-    const mpStatus = toStr(mp?.status);
-    const mpStatusDetail = toStr(mp?.status_detail);
-    const mpExternalReference = toStr(mp?.external_reference);
+    // 2) Derivar ids para matchear ecom_payments
+    const mp_payment_id = mpData?.id ? String(mpData.id) : null;
+    const external_reference = mpData?.external_reference ? String(mpData.external_reference) : null;
 
-    const { payStatus, orderPayStatus, detail } = mapMpToInternal(mpStatus, mpStatusDetail);
+    const mappedStatus = mapPaymentStatus(mpData?.status);
 
-    log(request_id, "MP payment fetched", {
-      mp_id: mp?.id,
-      mp_status: mpStatus,
-      mp_detail: mpStatusDetail,
-      ext_ref: mpExternalReference,
-      mapped: { payStatus, orderPayStatus, detail },
-    });
+    // 3) Update DB
+    const out = await sequelize.transaction(async (t) => {
+      const payRow = await findPaymentByMpExternal({ mp_payment_id, external_reference, t });
 
-    // 3) Sync DB
-    const synced = await sequelize.transaction(async (t) => {
-      const { payment_id, order_id } = await findPaymentRow(
-        { mpPaymentId: paymentId, mpExternalReference: mpExternalReference },
-        t
-      );
-
-      if (!payment_id || !order_id) {
-        // No encontramos registro todavía: igual guardamos ack y listo.
-        // Puede pasar si MP notifica antes de que guardes payment_id (raro) o si cambiaste external_reference.
-        log(request_id, "⚠️ No DB row found for MP payment", { paymentId, mpExternalReference });
-        return { found: false, payment_id: payment_id || null, order_id: order_id || null };
+      if (!payRow?.id) {
+        log(rid, "payment not found", { mp_payment_id, external_reference });
+        // ACK 200 para que MP no te haga retry infinito
+        return { ok: true, rid, not_found: true, mp_payment_id, external_reference };
       }
 
-      await updatePaymentFromMp({
-        payment_id,
-        mp,
-        internalPayStatus: payStatus,
-        statusDetail: detail,
-        t,
-      });
+      await updatePaymentAndOrder({ paymentRow: payRow, mp: mpData, mappedStatus, rid, t });
 
-      await updateOrderPaymentStatus({ order_id, orderPayStatus, t });
-
-      return { found: true, payment_id, order_id, payStatus, orderPayStatus };
+      return { ok: true, rid, updated: true, mappedStatus, payment_id: payRow.id, order_id: payRow.order_id };
     });
 
-    log(request_id, "OK synced", synced);
-    return res.json({ ok: true, request_id, synced });
+    return res.status(200).json(out);
   } catch (e) {
-    log(request_id, "FATAL", e?.message || String(e));
-    // ACK 200 para no reintentos eternos, pero lo dejamos logueado
-    return res.status(200).json({ ok: true, request_id, ack: true, error: e?.message || String(e) });
+    const status = Number(e?.statusCode || 200); // Importante: a MP conviene responder 200 para que no te “castigue”
+    log(rid, "ERROR", { message: e?.message || String(e), statusCode: e?.statusCode, payload: e?.payload || null });
+
+    return res.status(status).json({
+      ok: false,
+      rid,
+      code: e?.code || "WEBHOOK_ERROR",
+      message: "Error procesando webhook MercadoPago",
+      detail: e?.payload || e?.message || String(e),
+    });
   }
 }
 
-async function mpWebhookHealth(req, res) {
-  return res.json({ ok: true, service: "mp-webhook", ts: new Date().toISOString() });
-}
-
-module.exports = {
-  mpWebhook,
-  mpWebhookHealth,
-};
+module.exports = { mercadopagoWebhook };
