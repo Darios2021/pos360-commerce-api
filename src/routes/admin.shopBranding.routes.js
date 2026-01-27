@@ -1,13 +1,13 @@
 // src/routes/admin.shopBranding.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
-// Montado en v1.routes como: safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes)
-// => rutas finales:
+// Mount en v1.routes: safeUse("/admin/shop", requireAuth, adminShopBrandingRoutes)
 //
+// Rutas finales:
 // GET    /api/v1/admin/shop/branding
 // PUT    /api/v1/admin/shop/branding
 // POST   /api/v1/admin/shop/branding/logo
 // POST   /api/v1/admin/shop/branding/favicon
-// POST   /api/v1/admin/shop/branding/og-image   ✅ NUEVO
+// POST   /api/v1/admin/shop/branding/og-image
 
 const router = require("express").Router();
 const multer = require("multer");
@@ -17,7 +17,7 @@ const ctrl = require("../controllers/admin.shopBranding.controller");
 // ✅ Multer in-memory
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+  limits: { fileSize: 12 * 1024 * 1024 }, // 12MB (OG puede ser pesada)
 });
 
 function mustFn(fn, name) {
@@ -27,18 +27,17 @@ function mustFn(fn, name) {
   }
 }
 
-// Validación dura (evita crash silencioso)
 mustFn(ctrl.getBranding, "getBranding");
 mustFn(ctrl.updateBranding, "updateBranding");
 mustFn(ctrl.uploadLogo, "uploadLogo");
 mustFn(ctrl.uploadFavicon, "uploadFavicon");
-mustFn(ctrl.uploadOgImage, "uploadOgImage"); // ✅ NUEVO
+mustFn(ctrl.uploadOgImage, "uploadOgImage");
 
 router.get("/branding", ctrl.getBranding);
 router.put("/branding", ctrl.updateBranding);
 
 router.post("/branding/logo", upload.single("file"), ctrl.uploadLogo);
 router.post("/branding/favicon", upload.single("file"), ctrl.uploadFavicon);
-router.post("/branding/og-image", upload.single("file"), ctrl.uploadOgImage); // ✅ NUEVO
+router.post("/branding/og-image", upload.single("file"), ctrl.uploadOgImage);
 
 module.exports = router;

@@ -1,14 +1,17 @@
 // src/services/admin.shopBranding.service.js
 // ✅ COPY-PASTE FINAL DEFINITIVO (S3/MinIO + favicon 64x64 + OG 1200x630)
-// - kind: "logo"      => sube tal cual (cache largo)
-// - kind: "favicon"   => PNG 64x64, key estable: pos360/shop/favicon.png
-// - kind: "og-image"  => JPG 1200x630, key estable: pos360/shop/og-default.jpg
+// - kind: "logo"      => sube tal cual (cache largo)  key: shop/<ts>-logo.ext
+// - kind: "favicon"   => PNG 64x64, key estable:      shop/favicon.png
+// - kind: "og-image"  => JPG 1200x630, key estable:   shop/og-default.jpg
 //
-// ⚠️ IMPORTANTE (TU CASO):
-// Tu storage público ya sirve como: https://storage-files.cingulado.org/<key>
-// (no incluye /<bucket>/ en la URL), porque tus URLs actuales son:
-//   https://storage-files.cingulado.org/pos360/shop/....png
-// Por eso publicUrlFromKey() NO concatena bucket.
+// ✅ TU CASO (CONFIRMADO):
+// Tu URL pública funciona como: https://storage-files.cingulado.org/<bucket>/<key>
+// Ejemplo real: https://storage-files.cingulado.org/pos360/shop/....png
+// => Bucket = pos360, Key = shop/....png
+//
+// Por eso:
+// - Key NUNCA debe incluir "pos360/"
+// - publicUrlFromKey() SIEMPRE concatena bucket + key
 
 const sharp = require("sharp");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
@@ -18,8 +21,7 @@ function publicUrlFromKey(key) {
   const pub = String(process.env.S3_PUBLIC_BASE_URL || "").replace(/\/+$/, "");
   const cleanKey = String(key || "").replace(/^\/+/, "");
   if (!pub) return `/${cleanKey}`;
-  // ✅ tu storage ya expone directo por key
-  return `${pub}/${cleanKey}`;
+  return `${pub}/${s3Config.bucket}/${cleanKey}`;
 }
 
 function extFromMime(mime) {
@@ -57,6 +59,7 @@ async function buildFavicon64Png(buffer) {
     .toBuffer();
 }
 
+// OG 1200x630: usa la imagen como "logo" centrado con fondo
 async function buildOg1200x630Jpg(buffer) {
   const W = 1200;
   const H = 630;
@@ -87,7 +90,6 @@ async function uploadShopAsset({ file, kind }) {
   const safeKind = String(kind || "").trim();
   const ts = Date.now();
 
-  // defaults
   let key;
   let outBuf = file.buffer;
   let contentType = file.mimetype || "application/octet-stream";
@@ -96,19 +98,19 @@ async function uploadShopAsset({ file, kind }) {
   if (safeKind === "favicon") {
     outBuf = await buildFavicon64Png(file.buffer);
     contentType = "image/png";
-    cacheControl = "public, max-age=86400";
-    key = "pos360/shop/favicon.png"; // ✅ estable
+    cacheControl = "public, max-age=3600"; // cambia cuando lo reemplazás
+    key = "shop/favicon.png"; // ✅ estable (SIN bucket)
   } else if (safeKind === "og-image") {
     outBuf = await buildOg1200x630Jpg(file.buffer);
     contentType = "image/jpeg";
     cacheControl = "public, max-age=3600";
-    key = "pos360/shop/og-default.jpg"; // ✅ estable
+    key = "shop/og-default.jpg"; // ✅ estable (SIN bucket)
   } else if (safeKind === "logo") {
     const ext = extFromMime(file.mimetype);
-    key = `pos360/shop/${ts}-logo.${ext}`;
+    key = `shop/${ts}-logo.${ext}`; // versionado
   } else {
     const ext = extFromMime(file.mimetype);
-    key = `pos360/shop/${ts}-asset.${ext}`;
+    key = `shop/${ts}-asset.${ext}`;
   }
 
   const up = await putObject({ key, buffer: outBuf, contentType, cacheControl });
