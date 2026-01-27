@@ -1,83 +1,99 @@
 // src/services/admin.shopBranding.service.js
-// ✅ COPY-PASTE FINAL COMPLETO
-// - CommonJS (NO import)
-// - Sube a MinIO/S3 usando @aws-sdk/client-s3
-// - Devuelve URL pública usando S3_PUBLIC_BASE_URL (como products)
+// ✅ COPY-PASTE FINAL (con OG 1200x630)
+// - kind: "logo"      => se sube como imagen normal (opcional: podés resize)
+// - kind: "favicon"   => resize a 64x64 (png)
+// - kind: "og-image"  => genera 1200x630 (jpg) y guarda con nombre estable
 
-const path = require("path");
-const crypto = require("crypto");
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const sharp = require("sharp");
 
-const { s3, s3Config } = require("../config/s3");
+// ⚠️ COMPLETAR: adaptá esto a tu uploader real (MinIO/S3)
+async function putObject({ key, buffer, contentType }) {
+  // Ejemplo esperado:
+  // return { url: "https://storage-files.cingulado.org/" + key };
 
-function cleanSlash(s) {
-  return String(s || "").replace(/\/+$/, "");
+  // 🔴 Reemplazá por tu implementación real:
+  throw new Error("putObject() no implementado. Pegame tu uploader actual y lo adapto 1:1.");
 }
 
-function getPublicBase() {
-  // Preferimos base pública explícita (tu caso: https://storage-files.cingulado.org)
-  const pub = cleanSlash(process.env.S3_PUBLIC_BASE_URL || "");
-  if (pub) return pub;
-
-  // fallback: endpoint (puede no servir si es interno)
-  return cleanSlash(s3Config.endpoint || "");
-}
-
-function guessExt(mime, originalName) {
-  const name = String(originalName || "").toLowerCase();
-  const byName = path.extname(name);
-  if (byName && byName.length <= 6) return byName;
-
+function extFromMime(mime) {
   const m = String(mime || "").toLowerCase();
-  if (m.includes("png")) return ".png";
-  if (m.includes("jpeg") || m.includes("jpg")) return ".jpg";
-  if (m.includes("webp")) return ".webp";
-  if (m.includes("svg")) return ".svg";
-  if (m.includes("x-icon") || m.includes("ico")) return ".ico";
-  return ".png";
+  if (m.includes("png")) return "png";
+  if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
+  if (m.includes("webp")) return "webp";
+  if (m.includes("svg")) return "svg";
+  return "bin";
 }
 
-function buildKey(prefix, ext) {
-  const ts = Date.now();
-  const rnd = crypto.randomBytes(16).toString("hex");
-  const p = String(prefix || "shop").replace(/^\/+|\/+$/g, "");
-  return `${p}/${ts}-${rnd}${ext}`;
+async function buildFavicon64(buffer) {
+  // 64x64 PNG
+  return sharp(buffer)
+    .resize(64, 64, { fit: "cover" })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
 }
 
-async function uploadBufferToS3({ buffer, contentType, key }) {
-  const Bucket = s3Config.bucket;
-  if (!Bucket) throw new Error("S3_BUCKET missing");
+async function buildOg1200x630(buffer) {
+  // 1200x630 JPG con fondo y logo centrado
+  const W = 1200, H = 630;
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType || "application/octet-stream",
-      ACL: "public-read", // ⚠️ si tu MinIO no permite ACL, avisame y lo dejamos sin ACL + policy pública.
-    })
-  );
+  const logo = await sharp(buffer)
+    .resize(520, 520, { fit: "inside", withoutEnlargement: true })
+    .png()
+    .toBuffer();
 
-  const base = getPublicBase();
-  // Resultado como tus productos: https://storage-files.cingulado.org/pos360/<key>
-  return `${base}/${Bucket}/${key}`;
+  const bg = sharp({
+    create: { width: W, height: H, channels: 3, background: "#0f1115" },
+  });
+
+  return bg
+    .composite([{ input: logo, gravity: "center" }])
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toBuffer();
 }
 
 async function uploadShopAsset({ file, kind }) {
-  if (!file || !file.buffer) throw new Error("FILE_REQUIRED");
+  if (!file || !file.buffer) {
+    throw new Error("FILE_REQUIRED");
+  }
 
-  const ext = guessExt(file.mimetype, file.originalname);
-  const key = buildKey("shop", ext);
+  const ts = Date.now();
+  const safeKind = String(kind || "").trim();
 
-  const url = await uploadBufferToS3({
-    buffer: file.buffer,
-    contentType: file.mimetype,
-    key,
-  });
+  // defaults
+  let key = "";
+  let outBuf = file.buffer;
+  let contentType = file.mimetype || "application/octet-stream";
 
-  return { url, key, kind };
+  if (safeKind === "favicon") {
+    outBuf = await buildFavicon64(file.buffer);
+    contentType = "image/png";
+    // nombre estable opcional:
+    // key = "pos360/shop/favicon.png";
+    // o timestamp como ya venías usando:
+    key = `pos360/shop/${ts}-favicon.png`;
+  } else if (safeKind === "og-image") {
+    outBuf = await buildOg1200x630(file.buffer);
+    contentType = "image/jpeg";
+    // ✅ NOMBRE ESTABLE (esto es lo que querías)
+    key = `pos360/shop/og-default.jpg`;
+  } else if (safeKind === "logo") {
+    // logo: lo subimos tal cual (o si querés, resize a un máximo)
+    // outBuf = await sharp(file.buffer).resize(512, 512, { fit: "inside" }).png().toBuffer();
+    // contentType = "image/png";
+    const ext = extFromMime(file.mimetype);
+    key = `pos360/shop/${ts}-logo.${ext}`;
+  } else {
+    const ext = extFromMime(file.mimetype);
+    key = `pos360/shop/${ts}-asset.${ext}`;
+  }
+
+  const up = await putObject({ key, buffer: outBuf, contentType });
+
+  if (!up || !up.url) {
+    throw new Error("UPLOAD_FAILED");
+  }
+
+  return { url: up.url, key, contentType };
 }
 
-module.exports = {
-  uploadShopAsset,
-};
+module.exports = { uploadShopAsset };
