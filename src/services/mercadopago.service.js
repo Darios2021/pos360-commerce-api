@@ -1,10 +1,8 @@
 // src/services/mercadopago.service.js
-// ✅ COPY-PASTE FINAL COMPLETO (SIN AXIOS) - Node 18+ usa fetch nativo
-//
-// - Evita crash por "Cannot find module 'axios'"
-// - Maneja errores MP con payload claro
-// - Soporta modo REDIRECT (init_point / sandbox_init_point)
-// - ✅ Exporta createPreference (alias) para compat con controller
+// ✅ COPY-PASTE FINAL COMPLETO (Node 18+ fetch nativo)
+// - Exporta createPreference (compat)
+// - Manejo de errores con payload exacto
+// - Payload "policy-safe": purpose, payer, marketplace_fee, etc.
 
 function getAccessToken() {
   const tok = process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "";
@@ -12,8 +10,7 @@ function getAccessToken() {
 }
 
 function mpIsEnabled() {
-  const token = getAccessToken();
-  return !!token;
+  return !!getAccessToken();
 }
 
 function buildMpHeaders() {
@@ -80,10 +77,14 @@ async function mpFetch(path, { method = "GET", body = null, params = null } = {}
   return data;
 }
 
+function clean(obj) {
+  const out = { ...obj };
+  Object.keys(out).forEach((k) => out[k] === undefined && delete out[k]);
+  return out;
+}
+
 /**
- * Crea preferencia de pago (REDIRECT).
- * @param {Object} opts
- * @returns {Object} { preference, redirect_url }
+ * Crea preferencia REDIRECT.
  */
 async function createCheckoutPreference(opts = {}) {
   const {
@@ -98,6 +99,7 @@ async function createCheckoutPreference(opts = {}) {
     expiration_date_from = null,
     expiration_date_to = null,
     metadata = null,
+    purpose = "wallet_purchase", // ✅ ayuda PolicyAgent
   } = opts;
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -108,26 +110,32 @@ async function createCheckoutPreference(opts = {}) {
     throw e;
   }
 
-  const body = {
+  const body = clean({
+    purpose, // ✅
     items: items.map((it) => ({
+      id: it.id ? String(it.id) : undefined,
       title: String(it.title || it.name || "Producto"),
       quantity: Number(it.quantity || it.qty || 1),
       unit_price: Number(it.unit_price || it.price || 0),
       currency_id: it.currency_id || "ARS",
     })),
     external_reference: external_reference ? String(external_reference) : undefined,
+
+    // ✅ payer ayuda a que no “flote” el checkout
     payer: payer || undefined,
+
     back_urls: back_urls || undefined,
     notification_url: notification_url || undefined,
     auto_return,
+
     statement_descriptor: statement_descriptor || undefined,
+
     expires,
     expiration_date_from: expiration_date_from || undefined,
     expiration_date_to: expiration_date_to || undefined,
-    metadata: metadata || undefined,
-  };
 
-  Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
+    metadata: metadata || undefined,
+  });
 
   const preference = await mpFetch("/checkout/preferences", { method: "POST", body });
 
@@ -136,12 +144,10 @@ async function createCheckoutPreference(opts = {}) {
   return { preference, redirect_url };
 }
 
-// ✅ Compat: el controller viejo pide createPreference()
+// ✅ Compat: controller usa createPreference()
 async function createPreference(opts = {}) {
   const { preference, redirect_url } = await createCheckoutPreference(opts);
-  // devolvemos SOLO la preferencia (como suelen esperar controllers)
-  // pero también dejamos redirect_url si alguien lo usa
-  preference.redirect_url = redirect_url || preference.redirect_url || null;
+  preference.redirect_url = redirect_url || null;
   return preference;
 }
 
@@ -149,5 +155,5 @@ module.exports = {
   mpIsEnabled,
   mpFetch,
   createCheckoutPreference,
-  createPreference, // ✅ clave
+  createPreference,
 };
