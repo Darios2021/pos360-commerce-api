@@ -1,9 +1,10 @@
 // src/services/mercadopago.service.js
-// ✅ COPY-PASTE FINAL (SIN AXIOS) - Node 18+ usa fetch nativo
+// ✅ COPY-PASTE FINAL COMPLETO (SIN AXIOS) - Node 18+ usa fetch nativo
 //
 // - Evita crash por "Cannot find module 'axios'"
 // - Maneja errores MP con payload claro
-// - Exporta createPreference (alias) para compat con tu controller
+// - Soporta modo REDIRECT (init_point / sandbox_init_point)
+// - ✅ Exporta createPreference (alias) para compat con controller
 
 function getAccessToken() {
   const tok = process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "";
@@ -82,7 +83,7 @@ async function mpFetch(path, { method = "GET", body = null, params = null } = {}
 /**
  * Crea preferencia de pago (REDIRECT).
  * @param {Object} opts
- * @returns {Object} preference (incluye init_point / sandbox_init_point)
+ * @returns {Object} { preference, redirect_url }
  */
 async function createCheckoutPreference(opts = {}) {
   const {
@@ -109,7 +110,6 @@ async function createCheckoutPreference(opts = {}) {
 
   const body = {
     items: items.map((it) => ({
-      id: it.id != null ? String(it.id) : undefined,
       title: String(it.title || it.name || "Producto"),
       quantity: Number(it.quantity || it.qty || 1),
       unit_price: Number(it.unit_price || it.price || 0),
@@ -127,26 +127,27 @@ async function createCheckoutPreference(opts = {}) {
     metadata: metadata || undefined,
   };
 
-  // Limpieza de undefined (MP a veces rompe si mandás undefined)
   Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
-  body.items = (body.items || []).map((x) => {
-    const y = { ...x };
-    Object.keys(y).forEach((k) => y[k] === undefined && delete y[k]);
-    return y;
-  });
 
   const preference = await mpFetch("/checkout/preferences", { method: "POST", body });
-  return preference;
+
+  const redirect_url = preference?.init_point || preference?.sandbox_init_point || null;
+
+  return { preference, redirect_url };
 }
 
-// ✅ Alias: tu controller usa createPreference
+// ✅ Compat: el controller viejo pide createPreference()
 async function createPreference(opts = {}) {
-  return createCheckoutPreference(opts);
+  const { preference, redirect_url } = await createCheckoutPreference(opts);
+  // devolvemos SOLO la preferencia (como suelen esperar controllers)
+  // pero también dejamos redirect_url si alguien lo usa
+  preference.redirect_url = redirect_url || preference.redirect_url || null;
+  return preference;
 }
 
 module.exports = {
   mpIsEnabled,
   mpFetch,
   createCheckoutPreference,
-  createPreference, // ✅ COMPAT
+  createPreference, // ✅ clave
 };
