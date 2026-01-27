@@ -1,18 +1,25 @@
 // src/services/admin.shopBranding.service.js
-// ✅ COPY-PASTE FINAL (con OG 1200x630)
-// - kind: "logo"      => se sube como imagen normal (opcional: podés resize)
-// - kind: "favicon"   => resize a 64x64 (png)
-// - kind: "og-image"  => genera 1200x630 (jpg) y guarda con nombre estable
+// ✅ COPY-PASTE FINAL DEFINITIVO (S3/MinIO + favicon 64x64 + OG 1200x630)
+// - kind: "logo"      => sube tal cual (cache largo)
+// - kind: "favicon"   => PNG 64x64, key estable: pos360/shop/favicon.png
+// - kind: "og-image"  => JPG 1200x630, key estable: pos360/shop/og-default.jpg
+//
+// ⚠️ IMPORTANTE (TU CASO):
+// Tu storage público ya sirve como: https://storage-files.cingulado.org/<key>
+// (no incluye /<bucket>/ en la URL), porque tus URLs actuales son:
+//   https://storage-files.cingulado.org/pos360/shop/....png
+// Por eso publicUrlFromKey() NO concatena bucket.
 
 const sharp = require("sharp");
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const { s3, s3Config } = require("../config/s3");
 
-// ⚠️ COMPLETAR: adaptá esto a tu uploader real (MinIO/S3)
-async function putObject({ key, buffer, contentType }) {
-  // Ejemplo esperado:
-  // return { url: "https://storage-files.cingulado.org/" + key };
-
-  // 🔴 Reemplazá por tu implementación real:
-  throw new Error("putObject() no implementado. Pegame tu uploader actual y lo adapto 1:1.");
+function publicUrlFromKey(key) {
+  const pub = String(process.env.S3_PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+  const cleanKey = String(key || "").replace(/^\/+/, "");
+  if (!pub) return `/${cleanKey}`;
+  // ✅ tu storage ya expone directo por key
+  return `${pub}/${cleanKey}`;
 }
 
 function extFromMime(mime) {
@@ -21,22 +28,41 @@ function extFromMime(mime) {
   if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
   if (m.includes("webp")) return "webp";
   if (m.includes("svg")) return "svg";
+  if (m.includes("x-icon") || m.includes("ico")) return "ico";
   return "bin";
 }
 
-async function buildFavicon64(buffer) {
-  // 64x64 PNG
+async function putObject({ key, buffer, contentType, cacheControl }) {
+  const bucket = s3Config.bucket;
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType || "application/octet-stream",
+      CacheControl: cacheControl || "public, max-age=31536000, immutable",
+      ACL: "public-read",
+    })
+  );
+
+  return { key, url: publicUrlFromKey(key), contentType };
+}
+
+async function buildFavicon64Png(buffer) {
   return sharp(buffer)
+    .rotate()
     .resize(64, 64, { fit: "cover" })
     .png({ compressionLevel: 9 })
     .toBuffer();
 }
 
-async function buildOg1200x630(buffer) {
-  // 1200x630 JPG con fondo y logo centrado
-  const W = 1200, H = 630;
+async function buildOg1200x630Jpg(buffer) {
+  const W = 1200;
+  const H = 630;
 
   const logo = await sharp(buffer)
+    .rotate()
     .resize(520, 520, { fit: "inside", withoutEnlargement: true })
     .png()
     .toBuffer();
@@ -53,33 +79,31 @@ async function buildOg1200x630(buffer) {
 
 async function uploadShopAsset({ file, kind }) {
   if (!file || !file.buffer) {
-    throw new Error("FILE_REQUIRED");
+    const e = new Error("FILE_REQUIRED");
+    e.statusCode = 400;
+    throw e;
   }
 
-  const ts = Date.now();
   const safeKind = String(kind || "").trim();
+  const ts = Date.now();
 
   // defaults
-  let key = "";
+  let key;
   let outBuf = file.buffer;
   let contentType = file.mimetype || "application/octet-stream";
+  let cacheControl = "public, max-age=31536000, immutable";
 
   if (safeKind === "favicon") {
-    outBuf = await buildFavicon64(file.buffer);
+    outBuf = await buildFavicon64Png(file.buffer);
     contentType = "image/png";
-    // nombre estable opcional:
-    // key = "pos360/shop/favicon.png";
-    // o timestamp como ya venías usando:
-    key = `pos360/shop/${ts}-favicon.png`;
+    cacheControl = "public, max-age=86400";
+    key = "pos360/shop/favicon.png"; // ✅ estable
   } else if (safeKind === "og-image") {
-    outBuf = await buildOg1200x630(file.buffer);
+    outBuf = await buildOg1200x630Jpg(file.buffer);
     contentType = "image/jpeg";
-    // ✅ NOMBRE ESTABLE (esto es lo que querías)
-    key = `pos360/shop/og-default.jpg`;
+    cacheControl = "public, max-age=3600";
+    key = "pos360/shop/og-default.jpg"; // ✅ estable
   } else if (safeKind === "logo") {
-    // logo: lo subimos tal cual (o si querés, resize a un máximo)
-    // outBuf = await sharp(file.buffer).resize(512, 512, { fit: "inside" }).png().toBuffer();
-    // contentType = "image/png";
     const ext = extFromMime(file.mimetype);
     key = `pos360/shop/${ts}-logo.${ext}`;
   } else {
@@ -87,13 +111,8 @@ async function uploadShopAsset({ file, kind }) {
     key = `pos360/shop/${ts}-asset.${ext}`;
   }
 
-  const up = await putObject({ key, buffer: outBuf, contentType });
-
-  if (!up || !up.url) {
-    throw new Error("UPLOAD_FAILED");
-  }
-
-  return { url: up.url, key, contentType };
+  const up = await putObject({ key, buffer: outBuf, contentType, cacheControl });
+  return { url: up.url, key: up.key, contentType: up.contentType };
 }
 
 module.exports = { uploadShopAsset };
