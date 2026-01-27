@@ -589,207 +589,208 @@ async function checkout(req, res) {
       const mpEnabledByAdmin = !!paymentsCfg.mp_enabled;
 
       const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+
+
+      // ==========================
+// ✅ MercadoPago REAL (fragmento SELLADO + logs)
+// ==========================
+
       const isMp = pay_provider === "mercadopago";
 
+      // default status order
       let orderPayStatus = "unpaid";
 
-      // ✅ MercadoPago
+      // MP response vars
       let redirect_url = null;
       let mp = null;
 
       if (isMp) {
         if (!mpEnabledByAdmin) {
-          return { error: { status: 400, code: "MP_DISABLED", message: "Mercado Pago está deshabilitado por configuración.", request_id } };
+          return {
+            error: {
+              status: 400,
+              code: "MP_DISABLED",
+              message: "Mercado Pago está deshabilitado por configuración.",
+              request_id,
+            },
+          };
         }
+
+        const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
         if (!envMp) {
-          return { error: { status: 400, code: "MP_TOKEN_MISSING", message: "Falta MERCADOPAGO_ACCESS_TOKEN en el servidor.", request_id } };
+          return {
+            error: {
+              status: 400,
+              code: "MP_TOKEN_MISSING",
+              message: "Mercado Pago no está habilitado en el servidor (falta MERCADOPAGO_ACCESS_TOKEN).",
+              request_id,
+            },
+          };
         }
 
-       // ✅ baseUrl (SELLADO): primero ENV, si no, inferimos desde el request
-// - Fuerza https (PolicyAgent)
-// - Respeta x-forwarded-host si existe
-const baseUrl = (() => {
-  const envBase = toStr(
-    process.env.ECOMMERCE_PUBLIC_URL ||
-      process.env.FRONTEND_URL ||
-      process.env.APP_URL ||
-      ""
-  ).replace(/\/+$/, "");
+        // ✅ BASE URL SELLADO (evita PolicyAgent por back_urls vacías / http)
+        // Prioridad:
+        // 1) ECOMMERCE_PUBLIC_URL
+        // 2) FRONTEND_URL / APP_URL
+        // 3) fallback duro al dominio real
+        let baseUrl = toStr(
+          process.env.ECOMMERCE_PUBLIC_URL ||
+            process.env.FRONTEND_URL ||
+            process.env.APP_URL ||
+            "https://sanjuantecnologia.com"
+        ).replace(/\/+$/, "");
 
-  if (envBase) return envBase.replace(/^http:\/\//i, "https://");
+        // fuerza https (PolicyAgent suele romper si ve http o algo raro)
+        if (baseUrl.startsWith("http://")) baseUrl = baseUrl.replace(/^http:\/\//i, "https://");
+        if (!/^https:\/\//i.test(baseUrl)) baseUrl = `https://${baseUrl}`.replace(/\/+$/, "");
 
-  // fallback por request host
-  let host = "";
-  try {
-    host = String(req?.headers?.["x-forwarded-host"] || req?.get?.("host") || "").trim();
-  } catch {}
-  if (!host) return "";
+        // ✅ items MP
+        const mpItems = normItems.map((it) => {
+          const p = productsById.get(it.product_id);
+          const unit_price = unitPriceFromProductRow(p);
+          return {
+            id: String(it.product_id),
+            title: String(p?.name || `Producto ${it.product_id}`),
+            quantity: Number(toNum(it.qty, 1)),
+            currency_id: "ARS",
+            unit_price: Number(toNum(unit_price, 0)),
+          };
+        });
 
-  return `https://${host}`.replace(/\/+$/, "");
-})();
+        const externalRef = String(public_code || order_id);
 
-const mpItems = normItems.map((it) => {
-  const p = productsById.get(it.product_id);
-  const unit_price = unitPriceFromProductRow(p);
-  return {
-    id: String(it.product_id),
-    title: String(p?.name || `Producto ${it.product_id}`),
-    quantity: Number(toNum(it.qty, 1)),
-    currency_id: "ARS",
-    unit_price: Number(toNum(unit_price, 0)),
-  };
-});
+        // ✅ back_urls (SELLADO)
+        const successUrl = `${baseUrl}/shop/checkout/success?order=${encodeURIComponent(externalRef)}`;
+        const pendingUrl = `${baseUrl}/shop/checkout/pending?order=${encodeURIComponent(externalRef)}`;
+        const failureUrl = `${baseUrl}/shop/checkout/failure?order=${encodeURIComponent(externalRef)}`;
 
-// ✅ Notification URL: SOLO si es https (si no, no la mandes)
-const notif = String(process.env.MP_NOTIFICATION_URL || "").trim();
-const safeNotificationUrl = notif && /^https:\/\//i.test(notif) ? notif : "";
+        const prefPayload = {
+          external_reference: externalRef,
+          items: mpItems,
+          statement_descriptor: String(process.env.MP_STATEMENT_DESCRIPTOR || "SAN JUAN TECNOLOGIA").slice(0, 22),
+          back_urls: { success: successUrl, pending: pendingUrl, failure: failureUrl },
+          auto_return: "approved",
+          notification_url: process.env.MP_NOTIFICATION_URL || undefined,
+          metadata: { order_id, public_code, branch_id, payment_id: pay.payment_id },
+        };
 
-// ✅ payer.email ayuda PolicyAgent (si hay email válido)
-const payerEmail = normalizeEmail(customerEmail);
+        if (!prefPayload.notification_url) delete prefPayload.notification_url;
 
-// ✅ back_urls SOLO si tenemos baseUrl https
-const backUrls =
-  baseUrl && /^https:\/\//i.test(baseUrl)
-    ? {
-        success: `${baseUrl}/shop/checkout/success?order=${encodeURIComponent(externalRef)}`,
-        pending: `${baseUrl}/shop/checkout/pending?order=${encodeURIComponent(externalRef)}`,
-        failure: `${baseUrl}/shop/checkout/failure?order=${encodeURIComponent(externalRef)}`,
+        log(request_id, "MP prefPayload=", {
+          external_reference: prefPayload.external_reference,
+          items: prefPayload.items?.map((x) => ({ id: x.id, q: x.quantity, u: x.unit_price })),
+          back_urls: prefPayload.back_urls,
+          has_notification_url: !!prefPayload.notification_url,
+        });
+
+        let mpPref;
+        try {
+          mpPref = await createPreference(prefPayload);
+        } catch (mpErr) {
+          const status = Number(mpErr?.statusCode || mpErr?.status || 502);
+          return {
+            error: {
+              status,
+              code: "MP_API_ERROR",
+              message: "Mercado Pago rechazó la creación de preferencia.",
+              detail: mpErr?.payload || mpErr?.response?.data || mpErr?.message || String(mpErr),
+              request_id,
+            },
+          };
+        }
+
+        await updatePaymentMpMeta({
+          payment_id: pay.payment_id,
+          mpPref,
+          externalRef,
+          payer_email: customerEmail,
+          t,
+        });
+
+        redirect_url = mpPref?.init_point || mpPref?.sandbox_init_point || mpPref?.redirect_url || null;
+        mp = {
+          id: mpPref?.id || null,
+          init_point: mpPref?.init_point || null,
+          sandbox_init_point: mpPref?.sandbox_init_point || null,
+        };
+
+        if (!redirect_url) {
+          return {
+            error: {
+              status: 500,
+              code: "MP_NO_REDIRECT",
+              message: "Mercado Pago no devolvió init_point (preferencia inválida).",
+              detail: mpPref || null,
+              request_id,
+            },
+          };
+        }
+
+        orderPayStatus = "pending";
       }
-    : undefined;
 
-const prefPayload = {
-  // ✅ recomendado para PolicyAgent
-  purpose: "wallet_purchase",
+      await setOrderPaymentMeta({ order_id, provider: pay_provider, payment_status: orderPayStatus, t });
 
-  external_reference: externalRef,
-  items: mpItems,
-  statement_descriptor: String(process.env.MP_STATEMENT_DESCRIPTOR || "SAN JUAN TECNOLOGIA").slice(0, 22),
+      return {
+        ok: true,
+        request_id,
+        order: {
+          id: order_id,
+          public_code,
+          status: "created",
+          fulfillment_type,
+          branch_id,
+          subtotal,
+          shipping_total,
+          total,
+          payment_status: orderPayStatus,
+        },
+        payment: {
+          id: pay.payment_id,
+          provider: pay.provider,
+          status: isMp ? "pending" : pay.status,
+          external_reference: String(public_code || order_id),
+        },
+        redirect_url,
+        mp,
+      };
+    });
 
-  back_urls: backUrls,
-  auto_return: "approved",
+    if (result?.error) {
+      log(request_id, "ERROR result=", result.error);
+      return res.status(result.error.status || 400).json(result.error);
+    }
 
-  notification_url: safeNotificationUrl || undefined,
+    log(request_id, "OK order=", {
+      id: result?.order?.id,
+      public_code: result?.order?.public_code,
+      provider: result?.payment?.provider,
+      redirect: !!result?.redirect_url,
+    });
 
-  payer: payerEmail ? { email: payerEmail } : undefined,
+    return res.json(result);
+  } catch (e) {
+    const detail = e?.message || String(e);
 
-  metadata: { order_id, public_code, branch_id, payment_id: pay.payment_id },
-};
+    if (e?.code === "MISSING_STOCK_VIEW") {
+      log(request_id, "MISSING_STOCK_VIEW", detail);
+      return res.status(500).json({
+        message: "No se puede validar stock por sucursal.",
+        code: "MISSING_STOCK_VIEW",
+        detail,
+        request_id,
+      });
+    }
 
-if (!prefPayload.back_urls) delete prefPayload.back_urls;
-if (!prefPayload.notification_url) delete prefPayload.notification_url;
-if (!prefPayload.payer) delete prefPayload.payer;
+    console.error("❌ checkout error:", e);
+    log(request_id, "FATAL", detail);
 
-// ✅ log útil para deploy (sin secretos)
-log(request_id, "MP prefPayload meta", {
-  baseUrl,
-  hasBackUrls: !!prefPayload.back_urls,
-  hasNotificationUrl: !!prefPayload.notification_url,
-  hasPayer: !!prefPayload.payer,
-  statement_descriptor: prefPayload.statement_descriptor,
-});
-
-let mpPref;
-try {
-  mpPref = await createPreference(prefPayload);
-} catch (mpErr) {
-  // ✅ DEVUELVE ERROR MP REAL (no 500 genérico)
-  const status = Number(mpErr?.statusCode || 502);
-  return {
-    error: {
-      status,
-      code: mpErr?.code || "MP_ERROR",
-      message: "Mercado Pago rechazó la creación de preferencia.",
-      detail: mpErr?.payload || mpErr?.message || String(mpErr),
+    return res.status(500).json({
+      message: "Error creando el pedido.",
+      detail,
       request_id,
-    },
-  };
-}
-
-await updatePaymentMpMeta({
-  payment_id: pay.payment_id,
-  mpPref,
-  externalRef,
-  payer_email: customerEmail,
-  t,
-});
-
-redirect_url = mpPref?.init_point || mpPref?.sandbox_init_point || mpPref?.redirect_url || null;
-mp = {
-  id: mpPref?.id || null,
-  init_point: mpPref?.init_point || null,
-  sandbox_init_point: mpPref?.sandbox_init_point || null,
-};
-
-if (!redirect_url) {
-  return {
-    error: {
-      status: 500,
-      code: "MP_NO_REDIRECT",
-      message: "Mercado Pago no devolvió init_point (preferencia inválida).",
-      detail: mpPref || null,
-      request_id,
-    },
-  };
-}
-
-orderPayStatus = "pending";
-}
-
-await setOrderPaymentMeta({ order_id, provider: pay_provider, payment_status: orderPayStatus, t });
-
-return {
-  ok: true,
-  request_id,
-  order: {
-    id: order_id,
-    public_code,
-    status: "created",
-    fulfillment_type,
-    branch_id,
-    subtotal,
-    shipping_total,
-    total,
-    payment_status: orderPayStatus,
-  },
-  payment: {
-    id: pay.payment_id,
-    provider: pay.provider,
-    status: isMp ? "pending" : pay.status,
-    external_reference: externalRef,
-  },
-  redirect_url,
-  mp,
-};
-});
-
-if (result?.error) {
-  log(request_id, "ERROR result=", result.error);
-  return res.status(result.error.status || 400).json(result.error);
-}
-
-log(request_id, "OK order=", {
-  id: result?.order?.id,
-  public_code: result?.order?.public_code,
-  redirect: !!result?.redirect_url,
-});
-return res.json(result);
-} catch (e) {
-const detail = e?.message || String(e);
-
-if (e?.code === "MISSING_STOCK_VIEW") {
-  log(request_id, "MISSING_STOCK_VIEW", detail);
-  return res.status(500).json({
-    message: "No se puede validar stock por sucursal.",
-    code: "MISSING_STOCK_VIEW",
-    detail,
-    request_id,
-  });
-}
-
-console.error("❌ checkout error:", e);
-log(request_id, "FATAL", detail);
-return res.status(500).json({ message: "Error creando el pedido.", detail, request_id });
-}
+    });
+  }
 }
 
 module.exports = { checkout };
