@@ -449,7 +449,14 @@ async function checkout(req, res) {
     items_count: items.length,
   });
 
-  if (!items.length) return res.status(400).json({ status: 400, code: "EMPTY_CART", message: "Carrito vacío.", request_id });
+  if (!items.length) {
+    return res.status(400).json({
+      status: 400,
+      code: "EMPTY_CART",
+      message: "Carrito vacío.",
+      request_id,
+    });
+  }
 
   const normItems = items
     .map((x) => ({
@@ -458,8 +465,14 @@ async function checkout(req, res) {
     }))
     .filter((x) => x.product_id > 0 && x.qty > 0);
 
-  if (!normItems.length)
-    return res.status(400).json({ status: 400, code: "INVALID_ITEMS", message: "Items inválidos.", request_id });
+  if (!normItems.length) {
+    return res.status(400).json({
+      status: 400,
+      code: "INVALID_ITEMS",
+      message: "Items inválidos.",
+      request_id,
+    });
+  }
 
   const fulfillment_type = payload.fulfillment_type === "delivery" ? "delivery" : "pickup";
   const pickup_branch_id = toInt(payload.pickup_branch_id || 0, 0) || null;
@@ -477,7 +490,12 @@ async function checkout(req, res) {
       for (const pid of productIds) {
         if (!productsById.has(pid)) {
           return {
-            error: { status: 400, message: `Producto no existe: ${pid}`, code: "PRODUCT_NOT_FOUND", request_id },
+            error: {
+              status: 400,
+              message: `Producto no existe: ${pid}`,
+              code: "PRODUCT_NOT_FOUND",
+              request_id,
+            },
           };
         }
       }
@@ -491,8 +509,9 @@ async function checkout(req, res) {
       }
       subtotal = Number(subtotal.toFixed(2));
 
-      const shipping_total =
-        fulfillment_type === "delivery" ? Number(toNum(payload.shipping_total, 0).toFixed(2)) : 0.0;
+      const shipping_total = fulfillment_type === "delivery"
+        ? Number(toNum(payload.shipping_total, 0).toFixed(2))
+        : 0.0;
 
       const total = Number((subtotal + shipping_total).toFixed(2));
 
@@ -515,7 +534,12 @@ async function checkout(req, res) {
       if (fulfillment_type === "pickup") {
         if (!pickup_branch_id) {
           return {
-            error: { status: 400, message: "Falta pickup_branch_id para retiro.", code: "MISSING_PICKUP_BRANCH", request_id },
+            error: {
+              status: 400,
+              message: "Falta pickup_branch_id para retiro.",
+              code: "MISSING_PICKUP_BRANCH",
+              request_id,
+            },
           };
         }
 
@@ -588,13 +612,6 @@ async function checkout(req, res) {
       const paymentsCfg = await getShopPaymentsSettings(t);
       const mpEnabledByAdmin = !!paymentsCfg.mp_enabled;
 
-      const envMp = !!String(process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
-
-
-      // ==========================
-// ✅ MercadoPago REAL (fragmento SELLADO + logs)
-// ==========================
-
       const isMp = pay_provider === "mercadopago";
 
       // default status order
@@ -604,6 +621,9 @@ async function checkout(req, res) {
       let redirect_url = null;
       let mp = null;
 
+      // ==========================
+      // ✅ MercadoPago REAL (SELLADO + LOGS)
+      // ==========================
       if (isMp) {
         if (!mpEnabledByAdmin) {
           return {
@@ -628,21 +648,25 @@ async function checkout(req, res) {
           };
         }
 
-        // ✅ BASE URL SELLADO (evita PolicyAgent por back_urls vacías / http)
-        // Prioridad:
-        // 1) ECOMMERCE_PUBLIC_URL
-        // 2) FRONTEND_URL / APP_URL
-        // 3) fallback duro al dominio real
-        let baseUrl = toStr(
-          process.env.ECOMMERCE_PUBLIC_URL ||
-            process.env.FRONTEND_URL ||
-            process.env.APP_URL ||
-            "https://sanjuantecnologia.com"
-        ).replace(/\/+$/, "");
+        // ✅ baseUrl: ENV -> fallback request host -> https
+        const baseUrl = (() => {
+          const envBase = toStr(
+            process.env.ECOMMERCE_PUBLIC_URL ||
+              process.env.FRONTEND_URL ||
+              process.env.APP_URL ||
+              ""
+          ).replace(/\/+$/, "");
 
-        // fuerza https (PolicyAgent suele romper si ve http o algo raro)
-        if (baseUrl.startsWith("http://")) baseUrl = baseUrl.replace(/^http:\/\//i, "https://");
-        if (!/^https:\/\//i.test(baseUrl)) baseUrl = `https://${baseUrl}`.replace(/\/+$/, "");
+          if (envBase) return envBase.replace(/^http:\/\//i, "https://");
+
+          let host = "";
+          try {
+            host = String(req?.headers?.["x-forwarded-host"] || req?.get?.("host") || "").trim();
+          } catch {}
+          if (!host) return "";
+
+          return `https://${host}`.replace(/\/+$/, "");
+        })();
 
         // ✅ items MP
         const mpItems = normItems.map((it) => {
@@ -657,30 +681,54 @@ async function checkout(req, res) {
           };
         });
 
-        const externalRef = String(public_code || order_id);
+        // ✅ Notification URL solo si https
+        const notif = String(process.env.MP_NOTIFICATION_URL || "").trim();
+        const safeNotificationUrl = notif && /^https:\/\//i.test(notif) ? notif : "";
 
-        // ✅ back_urls (SELLADO)
-        const successUrl = `${baseUrl}/shop/checkout/success?order=${encodeURIComponent(externalRef)}`;
-        const pendingUrl = `${baseUrl}/shop/checkout/pending?order=${encodeURIComponent(externalRef)}`;
-        const failureUrl = `${baseUrl}/shop/checkout/failure?order=${encodeURIComponent(externalRef)}`;
+        // ✅ payer.email ayuda PolicyAgent
+        const payerEmail = normalizeEmail(customerEmail);
+
+        // ✅ back_urls solo si baseUrl válido
+        const backUrls =
+          baseUrl && /^https:\/\//i.test(baseUrl)
+            ? {
+                success: `${baseUrl}/shop/checkout/success?order=${encodeURIComponent(externalRef)}`,
+                pending: `${baseUrl}/shop/checkout/pending?order=${encodeURIComponent(externalRef)}`,
+                failure: `${baseUrl}/shop/checkout/failure?order=${encodeURIComponent(externalRef)}`,
+              }
+            : undefined;
 
         const prefPayload = {
+          // ✅ recomendado
+          purpose: "wallet_purchase",
+
           external_reference: externalRef,
           items: mpItems,
+
           statement_descriptor: String(process.env.MP_STATEMENT_DESCRIPTOR || "SAN JUAN TECNOLOGIA").slice(0, 22),
-          back_urls: { success: successUrl, pending: pendingUrl, failure: failureUrl },
+
+          back_urls: backUrls,
           auto_return: "approved",
-          notification_url: process.env.MP_NOTIFICATION_URL || undefined,
+
+          notification_url: safeNotificationUrl || undefined,
+
+          payer: payerEmail ? { email: payerEmail } : undefined,
+
           metadata: { order_id, public_code, branch_id, payment_id: pay.payment_id },
         };
 
+        if (!prefPayload.back_urls) delete prefPayload.back_urls;
         if (!prefPayload.notification_url) delete prefPayload.notification_url;
+        if (!prefPayload.payer) delete prefPayload.payer;
 
-        log(request_id, "MP prefPayload=", {
-          external_reference: prefPayload.external_reference,
+        // ✅ log útil (sin secretos)
+        log(request_id, "MP prefPayload meta", {
+          baseUrl,
+          hasBackUrls: !!prefPayload.back_urls,
+          hasNotificationUrl: !!prefPayload.notification_url,
+          hasPayer: !!prefPayload.payer,
+          statement_descriptor: prefPayload.statement_descriptor,
           items: prefPayload.items?.map((x) => ({ id: x.id, q: x.quantity, u: x.unit_price })),
-          back_urls: prefPayload.back_urls,
-          has_notification_url: !!prefPayload.notification_url,
         });
 
         let mpPref;
@@ -749,7 +797,7 @@ async function checkout(req, res) {
           id: pay.payment_id,
           provider: pay.provider,
           status: isMp ? "pending" : pay.status,
-          external_reference: String(public_code || order_id),
+          external_reference: externalRef,
         },
         redirect_url,
         mp,
@@ -784,12 +832,7 @@ async function checkout(req, res) {
 
     console.error("❌ checkout error:", e);
     log(request_id, "FATAL", detail);
-
-    return res.status(500).json({
-      message: "Error creando el pedido.",
-      detail,
-      request_id,
-    });
+    return res.status(500).json({ message: "Error creando el pedido.", detail, request_id });
   }
 }
 

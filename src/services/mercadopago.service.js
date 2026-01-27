@@ -1,159 +1,159 @@
 // src/services/mercadopago.service.js
-// ✅ COPY-PASTE FINAL COMPLETO (Node 18+ fetch nativo)
-// - Exporta createPreference (compat)
-// - Manejo de errores con payload exacto
-// - Payload "policy-safe": purpose, payer, marketplace_fee, etc.
+// ✅ COPY-PASTE FINAL COMPLETO (MercadoPago REAL por HTTP + errores reales + logs seguros)
+//
+// Objetivo:
+// - createPreference(payload) -> POST /checkout/preferences
+// - Token SIEMPRE en ENV: MERCADOPAGO_ACCESS_TOKEN
+// - No loguea token
+// - Devuelve mpErr con:
+//   { statusCode, code, message, payload }
+//
+// Opcionales ENV:
+// - MP_API_BASE              (default: https://api.mercadopago.com)
+// - MP_TIMEOUT_MS            (default: 20000)
+// - MP_IDEMPOTENCY_PREFIX    (default: POS360)
+// - MP_DEBUG                 ("1" habilita logs extra SIN secretos)
+
+const axios = require("axios");
+const crypto = require("crypto");
+
+function toStr(v) {
+  return String(v ?? "").trim();
+}
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+function boolEnv(name) {
+  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
+}
+
+const MP_API_BASE = toStr(process.env.MP_API_BASE || "https://api.mercadopago.com").replace(/\/+$/, "");
+const MP_TIMEOUT_MS = toInt(process.env.MP_TIMEOUT_MS || "20000", 20000);
+const MP_IDEMPOTENCY_PREFIX = toStr(process.env.MP_IDEMPOTENCY_PREFIX || "POS360");
+const MP_DEBUG = boolEnv("MP_DEBUG");
+
+function safeJson(obj) {
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    return String(obj);
+  }
+}
+
+function buildIdempotencyKey(prefix = MP_IDEMPOTENCY_PREFIX) {
+  // Idempotency recomendado por MP para evitar duplicados ante reintentos.
+  // (No es secreto.)
+  const rnd = crypto.randomBytes(10).toString("hex");
+  const ts = Date.now();
+  return `${prefix}-${ts}-${rnd}`.slice(0, 64);
+}
+
+function mpError({ statusCode, code, message, payload }) {
+  const err = new Error(message || "Mercado Pago error");
+  err.statusCode = Number(statusCode || 502);
+  err.code = code || "MP_ERROR";
+  err.payload = payload || null;
+  return err;
+}
 
 function getAccessToken() {
-  const tok = process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "";
-  return String(tok || "").trim();
+  const tok = toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || "");
+  if (!tok) {
+    throw mpError({
+      statusCode: 400,
+      code: "MP_TOKEN_MISSING",
+      message: "Falta MERCADOPAGO_ACCESS_TOKEN en el servidor.",
+      payload: null,
+    });
+  }
+  return tok;
 }
 
-function mpIsEnabled() {
-  return !!getAccessToken();
-}
+// Cliente HTTP MP
+const mpHttp = axios.create({
+  baseURL: MP_API_BASE,
+  timeout: MP_TIMEOUT_MS,
+  // Importante: MP suele devolver JSON aún con errores 4xx
+  validateStatus: () => true,
+});
 
-function buildMpHeaders() {
+async function createPreference(prefPayload) {
   const token = getAccessToken();
-  if (!token) return null;
 
-  return {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-}
-
-async function mpFetch(path, { method = "GET", body = null, params = null } = {}) {
-  const headers = buildMpHeaders();
-  if (!headers) {
-    const e = new Error("MercadoPago no configurado: falta MERCADOPAGO_ACCESS_TOKEN / MP_ACCESS_TOKEN");
-    e.code = "MP_NOT_CONFIGURED";
-    e.statusCode = 400;
-    e.payload = { message: e.message };
-    throw e;
+  // No logueamos payload completo (pero sí metadata si MP_DEBUG)
+  if (MP_DEBUG) {
+    // log seguro: sin token, sin datos sensibles
+    console.log("[MP] createPreference payload(meta) =", {
+      external_reference: prefPayload?.external_reference,
+      has_back_urls: !!prefPayload?.back_urls,
+      has_notification_url: !!prefPayload?.notification_url,
+      has_payer: !!prefPayload?.payer,
+      items: Array.isArray(prefPayload?.items)
+        ? prefPayload.items.map((x) => ({ id: x.id, q: x.quantity, u: x.unit_price }))
+        : [],
+      statement_descriptor: prefPayload?.statement_descriptor,
+      purpose: prefPayload?.purpose,
+    });
   }
 
-  const base = "https://api.mercadopago.com";
-  const url = new URL(base + path);
-
-  if (params && typeof params === "object") {
-    for (const [k, v] of Object.entries(params)) {
-      if (v === undefined || v === null || v === "") continue;
-      url.searchParams.set(k, String(v));
-    }
-  }
+  const idemKey = buildIdempotencyKey();
 
   let resp;
   try {
-    resp = await fetch(url.toString(), {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
+    resp = await mpHttp.post("/checkout/preferences", prefPayload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": idemKey,
+      },
     });
-  } catch (networkErr) {
-    const e = new Error("No se pudo conectar con MercadoPago");
-    e.code = "MP_NETWORK_ERROR";
-    e.statusCode = 502;
-    e.payload = { message: networkErr?.message || String(networkErr) };
-    throw e;
+  } catch (e) {
+    // Error de red/timeout
+    throw mpError({
+      statusCode: 502,
+      code: "MP_NETWORK_ERROR",
+      message: "No se pudo conectar con Mercado Pago (network/timeout).",
+      payload: { message: e?.message || String(e) },
+    });
   }
 
-  let data = null;
-  const text = await resp.text().catch(() => "");
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text || null;
+  const status = Number(resp?.status || 0);
+  const data = resp?.data;
+
+  // 2xx OK
+  if (status >= 200 && status < 300) {
+    return data;
   }
 
-  if (!resp.ok) {
-    const e = new Error(`MercadoPago API error (${resp.status})`);
-    e.code = "MP_API_ERROR";
-    e.statusCode = resp.status;
-    e.payload = data || { message: "Error MercadoPago" };
-    throw e;
+  // MP suele devolver:
+  // { message, error, status, cause: [...] }
+  const apiCode =
+    toStr(data?.error) ||
+    toStr(data?.code) ||
+    toStr(data?.status) ||
+    "MP_API_ERROR";
+
+  const msg =
+    toStr(data?.message) ||
+    toStr(data?.error_description) ||
+    "Mercado Pago rechazó la solicitud.";
+
+  if (MP_DEBUG) {
+    console.log("[MP] createPreference ERROR =", {
+      status,
+      apiCode,
+      msg,
+      data: data || null,
+    });
   }
 
-  return data;
-}
-
-function clean(obj) {
-  const out = { ...obj };
-  Object.keys(out).forEach((k) => out[k] === undefined && delete out[k]);
-  return out;
-}
-
-/**
- * Crea preferencia REDIRECT.
- */
-async function createCheckoutPreference(opts = {}) {
-  const {
-    external_reference = null,
-    payer = null,
-    items = [],
-    back_urls = null,
-    notification_url = null,
-    auto_return = "approved",
-    statement_descriptor = null,
-    expires = false,
-    expiration_date_from = null,
-    expiration_date_to = null,
-    metadata = null,
-    purpose = "wallet_purchase", // ✅ ayuda PolicyAgent
-  } = opts;
-
-  if (!Array.isArray(items) || items.length === 0) {
-    const e = new Error("MercadoPago: items vacío");
-    e.code = "MP_BAD_REQUEST";
-    e.statusCode = 400;
-    e.payload = { message: e.message };
-    throw e;
-  }
-
-  const body = clean({
-    purpose, // ✅
-    items: items.map((it) => ({
-      id: it.id ? String(it.id) : undefined,
-      title: String(it.title || it.name || "Producto"),
-      quantity: Number(it.quantity || it.qty || 1),
-      unit_price: Number(it.unit_price || it.price || 0),
-      currency_id: it.currency_id || "ARS",
-    })),
-    external_reference: external_reference ? String(external_reference) : undefined,
-
-    // ✅ payer ayuda a que no “flote” el checkout
-    payer: payer || undefined,
-
-    back_urls: back_urls || undefined,
-    notification_url: notification_url || undefined,
-    auto_return,
-
-    statement_descriptor: statement_descriptor || undefined,
-
-    expires,
-    expiration_date_from: expiration_date_from || undefined,
-    expiration_date_to: expiration_date_to || undefined,
-
-    metadata: metadata || undefined,
+  throw mpError({
+    statusCode: status || 502,
+    code: apiCode,
+    message: msg,
+    payload: data || { status, message: msg, code: apiCode },
   });
-
-  const preference = await mpFetch("/checkout/preferences", { method: "POST", body });
-
-  const redirect_url = preference?.init_point || preference?.sandbox_init_point || null;
-
-  return { preference, redirect_url };
 }
 
-// ✅ Compat: controller usa createPreference()
-async function createPreference(opts = {}) {
-  const { preference, redirect_url } = await createCheckoutPreference(opts);
-  preference.redirect_url = redirect_url || null;
-  return preference;
-}
-
-module.exports = {
-  mpIsEnabled,
-  mpFetch,
-  createCheckoutPreference,
-  createPreference,
-};
+module.exports = { createPreference };

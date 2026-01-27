@@ -1,7 +1,8 @@
 // src/routes/v1.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO (ANTI-CRASH + alineado al esquema actual)
-// ✅ FIX: no rompe si NO existe publicLinks.routes / adminShopLinks.routes
-// ✅ FIX: carga bien publicInstagram.routes (tu archivo actual)
+// ✅ COPY-PASTE FINAL COMPLETO (ANTI-CRASH + alineado a tu esquema actual)
+// ✅ FIX: no rompe si NO existe publicLinks.routes / admin.shopLinks.routes
+// ✅ FIX: carga publicInstagram.routes (si existe)
+// ✅ FIX: monta /ecom (checkout + payments/webhooks)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -98,25 +99,24 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// ✅ CAMINO B: Links públicos (Instagram posts, etc.) — NO ROMPER SI NO EXISTE
+// ✅ CAMINO B: Links públicos — NO ROMPER SI NO EXISTE
 let publicLinksRoutes = null;
 try {
-  // 👉 si tu archivo se llama distinto, cambiá SOLO este string
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
-  console.log("⚠️ publicLinksRoutes no cargado (src/routes/publicLinks.routes.js no existe todavía)");
+  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
   publicLinksRoutes = null;
 }
 
-// ✅ (opcional) IG Graph (tu archivo actual)
+// ✅ (opcional) IG Graph
 let publicInstagramRoutes = null;
 try {
-  // 👉 este existe: src/routes/publicInstagram.routes.js
   publicInstagramRoutes = require("./publicInstagram.routes");
 } catch (e) {
   publicInstagramRoutes = null;
 }
 
+// Ecommerce (público)
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
 
@@ -144,12 +144,6 @@ const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 // ✅ CAMINO B: Admin links — NO ROMPER SI NO EXISTE
 let adminShopLinksRoutes = null;
 try {
-  // ✅ IMPORTANTE:
-  // si tu archivo se llama "admin.shopLinks.routes.js" entonces tiene que ser:
-  //   require("./admin.shopLinks.routes")
-  // si se llama "adminShopLinks.routes.js" entonces:
-  //   require("./adminShopLinks.routes")
-  // 👉 dejé el nombre más común del backend que venimos usando:
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
   console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
@@ -173,12 +167,10 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ CAMINO B: /api/v1/public/links
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
-
-// ✅ (opcional) /api/v1/public/instagram/latest
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
 
+// ✅ Ecommerce público
 safeUse("/ecom", ecomCheckoutRoutes);
 safeUse("/ecom", ecomPaymentsRoutes);
 
@@ -207,7 +199,6 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
 
-// ✅ CAMINO B: /api/v1/admin/shop/links  (si existe el archivo)
 if (adminShopLinksRoutes) safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
 
 // ✅ /admin/media (galería)
