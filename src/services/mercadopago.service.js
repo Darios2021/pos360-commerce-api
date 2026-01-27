@@ -1,22 +1,35 @@
 // src/services/mercadopago.service.js
 // ✅ COPY-PASTE FINAL (SIN AXIOS) - Node 18+ usa fetch nativo
 //
-// - Evita crash por "Cannot find module 'axios'"
+// - Usa token desde ENV y si no, desde settings payments.mp_access_token
+// - Respeta mp_enabled del settings
 // - Maneja errores MP con payload claro
 // - Soporta modo REDIRECT (init_point / sandbox_init_point)
 
-function getAccessToken() {
-  const tok = process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "";
-  return String(tok || "").trim();
+const { getPaymentsSettings } = require("./shopPaymentsSettings.service");
+
+async function getAccessToken() {
+  const envTok = String(process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
+  if (envTok) return envTok;
+
+  // fallback settings (guardado por backoffice)
+  const p = await getPaymentsSettings();
+  const dbTok = String(p?.mp_access_token || "").trim();
+  return dbTok;
 }
 
-function mpIsEnabled() {
-  const token = getAccessToken();
+async function mpIsEnabled() {
+  const p = await getPaymentsSettings();
+  const enabledFlag = p?.mp_enabled === true || String(p?.mp_enabled || "").toLowerCase() === "true" || p?.mp_enabled === 1;
+
+  if (!enabledFlag) return false;
+
+  const token = await getAccessToken();
   return !!token;
 }
 
-function buildMpHeaders() {
-  const token = getAccessToken();
+async function buildMpHeaders() {
+  const token = await getAccessToken();
   if (!token) return null;
 
   return {
@@ -26,16 +39,15 @@ function buildMpHeaders() {
 }
 
 async function mpFetch(path, { method = "GET", body = null, params = null } = {}) {
-  const headers = buildMpHeaders();
+  const headers = await buildMpHeaders();
   if (!headers) {
-    const e = new Error("MercadoPago no configurado: falta MERCADOPAGO_ACCESS_TOKEN / MP_ACCESS_TOKEN");
+    const e = new Error("MercadoPago no configurado: falta token (ENV o settings payments.mp_access_token)");
     e.code = "MP_NOT_CONFIGURED";
     e.statusCode = 400;
     e.payload = { message: e.message };
     throw e;
   }
 
-  // Base URL oficial MP
   const base = "https://api.mercadopago.com";
   const url = new URL(base + path);
 
@@ -73,8 +85,6 @@ async function mpFetch(path, { method = "GET", body = null, params = null } = {}
     const e = new Error(`MercadoPago API error (${resp.status})`);
     e.code = "MP_API_ERROR";
     e.statusCode = resp.status;
-
-    // MP a veces trae {message, error, status, cause, ...}
     e.payload = data || { message: "Error MercadoPago" };
     throw e;
   }
@@ -129,15 +139,11 @@ async function createCheckoutPreference(opts = {}) {
     metadata: metadata || undefined,
   };
 
-  // Limpieza de undefined (MP a veces rompe si mandás undefined)
   Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
 
   const preference = await mpFetch("/checkout/preferences", { method: "POST", body });
 
-  const redirect_url =
-    preference?.init_point ||
-    preference?.sandbox_init_point ||
-    null;
+  const redirect_url = preference?.init_point || preference?.sandbox_init_point || null;
 
   return { preference, redirect_url };
 }
