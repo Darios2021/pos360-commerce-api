@@ -1,35 +1,22 @@
 // src/services/mercadopago.service.js
 // ✅ COPY-PASTE FINAL (SIN AXIOS) - Node 18+ usa fetch nativo
 //
-// - Usa token desde ENV y si no, desde settings payments.mp_access_token
-// - Respeta mp_enabled del settings
+// - Evita crash por "Cannot find module 'axios'"
 // - Maneja errores MP con payload claro
-// - Soporta modo REDIRECT (init_point / sandbox_init_point)
+// - Exporta createPreference (alias) para compat con tu controller
 
-const { getPaymentsSettings } = require("./shopPaymentsSettings.service");
-
-async function getAccessToken() {
-  const envTok = String(process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "").trim();
-  if (envTok) return envTok;
-
-  // fallback settings (guardado por backoffice)
-  const p = await getPaymentsSettings();
-  const dbTok = String(p?.mp_access_token || "").trim();
-  return dbTok;
+function getAccessToken() {
+  const tok = process.env.MP_ACCESS_TOKEN || process.env.MERCADOPAGO_ACCESS_TOKEN || "";
+  return String(tok || "").trim();
 }
 
-async function mpIsEnabled() {
-  const p = await getPaymentsSettings();
-  const enabledFlag = p?.mp_enabled === true || String(p?.mp_enabled || "").toLowerCase() === "true" || p?.mp_enabled === 1;
-
-  if (!enabledFlag) return false;
-
-  const token = await getAccessToken();
+function mpIsEnabled() {
+  const token = getAccessToken();
   return !!token;
 }
 
-async function buildMpHeaders() {
-  const token = await getAccessToken();
+function buildMpHeaders() {
+  const token = getAccessToken();
   if (!token) return null;
 
   return {
@@ -39,9 +26,9 @@ async function buildMpHeaders() {
 }
 
 async function mpFetch(path, { method = "GET", body = null, params = null } = {}) {
-  const headers = await buildMpHeaders();
+  const headers = buildMpHeaders();
   if (!headers) {
-    const e = new Error("MercadoPago no configurado: falta token (ENV o settings payments.mp_access_token)");
+    const e = new Error("MercadoPago no configurado: falta MERCADOPAGO_ACCESS_TOKEN / MP_ACCESS_TOKEN");
     e.code = "MP_NOT_CONFIGURED";
     e.statusCode = 400;
     e.payload = { message: e.message };
@@ -95,7 +82,7 @@ async function mpFetch(path, { method = "GET", body = null, params = null } = {}
 /**
  * Crea preferencia de pago (REDIRECT).
  * @param {Object} opts
- * @returns {Object} { preference, redirect_url }
+ * @returns {Object} preference (incluye init_point / sandbox_init_point)
  */
 async function createCheckoutPreference(opts = {}) {
   const {
@@ -122,6 +109,7 @@ async function createCheckoutPreference(opts = {}) {
 
   const body = {
     items: items.map((it) => ({
+      id: it.id != null ? String(it.id) : undefined,
       title: String(it.title || it.name || "Producto"),
       quantity: Number(it.quantity || it.qty || 1),
       unit_price: Number(it.unit_price || it.price || 0),
@@ -139,17 +127,26 @@ async function createCheckoutPreference(opts = {}) {
     metadata: metadata || undefined,
   };
 
+  // Limpieza de undefined (MP a veces rompe si mandás undefined)
   Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
+  body.items = (body.items || []).map((x) => {
+    const y = { ...x };
+    Object.keys(y).forEach((k) => y[k] === undefined && delete y[k]);
+    return y;
+  });
 
   const preference = await mpFetch("/checkout/preferences", { method: "POST", body });
+  return preference;
+}
 
-  const redirect_url = preference?.init_point || preference?.sandbox_init_point || null;
-
-  return { preference, redirect_url };
+// ✅ Alias: tu controller usa createPreference
+async function createPreference(opts = {}) {
+  return createCheckoutPreference(opts);
 }
 
 module.exports = {
   mpIsEnabled,
   mpFetch,
   createCheckoutPreference,
+  createPreference, // ✅ COMPAT
 };
