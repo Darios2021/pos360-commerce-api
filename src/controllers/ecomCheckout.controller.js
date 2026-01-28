@@ -1,5 +1,5 @@
 // src/controllers/ecomCheckout.controller.js
-// ✅ COPY-PASTE FINAL (alineado FRONT/STEPper + DB-first + MP real)
+// ✅ COPY-PASTE FINAL (DB-first real: orders + payments + MP)
 // POST /api/v1/ecom/checkout
 
 const crypto = require("crypto");
@@ -33,6 +33,23 @@ async function getColumns(tableName, transaction) {
     { replacements: { t: tableName }, transaction }
   );
   return new Set((rows || []).map((r) => String(r.name)));
+}
+
+function buildDynamicInsert(table, colsSet, dataObj) {
+  const data = {};
+  for (const [k, v] of Object.entries(dataObj || {})) {
+    if (v === undefined) continue;
+    if (colsSet.has(k)) data[k] = v;
+  }
+  const keys = Object.keys(data);
+  if (!keys.length) return null;
+
+  const cols = keys.join(", ");
+  const vals = keys.map((k) => `:${k}`).join(", ");
+  return {
+    sql: `INSERT INTO ${table} (${cols}) VALUES (${vals})`,
+    replacements: data,
+  };
 }
 
 /**
@@ -103,83 +120,14 @@ async function createMpPreference({ accessToken, publicBaseUrl, order, buyer, it
   };
 }
 
-// =========================
-// Normalizadores (compat front)
-// =========================
-function normalizeFulfillmentType(body) {
-  // canon: body.fulfillment_type
-  let ft = lower(body?.fulfillment_type);
-
-  // compat: body.delivery.mode (tu stepper maneja delivery.mode)
-  if (!ft) ft = lower(body?.delivery?.mode);
-
-  // compat raro: shipping/shipment
-  if (ft === "shipping") ft = "delivery";
-
-  if (ft !== "pickup" && ft !== "delivery") ft = "pickup";
-  return ft;
-}
-
-function normalizePickupBranchId(body) {
-  // canon: body.pickup_branch_id
-  let id = toInt(body?.pickup_branch_id, 0);
-
-  // compat: body.delivery.pickup_branch_id
-  if (!id) id = toInt(body?.delivery?.pickup_branch_id, 0);
-
-  return id;
-}
-
-function normalizeShipping(body) {
-  // canon: body.shipping
-  // compat: body.delivery (tu stepper usa delivery.*)
-  const s = body?.shipping || body?.delivery || null;
-  return s && typeof s === "object" ? s : null;
-}
-
-function normalizePayment(body) {
-  const p = body?.payment && typeof body.payment === "object" ? body.payment : {};
-  const x = { ...p };
-
-  // canon
-  let code = lower(x.method_code);
-
-  // legacy enums
-  const legacy = toStr(x.method).toUpperCase();
-  if (!code) {
-    if (legacy === "MERCADO_PAGO") code = "mercadopago";
-    else if (legacy === "TRANSFER") code = "transfer";
-    else if (legacy === "CASH") code = "cash";
-    else if (legacy === "AGREE") code = "seller";
-    else if (legacy === "CREDIT_SJT") code = "credit_sjt";
-  }
-
-  // provider suelto
-  const prov = lower(x.provider);
-  if (!code && prov) code = prov;
-
-  // whitelist
-  const allowed = new Set(["mercadopago", "transfer", "cash", "credit_sjt", "seller"]);
-  if (!allowed.has(code)) code = "";
-
-  x.method_code = code;
-  x.reference = toStr(x.reference) || null;
-
-  return x;
-}
-
 // ✅ Export que espera el route: "checkout"
 async function checkout(req, res) {
   const body = req.body || {};
   const request_id = crypto.randomBytes(8).toString("hex");
 
   const branch_id_input = toInt(body.branch_id, 0);
-
-  // ✅ ALINEADO: fulfillment_type sale de body.fulfillment_type o body.delivery.mode
-  const fulfillment_type = normalizeFulfillmentType(body);
-
-  // ✅ ALINEADO: pickup_branch_id también puede venir de body.delivery.pickup_branch_id
-  const pickup_branch_id = normalizePickupBranchId(body);
+  const fulfillment_type = lower(body.fulfillment_type) || "pickup";
+  const pickup_branch_id = toInt(body.pickup_branch_id, 0);
 
   const buyer = body.buyer || {};
   const buyer_name = toStr(buyer.name);
@@ -187,11 +135,9 @@ async function checkout(req, res) {
   const buyer_phone = toStr(buyer.phone);
   const buyer_doc = toStr(buyer.doc_number);
 
-  // ✅ ALINEADO: shipping puede venir como body.shipping o body.delivery
-  const shipping = normalizeShipping(body);
+  const shipping = body.shipping || null;
 
-  // ✅ ALINEADO: payment.method_code DB-first + compat legacy
-  const payment = normalizePayment(body);
+  const payment = body.payment || {};
   const method_code = lower(payment.method_code);
   const payment_reference = toStr(payment.reference) || null;
 
@@ -235,7 +181,7 @@ async function checkout(req, res) {
     return res.status(400).json({
       ok: false,
       code: "MISSING_PAYMENT_METHOD",
-      message: "Falta payment.method_code (o legacy method/provider).",
+      message: "Falta payment.method_code.",
       request_id,
     });
   }
@@ -276,7 +222,7 @@ async function checkout(req, res) {
   }
 
   const provider = lower(methodRow.provider); // mercadopago | cash | transfer | credit_sjt | seller
-  const requires_redirect = !!methodRow.requires_redirect; // (queda por si lo usás después)
+  const requires_redirect = !!methodRow.requires_redirect;
 
   // ===== Transacción =====
   try {
@@ -379,7 +325,6 @@ async function checkout(req, res) {
         });
       }
 
-      // ✅ shipping_total alineado: body.shipping_total OR shipping.amount
       const shipping_total =
         fulfillment_type === "delivery"
           ? toNum(body.shipping_total, 0) || toNum(shipping?.amount, 0) || 0
@@ -387,66 +332,60 @@ async function checkout(req, res) {
 
       const total = subtotal + shipping_total;
 
-      // ---- (C) Insert order ----
+      // ---- (C) Insert order (✅ DB-first real: solo columnas existentes) ----
       const public_code = genPublicCode();
-
-      // Para retiro: branch_id = pickup_branch_id
       const branch_id_for_order = fulfillment_type === "pickup" ? pickup_branch_id : branch_id_input;
-
-      const ship_name =
-        fulfillment_type === "delivery" ? toStr(shipping?.contact_name || buyer_name) || null : null;
-      const ship_phone =
-        fulfillment_type === "delivery" ? toStr(shipping?.ship_phone || buyer_phone) || null : null;
-      const ship_address1 = fulfillment_type === "delivery" ? toStr(shipping?.address1) || null : null;
-      const ship_address2 = fulfillment_type === "delivery" ? toStr(shipping?.address2) || null : null;
-      const ship_city = fulfillment_type === "delivery" ? toStr(shipping?.city) || null : null;
-      const ship_province = fulfillment_type === "delivery" ? toStr(shipping?.province) || null : null;
-      const ship_zip = fulfillment_type === "delivery" ? toStr(shipping?.zip) || null : null;
 
       let order_payment_status = "unpaid";
       if (provider === "mercadopago") order_payment_status = "pending";
       if (provider === "transfer") order_payment_status = "pending";
 
-      const notes = fulfillment_type === "delivery" ? toStr(shipping?.notes) || null : null;
+      const ocols = await getColumns("ecom_orders", t);
 
-      const [ores] = await sequelize.query(
-        `
-        INSERT INTO ecom_orders
-        (public_code, branch_id, customer_id, status, payment_status, checkout_provider, currency,
-         subtotal, discount_total, shipping_total, total, fulfillment_type,
-         ship_name, ship_phone, ship_address1, ship_address2, ship_city, ship_province, ship_zip,
-         notes, created_at, updated_at)
-        VALUES
-        (:public_code, :branch_id, :customer_id, 'created', :payment_status, :checkout_provider, 'ARS',
-         :subtotal, 0, :shipping_total, :total, :fulfillment_type,
-         :ship_name, :ship_phone, :ship_address1, :ship_address2, :ship_city, :ship_province, :ship_zip,
-         :notes, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        `,
-        {
-          replacements: {
-            public_code,
-            branch_id: branch_id_for_order,
-            customer_id,
-            payment_status: order_payment_status,
-            checkout_provider: provider || null,
-            subtotal,
-            shipping_total,
-            total,
-            fulfillment_type,
-            ship_name,
-            ship_phone,
-            ship_address1,
-            ship_address2,
-            ship_city,
-            ship_province,
-            ship_zip,
-            notes,
-          },
-          transaction: t,
-        }
-      );
+      const orderData = {
+        public_code,
+        branch_id: branch_id_for_order,
+        customer_id: customer_id || null,
+        status: "created",
+        payment_status: order_payment_status,
+        checkout_provider: provider || null,
+        currency: "ARS",
+        subtotal,
+        discount_total: 0,
+        shipping_total,
+        total,
+        fulfillment_type,
 
+        // shipping fields (solo si existen)
+        ship_name: fulfillment_type === "delivery" ? toStr(shipping?.contact_name || buyer_name) || null : null,
+        ship_phone: fulfillment_type === "delivery" ? toStr(shipping?.ship_phone || buyer_phone) || null : null,
+        ship_address1: fulfillment_type === "delivery" ? toStr(shipping?.address1) || null : null,
+        ship_address2: fulfillment_type === "delivery" ? toStr(shipping?.address2) || null : null,
+        ship_city: fulfillment_type === "delivery" ? toStr(shipping?.city) || null : null,
+        ship_province: fulfillment_type === "delivery" ? toStr(shipping?.province) || null : null,
+        ship_zip: fulfillment_type === "delivery" ? toStr(shipping?.zip) || null : null,
+        notes: fulfillment_type === "delivery" ? toStr(shipping?.notes) || null : null,
+
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      // fallback por si tu schema usa otros nombres comunes
+      if (ocols.has("delivery_address") && orderData.ship_address1 && !orderData.delivery_address) {
+        orderData.delivery_address = orderData.ship_address1;
+      }
+      if (ocols.has("pickup_branch_id") && fulfillment_type === "pickup") {
+        orderData.pickup_branch_id = pickup_branch_id;
+      }
+
+      const insOrder = buildDynamicInsert("ecom_orders", ocols, orderData);
+      if (!insOrder) {
+        return { error: { status: 500, code: "ORDER_SCHEMA_EMPTY", message: "No hay columnas insertables en ecom_orders." } };
+      }
+
+      const [ores] = await sequelize.query(insOrder.sql, { replacements: insOrder.replacements, transaction: t });
       const order_id = toInt(ores?.insertId, 0);
+
       if (!order_id) {
         return { error: { status: 500, code: "ORDER_CREATE_FAILED", message: "No se pudo crear el pedido." } };
       }
@@ -471,37 +410,38 @@ async function checkout(req, res) {
         );
       }
 
-      // ---- (E) Insert payment ----
-      // ecom_payments: provider + method + status + amount + reference + external_payload + mp_*
+      // ---- (E) Insert payment (✅ DB-first real: solo columnas existentes) ----
+      const pcols = await getColumns("ecom_payments", t);
+
+      const basePaymentData = {
+        order_id,
+        provider,
+        method: method_code || null,
+        status: provider === "mercadopago" ? "pending" : "created",
+        amount: total,
+        currency: "ARS",
+        reference: payment_reference,
+        external_reference: public_code,
+        external_status: provider === "mercadopago" ? "preference_created" : null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      // NO MP: guardamos payload si existe la columna
       if (provider !== "mercadopago") {
         const external_payload = {
           method_code,
           buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone, doc_number: buyer_doc || null },
           fulfillment_type,
-          pickup_branch_id: pickup_branch_id || null,
         };
+        basePaymentData.external_payload = JSON.stringify(external_payload);
 
-        const [pres] = await sequelize.query(
-          `
-          INSERT INTO ecom_payments
-          (order_id, provider, method, status, amount, currency, reference, external_reference, external_payload, created_at, updated_at)
-          VALUES
-          (:order_id, :provider, :method, 'created', :amount, 'ARS', :reference, :external_reference, :external_payload, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          `,
-          {
-            replacements: {
-              order_id,
-              provider,
-              method: method_code || null,
-              amount: total,
-              reference: payment_reference,
-              external_reference: public_code,
-              external_payload: JSON.stringify(external_payload),
-            },
-            transaction: t,
-          }
-        );
+        const insPay = buildDynamicInsert("ecom_payments", pcols, basePaymentData);
+        if (!insPay) {
+          return { error: { status: 500, code: "PAYMENT_SCHEMA_EMPTY", message: "No hay columnas insertables en ecom_payments." } };
+        }
 
+        const [pres] = await sequelize.query(insPay.sql, { replacements: insPay.replacements, transaction: t });
         const pay_id = toInt(pres?.insertId, 0);
 
         return {
@@ -516,18 +456,13 @@ async function checkout(req, res) {
             total,
             payment_status: order_payment_status,
           },
-          payment: {
-            id: pay_id,
-            provider,
-            status: "created",
-            external_reference: public_code,
-          },
+          payment: { id: pay_id, provider, status: "created", external_reference: public_code },
           redirect_url: null,
           mp: null,
         };
       }
 
-      // provider === mercadopago
+      // MP: crear preferencia
       const accessToken = process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN || "";
       const publicBaseUrl =
         process.env.PUBLIC_BASE_URL || process.env.FRONTEND_PUBLIC_URL || process.env.BASE_URL || "";
@@ -548,31 +483,22 @@ async function checkout(req, res) {
         method_code,
         buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone, doc_number: buyer_doc || null },
         fulfillment_type,
-        pickup_branch_id: pickup_branch_id || null,
       };
 
-      const [pres] = await sequelize.query(
-        `
-        INSERT INTO ecom_payments
-        (order_id, provider, method, status, amount, currency, external_reference,
-         mp_preference_id, external_status, external_payload, created_at, updated_at)
-        VALUES
-        (:order_id, 'mercadopago', :method, 'pending', :amount, 'ARS', :external_reference,
-         :mp_preference_id, 'preference_created', :external_payload, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        `,
-        {
-          replacements: {
-            order_id,
-            method: method_code || null,
-            amount: total,
-            external_reference: public_code,
-            mp_preference_id: mp.id || null,
-            external_payload: JSON.stringify(mpPayload),
-          },
-          transaction: t,
-        }
-      );
+      const mpPaymentData = {
+        ...basePaymentData,
+        provider: "mercadopago",
+        status: "pending",
+        mp_preference_id: mp.id || null,
+        external_payload: JSON.stringify(mpPayload),
+      };
 
+      const insPay = buildDynamicInsert("ecom_payments", pcols, mpPaymentData);
+      if (!insPay) {
+        return { error: { status: 500, code: "PAYMENT_SCHEMA_EMPTY", message: "No hay columnas insertables en ecom_payments." } };
+      }
+
+      const [pres] = await sequelize.query(insPay.sql, { replacements: insPay.replacements, transaction: t });
       const pay_id = toInt(pres?.insertId, 0);
 
       return {
@@ -587,12 +513,7 @@ async function checkout(req, res) {
           total,
           payment_status: "pending",
         },
-        payment: {
-          id: pay_id,
-          provider: "mercadopago",
-          status: "pending",
-          external_reference: public_code,
-        },
+        payment: { id: pay_id, provider: "mercadopago", status: "pending", external_reference: public_code },
         redirect_url,
         mp: { id: mp.id, init_point: mp.init_point, sandbox_init_point: mp.sandbox_init_point },
       };
