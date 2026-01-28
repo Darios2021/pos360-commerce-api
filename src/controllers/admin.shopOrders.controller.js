@@ -6,10 +6,10 @@
 // GET  /api/v1/admin/shop/orders/:id
 //
 // Lee desde tablas:
-// - ecom_orders, ecom_order_items, ecom_payments, ecom_customers, branches
+// - ecom_orders, ecom_order_items, ecom_payments, ecom_customers, branches, ecom_payment_methods
 //
 // Soporta filtros:
-// - q (public_code, email, nombre)
+// - q (public_code, email, nombre, id)
 // - status
 // - fulfillment_type
 // - branch_id
@@ -19,6 +19,11 @@
 // ✅ FIX IMPORTANTE:
 // - Si NO es super_admin, limita por req.access.branch_ids (user_branches)
 // - branch_id solo si está permitido
+//
+// ✅ NUEVO:
+// - JOIN a ecom_payment_methods para traer title/description/badges/icon/flags
+// - LIST: trae el último pago + método “bonito”
+// - DETAIL: payments[] trae campos completos + método “bonito” (method_*)
 
 const { sequelize } = require("../models");
 
@@ -167,7 +172,7 @@ async function listOrders(req, res) {
 
     const total = Number(countRows?.[0]?.total || 0);
 
-    // data (con agregados de items y pagos)
+    // data (con agregados de items y último pago + método bonito)
     const [rows] = await sequelize.query(
       `
       SELECT
@@ -177,20 +182,39 @@ async function listOrders(req, res) {
         o.fulfillment_type,
         o.branch_id,
         b.name AS branch_name,
+
         o.customer_id,
         c.email AS customer_email,
         CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,'')) AS customer_name,
+        c.phone AS customer_phone,
+        c.doc_number AS customer_doc_number,
+
         o.subtotal,
         o.shipping_total,
         o.total,
         o.created_at,
 
+        -- payment_status del pedido (este es el "oficial" del order)
+        o.payment_status AS order_payment_status,
+
         COALESCE(oi.items_count, 0) AS items_count,
         COALESCE(oi.items_qty, 0) AS items_qty,
 
+        -- último pago
         ep.provider AS payment_provider,
-        ep.status AS payment_status,
-        ep.amount  AS payment_amount
+        ep.method   AS payment_method,
+        ep.status   AS payment_status,
+        ep.amount   AS payment_amount,
+
+        -- método “bonito” (para que se vea como en el frontend)
+        pm.title         AS payment_method_title,
+        pm.description   AS payment_method_description,
+        pm.badge_text    AS payment_method_badge_text,
+        pm.badge_variant AS payment_method_badge_variant,
+        pm.icon          AS payment_method_icon,
+        pm.requires_redirect   AS payment_method_requires_redirect,
+        pm.allows_proof_upload AS payment_method_allows_proof_upload,
+        pm.is_cash_like        AS payment_method_is_cash_like
 
       FROM ecom_orders o
       LEFT JOIN ecom_customers c ON c.id = o.customer_id
@@ -214,6 +238,9 @@ async function listOrders(req, res) {
           GROUP BY order_id
         ) px ON px.order_id = p1.order_id AND px.max_id = p1.id
       ) ep ON ep.order_id = o.id
+
+      LEFT JOIN ecom_payment_methods pm
+        ON pm.enabled = 1 AND LOWER(pm.code) = LOWER(ep.method)
 
       ${whereSql}
       ORDER BY o.id DESC
@@ -305,22 +332,51 @@ async function getOrderById(req, res) {
       { replacements: { id } }
     );
 
+    // ✅ Payments completos + método “bonito” para render tipo frontend
     const [payments] = await sequelize.query(
       `
       SELECT
-        id,
-        order_id,
-        provider,
-        status,
-        amount,
-        external_id,
-        external_status,
-        external_payload,
-        created_at,
-        updated_at
-      FROM ecom_payments
-      WHERE order_id = :id
-      ORDER BY id ASC
+        p.id,
+        p.order_id,
+        p.provider,
+        p.method,
+        p.status,
+        p.amount,
+        p.currency,
+        p.reference,
+        p.note,
+        p.external_id,
+        p.external_reference,
+        p.mp_preference_id,
+        p.mp_payment_id,
+        p.mp_merchant_order_id,
+        p.external_status,
+        p.status_detail,
+        p.payer_email,
+        p.proof_url,
+        p.bank_reference,
+        p.reviewed_by,
+        p.reviewed_at,
+        p.review_note,
+        p.external_payload,
+        p.created_at,
+        p.updated_at,
+        p.paid_at,
+
+        pm.title         AS method_title,
+        pm.description   AS method_description,
+        pm.badge_text    AS method_badge_text,
+        pm.badge_variant AS method_badge_variant,
+        pm.icon          AS method_icon,
+        pm.requires_redirect   AS requires_redirect,
+        pm.allows_proof_upload AS allows_proof_upload,
+        pm.is_cash_like        AS is_cash_like
+
+      FROM ecom_payments p
+      LEFT JOIN ecom_payment_methods pm
+        ON pm.enabled = 1 AND LOWER(pm.code) = LOWER(p.method)
+      WHERE p.order_id = :id
+      ORDER BY p.id ASC
       `,
       { replacements: { id } }
     );
