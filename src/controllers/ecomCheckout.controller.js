@@ -1,24 +1,6 @@
 // src/controllers/ecomCheckout.controller.js
-// ✅ COPY-PASTE FINAL (DB-first payment methods + MP real)
+// ✅ COPY-PASTE FINAL (alineado FRONT/STEPper + DB-first + MP real)
 // POST /api/v1/ecom/checkout
-//
-// Input esperado:
-// {
-//   branch_id: 3,
-//   fulfillment_type: "pickup" | "delivery",
-//   pickup_branch_id?: 3,
-//   buyer: { name, email, phone, doc_number? },
-//   shipping?: { contact_name?, ship_phone?, address1, address2?, city, province, zip, notes? },
-//   payment: { method_code: "cash"|"transfer"|"mercadopago"|"credit_sjt"|"seller", reference? },
-//   items: [ { product_id, qty } ]
-// }
-//
-// DB:
-// - ecom_orders (tu schema actual)
-// - ecom_order_items
-// - ecom_payments
-// - ecom_customers (se hace upsert "best-effort" por email)
-// - ecom_payment_methods (enabled=1)
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -53,35 +35,26 @@ async function getColumns(tableName, transaction) {
   return new Set((rows || []).map((r) => String(r.name)));
 }
 
-function pick(obj, keys, transformFn) {
-  const out = {};
-  for (const k of keys) {
-    if (obj[k] === undefined) continue;
-    out[k] = transformFn ? transformFn(obj[k], k) : obj[k];
-  }
-  return out;
-}
-
 /**
  * MercadoPago: crear preferencia via API (sin SDK)
  */
 async function createMpPreference({ accessToken, publicBaseUrl, order, buyer, items }) {
   if (!accessToken) throw new Error("MP_ACCESS_TOKEN_MISSING");
 
-  // back_urls (ajustá si ya tenés rutas específicas en shop)
-  const success = `${publicBaseUrl.replace(/\/$/, "")}/shop/checkout/success?order=${order.public_code}`;
-  const pending = `${publicBaseUrl.replace(/\/$/, "")}/shop/checkout/pending?order=${order.public_code}`;
-  const failure = `${publicBaseUrl.replace(/\/$/, "")}/shop/checkout/failure?order=${order.public_code}`;
+  const base = String(publicBaseUrl || "").replace(/\/$/, "");
+  if (!base) throw new Error("PUBLIC_BASE_URL_MISSING");
 
-  const mpItems = items.map((it) => ({
+  const success = `${base}/shop/checkout/success?order=${order.public_code}`;
+  const pending = `${base}/shop/checkout/pending?order=${order.public_code}`;
+  const failure = `${base}/shop/checkout/failure?order=${order.public_code}`;
+
+  const mpItems = (items || []).map((it) => ({
     title: String(it.product_name || `Producto #${it.product_id}`),
     quantity: Number(it.qty || 1),
     unit_price: Number(toNum(it.unit_price, 0)),
     currency_id: "ARS",
   }));
 
-  // Si no querés mandar items detallados, podés mandar 1 item con el total.
-  // Pero así está perfecto para trazabilidad.
   if (!mpItems.length) {
     mpItems.push({
       title: `Pedido ${order.public_code}`,
@@ -100,7 +73,7 @@ async function createMpPreference({ accessToken, publicBaseUrl, order, buyer, it
     items: mpItems,
     back_urls: { success, pending, failure },
     auto_return: "approved",
-    notification_url: `${publicBaseUrl.replace(/\/$/, "")}/api/v1/ecom/webhooks/mercadopago`,
+    notification_url: `${base}/api/v1/ecom/webhooks/mercadopago`,
   };
 
   const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
@@ -130,14 +103,83 @@ async function createMpPreference({ accessToken, publicBaseUrl, order, buyer, it
   };
 }
 
+// =========================
+// Normalizadores (compat front)
+// =========================
+function normalizeFulfillmentType(body) {
+  // canon: body.fulfillment_type
+  let ft = lower(body?.fulfillment_type);
+
+  // compat: body.delivery.mode (tu stepper maneja delivery.mode)
+  if (!ft) ft = lower(body?.delivery?.mode);
+
+  // compat raro: shipping/shipment
+  if (ft === "shipping") ft = "delivery";
+
+  if (ft !== "pickup" && ft !== "delivery") ft = "pickup";
+  return ft;
+}
+
+function normalizePickupBranchId(body) {
+  // canon: body.pickup_branch_id
+  let id = toInt(body?.pickup_branch_id, 0);
+
+  // compat: body.delivery.pickup_branch_id
+  if (!id) id = toInt(body?.delivery?.pickup_branch_id, 0);
+
+  return id;
+}
+
+function normalizeShipping(body) {
+  // canon: body.shipping
+  // compat: body.delivery (tu stepper usa delivery.*)
+  const s = body?.shipping || body?.delivery || null;
+  return s && typeof s === "object" ? s : null;
+}
+
+function normalizePayment(body) {
+  const p = body?.payment && typeof body.payment === "object" ? body.payment : {};
+  const x = { ...p };
+
+  // canon
+  let code = lower(x.method_code);
+
+  // legacy enums
+  const legacy = toStr(x.method).toUpperCase();
+  if (!code) {
+    if (legacy === "MERCADO_PAGO") code = "mercadopago";
+    else if (legacy === "TRANSFER") code = "transfer";
+    else if (legacy === "CASH") code = "cash";
+    else if (legacy === "AGREE") code = "seller";
+    else if (legacy === "CREDIT_SJT") code = "credit_sjt";
+  }
+
+  // provider suelto
+  const prov = lower(x.provider);
+  if (!code && prov) code = prov;
+
+  // whitelist
+  const allowed = new Set(["mercadopago", "transfer", "cash", "credit_sjt", "seller"]);
+  if (!allowed.has(code)) code = "";
+
+  x.method_code = code;
+  x.reference = toStr(x.reference) || null;
+
+  return x;
+}
+
 // ✅ Export que espera el route: "checkout"
 async function checkout(req, res) {
   const body = req.body || {};
   const request_id = crypto.randomBytes(8).toString("hex");
 
   const branch_id_input = toInt(body.branch_id, 0);
-  const fulfillment_type = lower(body.fulfillment_type) || "pickup";
-  const pickup_branch_id = toInt(body.pickup_branch_id, 0);
+
+  // ✅ ALINEADO: fulfillment_type sale de body.fulfillment_type o body.delivery.mode
+  const fulfillment_type = normalizeFulfillmentType(body);
+
+  // ✅ ALINEADO: pickup_branch_id también puede venir de body.delivery.pickup_branch_id
+  const pickup_branch_id = normalizePickupBranchId(body);
 
   const buyer = body.buyer || {};
   const buyer_name = toStr(buyer.name);
@@ -145,9 +187,11 @@ async function checkout(req, res) {
   const buyer_phone = toStr(buyer.phone);
   const buyer_doc = toStr(buyer.doc_number);
 
-  const shipping = body.shipping || null;
+  // ✅ ALINEADO: shipping puede venir como body.shipping o body.delivery
+  const shipping = normalizeShipping(body);
 
-  const payment = body.payment || {};
+  // ✅ ALINEADO: payment.method_code DB-first + compat legacy
+  const payment = normalizePayment(body);
   const method_code = lower(payment.method_code);
   const payment_reference = toStr(payment.reference) || null;
 
@@ -191,7 +235,7 @@ async function checkout(req, res) {
     return res.status(400).json({
       ok: false,
       code: "MISSING_PAYMENT_METHOD",
-      message: "Falta payment.method_code.",
+      message: "Falta payment.method_code (o legacy method/provider).",
       request_id,
     });
   }
@@ -232,7 +276,7 @@ async function checkout(req, res) {
   }
 
   const provider = lower(methodRow.provider); // mercadopago | cash | transfer | credit_sjt | seller
-  const requires_redirect = !!methodRow.requires_redirect;
+  const requires_redirect = !!methodRow.requires_redirect; // (queda por si lo usás después)
 
   // ===== Transacción =====
   try {
@@ -240,10 +284,8 @@ async function checkout(req, res) {
       // ---- (A) Upsert customer (best-effort según columnas reales) ----
       let customer_id = null;
 
-      // Miramos columnas reales para no romper si tu tabla difiere
       const ccols = await getColumns("ecom_customers", t);
 
-      // Buscar por email si existe columna email
       if (ccols.has("email")) {
         const [crows] = await sequelize.query(
           `SELECT id FROM ecom_customers WHERE LOWER(email) = :email LIMIT 1`,
@@ -260,11 +302,8 @@ async function checkout(req, res) {
           if (ccols.has("last_name")) upd.last_name = null;
           if (ccols.has("phone")) upd.phone = buyer_phone || null;
           if (ccols.has("doc_number")) upd.doc_number = buyer_doc || null;
-
-          // updated_at si existe
           if (ccols.has("updated_at")) upd.updated_at = new Date();
 
-          // armar SET dinámico
           const sets = Object.keys(upd)
             .map((k) => `${k} = :${k}`)
             .join(", ");
@@ -278,7 +317,6 @@ async function checkout(req, res) {
         }
 
         if (!customer_id) {
-          // Insert mínimo: email + lo que exista
           const ins = { email: buyer_email };
           if (ccols.has("first_name")) ins.first_name = buyer_name;
           if (ccols.has("last_name")) ins.last_name = null;
@@ -301,7 +339,6 @@ async function checkout(req, res) {
       }
 
       // ---- (B) Traer productos + precios ----
-      // OJO: tu products (por tu API) tiene price, price_list, price_discount
       const productIds = items.map((x) => x.product_id);
 
       const [prows] = await sequelize.query(
@@ -342,6 +379,7 @@ async function checkout(req, res) {
         });
       }
 
+      // ✅ shipping_total alineado: body.shipping_total OR shipping.amount
       const shipping_total =
         fulfillment_type === "delivery"
           ? toNum(body.shipping_total, 0) || toNum(shipping?.amount, 0) || 0
@@ -349,7 +387,7 @@ async function checkout(req, res) {
 
       const total = subtotal + shipping_total;
 
-      // ---- (C) Insert order (con tu schema exacto) ----
+      // ---- (C) Insert order ----
       const public_code = genPublicCode();
 
       // Para retiro: branch_id = pickup_branch_id
@@ -365,10 +403,6 @@ async function checkout(req, res) {
       const ship_province = fulfillment_type === "delivery" ? toStr(shipping?.province) || null : null;
       const ship_zip = fulfillment_type === "delivery" ? toStr(shipping?.zip) || null : null;
 
-      // payment_status:
-      // - mercadopago => pending
-      // - transfer => pending
-      // - cash/credit/seller => unpaid
       let order_payment_status = "unpaid";
       if (provider === "mercadopago") order_payment_status = "pending";
       if (provider === "transfer") order_payment_status = "pending";
@@ -439,13 +473,12 @@ async function checkout(req, res) {
 
       // ---- (E) Insert payment ----
       // ecom_payments: provider + method + status + amount + reference + external_payload + mp_*
-      let paymentRow = null;
-
       if (provider !== "mercadopago") {
         const external_payload = {
           method_code,
           buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone, doc_number: buyer_doc || null },
           fulfillment_type,
+          pickup_branch_id: pickup_branch_id || null,
         };
 
         const [pres] = await sequelize.query(
@@ -471,13 +504,6 @@ async function checkout(req, res) {
 
         const pay_id = toInt(pres?.insertId, 0);
 
-        paymentRow = {
-          id: pay_id,
-          provider,
-          status: "created",
-          external_reference: public_code,
-        };
-
         return {
           order: {
             id: order_id,
@@ -490,7 +516,12 @@ async function checkout(req, res) {
             total,
             payment_status: order_payment_status,
           },
-          payment: paymentRow,
+          payment: {
+            id: pay_id,
+            provider,
+            status: "created",
+            external_reference: public_code,
+          },
           redirect_url: null,
           mp: null,
         };
@@ -517,6 +548,7 @@ async function checkout(req, res) {
         method_code,
         buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone, doc_number: buyer_doc || null },
         fulfillment_type,
+        pickup_branch_id: pickup_branch_id || null,
       };
 
       const [pres] = await sequelize.query(
@@ -543,13 +575,6 @@ async function checkout(req, res) {
 
       const pay_id = toInt(pres?.insertId, 0);
 
-      paymentRow = {
-        id: pay_id,
-        provider: "mercadopago",
-        status: "pending",
-        external_reference: public_code,
-      };
-
       return {
         order: {
           id: order_id,
@@ -562,7 +587,12 @@ async function checkout(req, res) {
           total,
           payment_status: "pending",
         },
-        payment: paymentRow,
+        payment: {
+          id: pay_id,
+          provider: "mercadopago",
+          status: "pending",
+          external_reference: public_code,
+        },
         redirect_url,
         mp: { id: mp.id, init_point: mp.init_point, sandbox_init_point: mp.sandbox_init_point },
       };
