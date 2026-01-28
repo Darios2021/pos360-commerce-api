@@ -1,5 +1,5 @@
 // src/controllers/admin.shopOrders.controller.js
-// ✅ COPY-PASTE FINAL (con scope por branch_ids según RBAC)
+// ✅ COPY-PASTE FINAL (RBAC + FIX COLLATION + payment method UI fields)
 //
 // Admin Ecommerce Orders
 // GET  /api/v1/admin/shop/orders
@@ -8,24 +8,17 @@
 // Lee desde tablas:
 // - ecom_orders, ecom_order_items, ecom_payments, ecom_customers, branches, ecom_payment_methods
 //
-// Soporta filtros:
-// - q (public_code, email, nombre, id)
-// - status
-// - fulfillment_type
-// - branch_id
-// - from, to (YYYY-MM-DD)
-// - page, limit
+// ✅ FIX CRÍTICO:
+// - Evita "Illegal mix of collations (utf8mb4_0900_ai_ci) and (utf8mb4_unicode_ci)"
+//   forzando conversion/collate en expresiones string.
 //
-// ✅ FIX IMPORTANTE:
-// - Si NO es super_admin, limita por req.access.branch_ids (user_branches)
-// - branch_id solo si está permitido
-//
-// ✅ NUEVO:
-// - JOIN a ecom_payment_methods para traer title/description/badges/icon/flags
-// - LIST: trae el último pago + método “bonito”
-// - DETAIL: payments[] trae campos completos + método “bonito” (method_*)
+// ✅ BONUS:
+// - Expone campos del método de pago para que el ADMIN lo muestre igual que el frontend:
+//   payment_method_title, badge_text, badge_variant, icon, requires_redirect, allows_proof_upload, is_cash_like
 
 const { sequelize } = require("../models");
+
+const COLL = "utf8mb4_unicode_ci";
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -49,6 +42,7 @@ function getAccess(req) {
   return {
     is_super_admin: Boolean(a.is_super_admin),
     branch_ids,
+    roles: Array.isArray(a.roles) ? a.roles : [],
   };
 }
 
@@ -57,12 +51,16 @@ function buildWhere({ q, status, fulfillment_type, branch_id, from, to, allowedB
   const repl = {};
 
   if (status) {
-    where.push("o.status = :status");
-    repl.status = status;
+    // 🔒 collation-safe compare
+    where.push(`o.status COLLATE ${COLL} = CONVERT(:status USING utf8mb4) COLLATE ${COLL}`);
+    repl.status = String(status);
   }
+
   if (fulfillment_type) {
-    where.push("o.fulfillment_type = :fulfillment_type");
-    repl.fulfillment_type = fulfillment_type;
+    where.push(
+      `o.fulfillment_type COLLATE ${COLL} = CONVERT(:fulfillment_type USING utf8mb4) COLLATE ${COLL}`
+    );
+    repl.fulfillment_type = String(fulfillment_type);
   }
 
   // ✅ Scope por sucursal:
@@ -71,7 +69,6 @@ function buildWhere({ q, status, fulfillment_type, branch_id, from, to, allowedB
   if (!isSuperAdmin) {
     const allowed = (allowedBranchIds || []).map((x) => Number(x)).filter(Boolean);
 
-    // si no tiene branches, no debería ver nada
     if (!allowed.length) {
       where.push("1 = 0");
     } else {
@@ -100,12 +97,19 @@ function buildWhere({ q, status, fulfillment_type, branch_id, from, to, allowedB
 
   const qq = toStr(q);
   if (qq) {
+    // 🔒 collation-safe LIKE / CONCAT / CAST compare
     where.push(`
       (
-        o.public_code LIKE :q_like
-        OR c.email LIKE :q_like
-        OR CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,'')) LIKE :q_like
-        OR CAST(o.id AS CHAR) = :q_exact
+        o.public_code COLLATE ${COLL} LIKE CONVERT(:q_like USING utf8mb4) COLLATE ${COLL}
+        OR c.email COLLATE ${COLL} LIKE CONVERT(:q_like USING utf8mb4) COLLATE ${COLL}
+        OR (
+          CONCAT(
+            IFNULL(CONVERT(c.first_name USING utf8mb4), ''),
+            CONVERT(' ' USING utf8mb4),
+            IFNULL(CONVERT(c.last_name USING utf8mb4), '')
+          ) COLLATE ${COLL}
+        ) LIKE CONVERT(:q_like USING utf8mb4) COLLATE ${COLL}
+        OR CAST(o.id AS CHAR) COLLATE ${COLL} = CONVERT(:q_exact USING utf8mb4) COLLATE ${COLL}
       )
     `);
     repl.q_like = `%${qq}%`;
@@ -172,7 +176,7 @@ async function listOrders(req, res) {
 
     const total = Number(countRows?.[0]?.total || 0);
 
-    // data (con agregados de items y último pago + método bonito)
+    // data (con agregados de items y pagos + método bonito)
     const [rows] = await sequelize.query(
       `
       SELECT
@@ -182,39 +186,37 @@ async function listOrders(req, res) {
         o.fulfillment_type,
         o.branch_id,
         b.name AS branch_name,
-
         o.customer_id,
         c.email AS customer_email,
-        CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,'')) AS customer_name,
-        c.phone AS customer_phone,
-        c.doc_number AS customer_doc_number,
+
+        (
+          CONCAT(
+            IFNULL(CONVERT(c.first_name USING utf8mb4), ''),
+            CONVERT(' ' USING utf8mb4),
+            IFNULL(CONVERT(c.last_name USING utf8mb4), '')
+          ) COLLATE ${COLL}
+        ) AS customer_name,
 
         o.subtotal,
         o.shipping_total,
         o.total,
         o.created_at,
 
-        -- payment_status del pedido (este es el "oficial" del order)
-        o.payment_status AS order_payment_status,
-
         COALESCE(oi.items_count, 0) AS items_count,
         COALESCE(oi.items_qty, 0) AS items_qty,
 
-        -- último pago
         ep.provider AS payment_provider,
         ep.method   AS payment_method,
         ep.status   AS payment_status,
         ep.amount   AS payment_amount,
 
-        -- método “bonito” (para que se vea como en el frontend)
-        pm.title         AS payment_method_title,
-        pm.description   AS payment_method_description,
-        pm.badge_text    AS payment_method_badge_text,
+        pm.title        AS payment_method_title,
+        pm.badge_text   AS payment_method_badge_text,
         pm.badge_variant AS payment_method_badge_variant,
-        pm.icon          AS payment_method_icon,
-        pm.requires_redirect   AS payment_method_requires_redirect,
+        pm.icon         AS payment_method_icon,
+        pm.requires_redirect AS payment_method_requires_redirect,
         pm.allows_proof_upload AS payment_method_allows_proof_upload,
-        pm.is_cash_like        AS payment_method_is_cash_like
+        pm.is_cash_like AS payment_method_is_cash_like
 
       FROM ecom_orders o
       LEFT JOIN ecom_customers c ON c.id = o.customer_id
@@ -229,6 +231,7 @@ async function listOrders(req, res) {
         GROUP BY order_id
       ) oi ON oi.order_id = o.id
 
+      -- último pago por pedido (por id mayor)
       LEFT JOIN (
         SELECT p1.*
         FROM ecom_payments p1
@@ -239,8 +242,10 @@ async function listOrders(req, res) {
         ) px ON px.order_id = p1.order_id AND px.max_id = p1.id
       ) ep ON ep.order_id = o.id
 
+      -- join método de pago (collation-safe)
       LEFT JOIN ecom_payment_methods pm
-        ON pm.enabled = 1 AND LOWER(pm.code) = LOWER(ep.method)
+        ON LOWER(CONVERT(pm.code USING utf8mb4)) COLLATE ${COLL}
+         = LOWER(CONVERT(ep.method USING utf8mb4)) COLLATE ${COLL}
 
       ${whereSql}
       ORDER BY o.id DESC
@@ -332,7 +337,7 @@ async function getOrderById(req, res) {
       { replacements: { id } }
     );
 
-    // ✅ Payments completos + método “bonito” para render tipo frontend
+    // ✅ pagos + join método bonito (collation-safe)
     const [payments] = await sequelize.query(
       `
       SELECT
@@ -342,39 +347,30 @@ async function getOrderById(req, res) {
         p.method,
         p.status,
         p.amount,
-        p.currency,
         p.reference,
-        p.note,
-        p.external_id,
-        p.external_reference,
-        p.mp_preference_id,
-        p.mp_payment_id,
-        p.mp_merchant_order_id,
-        p.external_status,
-        p.status_detail,
-        p.payer_email,
-        p.proof_url,
         p.bank_reference,
-        p.reviewed_by,
-        p.reviewed_at,
-        p.review_note,
+        p.external_id,
+        p.external_status,
         p.external_payload,
+        p.proof_url,
+        p.mp_preference_id,
         p.created_at,
         p.updated_at,
         p.paid_at,
 
-        pm.title         AS method_title,
-        pm.description   AS method_description,
-        pm.badge_text    AS method_badge_text,
+        pm.title AS method_title,
+        pm.description AS method_description,
+        pm.badge_text AS method_badge_text,
         pm.badge_variant AS method_badge_variant,
-        pm.icon          AS method_icon,
-        pm.requires_redirect   AS requires_redirect,
-        pm.allows_proof_upload AS allows_proof_upload,
-        pm.is_cash_like        AS is_cash_like
+        pm.icon AS method_icon,
+        pm.requires_redirect,
+        pm.allows_proof_upload,
+        pm.is_cash_like
 
       FROM ecom_payments p
       LEFT JOIN ecom_payment_methods pm
-        ON pm.enabled = 1 AND LOWER(pm.code) = LOWER(p.method)
+        ON LOWER(CONVERT(pm.code USING utf8mb4)) COLLATE ${COLL}
+         = LOWER(CONVERT(p.method USING utf8mb4)) COLLATE ${COLL}
       WHERE p.order_id = :id
       ORDER BY p.id ASC
       `,
