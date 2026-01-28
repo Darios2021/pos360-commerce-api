@@ -1,41 +1,57 @@
 // src/routes/admin.shopPayments.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL (ANTI-CRASH)
+// Montado bajo: /api/v1/admin/shop  (desde v1.routes.js)
 //
-// Se monta en v1.routes.js así:
-// safeUse("/admin/shop", requireAuth, adminShopPaymentsRoutes);
+// Endpoints finales:
+// GET    /payments
+// GET    /payments/:paymentId
+// PATCH  /payments/:paymentId
+// POST   /payments/:paymentId/mark-paid
+// POST   /payments/:paymentId/mark-unpaid
 //
-// Endpoints reales:
-// GET   /api/v1/admin/shop/payments
-// GET   /api/v1/admin/shop/payments/:paymentId
-// PATCH /api/v1/admin/shop/payments/:paymentId
-// POST  /api/v1/admin/shop/payments/:paymentId/mark-paid
-// POST  /api/v1/admin/shop/payments/:paymentId/mark-unpaid
-//
-// (Compat legacy)
-// POST  /api/v1/admin/shop/payments/:paymentId/review
-// -> lo manejás en v1.routes.js con reviewTransferPayment (ecomPayments.controller)
-// o lo podés enchufar acá si querés.
+// 🔥 Anti-crash:
+// - Soporta controllers con nombres "nuevos" (listAdminShopPayments, getAdminShopPayment, ...)
+//   o "viejos" (listPayments, getPaymentById, patchPayment, markPaid, markUnpaid).
+// - Valida handlers antes de registrar rutas.
 
 const router = require("express").Router();
+const ctrl = require("../controllers/admin.shopPayments.controller");
 
-const {
-  listPayments,
-  getPaymentById,
-  patchPayment,
-  markPaid,
-  markUnpaid,
-} = require("../controllers/admin.shopPayments.controller");
+function pickFn(...candidates) {
+  for (const name of candidates) {
+    const fn = ctrl?.[name];
+    if (typeof fn === "function") return fn;
+  }
+  return null;
+}
 
-// 🔎 Lista (filtros: q, provider, status, page, limit)
+function mustFn(fn, name) {
+  if (typeof fn !== "function") {
+    const keys = ctrl && typeof ctrl === "object" ? Object.keys(ctrl) : [];
+    console.error(`❌ admin.shopPayments.routes: handler inválido "${name}" ->`, typeof fn);
+    console.error("   exports disponibles:", keys);
+    throw new Error(`INVALID_HANDLER_${name}`);
+  }
+}
+
+// ✅ Resolver handlers (nuevo o viejo)
+const listPayments = pickFn("listAdminShopPayments", "listPayments");
+const getPaymentById = pickFn("getAdminShopPayment", "getPaymentById");
+const patchPayment = pickFn("updateAdminShopPayment", "patchPayment");
+const markPaid = pickFn("markAdminShopPaymentPaid", "markPaid");
+const markUnpaid = pickFn("markAdminShopPaymentUnpaid", "markUnpaid");
+
+// ✅ Validaciones (si falla acá, falla claro al boot con logs)
+mustFn(listPayments, "listPayments");
+mustFn(getPaymentById, "getPaymentById");
+mustFn(patchPayment, "patchPayment");
+mustFn(markPaid, "markPaid");
+mustFn(markUnpaid, "markUnpaid");
+
+// ✅ Rutas
 router.get("/payments", listPayments);
-
-// 📄 Detalle
 router.get("/payments/:paymentId", getPaymentById);
-
-// ✏️ Edit manual
 router.patch("/payments/:paymentId", patchPayment);
-
-// ✅ Marcar pagado / no pagado
 router.post("/payments/:paymentId/mark-paid", markPaid);
 router.post("/payments/:paymentId/mark-unpaid", markUnpaid);
 
