@@ -1,18 +1,18 @@
 // src/controllers/admin.shopPayments.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ COPY-PASTE FINAL COMPLETO (ALINEADO A TU ESQUEMA REAL)
 //
-// Admin: Ecommerce Payments (gestión)
-// Rutas (van montadas bajo /api/v1/admin/shop):
-// - GET    /payments
-// - GET    /payments/:paymentId
-// - PATCH  /payments/:paymentId
-// - POST   /payments/:paymentId/mark-paid
-// - POST   /payments/:paymentId/mark-unpaid
+// Admin ecommerce payments (gestión)
+// - Lista + filtros
+// - Detalle (incluye order + customer + items)
+// - Update (review/meta + estado)
+// - Mark paid/unpaid (sincroniza ecom_orders.payment_status / paid_at)
 //
-// Notas:
-// - Sin inventar modelos: usamos sequelize.query directo (robusto y DB-match)
-// - Sin romper si faltan campos en payload
-// - Actualiza también ecom_orders.payment_status/paid_at cuando corresponde
+// ✅ IMPORTANTE
+// Este controller NO asume columnas "mp_*" ni campos raros.
+// Usa solo campos típicos que ya viste en tu DB:
+// ecom_payments: id, order_id, provider, status, amount, external_id, external_status, external_payload, paid_at, created_at, updated_at
+// ecom_orders: public_code, status, payment_status, fulfillment_type, ship_* , total, created_at
+// ecom_customers: email, first_name, last_name, phone, doc_number
 
 const { sequelize } = require("../models");
 
@@ -23,234 +23,448 @@ function toInt(v, d = 0) {
 function toStr(v) {
   return String(v ?? "").trim();
 }
-function clean(obj) {
-  const o = { ...obj };
-  Object.keys(o).forEach((k) => {
-    if (o[k] === undefined) delete o[k];
-  });
-  return o;
+function cleanLike(s) {
+  return toStr(s).replace(/[%_]/g, " ").trim();
 }
-
-async function listPayments(req, res) {
-  const q = toStr(req.query.q);
-  const provider = toStr(req.query.provider).toLowerCase();
-  const status = toStr(req.query.status).toLowerCase();
-  const page = Math.max(1, toInt(req.query.page, 1));
-  const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 50)));
+function pickUserId(req) {
+  const u = req.usuario || req.user || req.auth || {};
+  const id = toInt(u.id ?? u.userId ?? u.usuario_id ?? u.uid ?? u.user_id, 0);
+  return id > 0 ? id : null;
+}
+function paginate(q) {
+  const page = Math.max(1, toInt(q.page, 1));
+  const limit = Math.min(200, Math.max(1, toInt(q.limit, 25)));
   const offset = (page - 1) * limit;
-
-  const where = [];
-  const repl = { limit, offset };
-
-  if (provider) {
-    where.push("LOWER(p.provider) = :provider");
-    repl.provider = provider;
-  }
-  if (status) {
-    where.push("LOWER(p.status) = :status");
-    repl.status = status;
-  }
-  if (q) {
-    where.push(`(
-      CAST(p.id AS CHAR) LIKE :qq
-      OR CAST(p.order_id AS CHAR) LIKE :qq
-      OR COALESCE(p.external_reference,'') LIKE :qq
-      OR COALESCE(p.reference,'') LIKE :qq
-      OR COALESCE(p.payer_email,'') LIKE :qq
-      OR COALESCE(o.public_code,'') LIKE :qq
-    )`);
-    repl.qq = `%${q}%`;
-  }
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-  const [rows] = await sequelize.query(
-    `
-    SELECT
-      p.*,
-      o.public_code,
-      o.status AS order_status,
-      o.payment_status AS order_payment_status,
-      o.total AS order_total,
-      o.created_at AS order_created_at
-    FROM ecom_payments p
-    JOIN ecom_orders o ON o.id = p.order_id
-    ${whereSql}
-    ORDER BY p.id DESC
-    LIMIT :limit OFFSET :offset
-    `,
-    { replacements: repl }
-  );
-
-  const [cnt] = await sequelize.query(
-    `
-    SELECT COUNT(*) AS c
-    FROM ecom_payments p
-    JOIN ecom_orders o ON o.id = p.order_id
-    ${whereSql}
-    `,
-    { replacements: repl }
-  );
-
-  const total = Number(cnt?.[0]?.c || 0);
-  const pages = Math.max(1, Math.ceil(total / limit));
-
-  return res.json({
-    ok: true,
-    items: rows || [],
-    meta: { total, page, pages, limit },
-  });
+  return { page, limit, offset };
 }
 
-async function getPaymentById(req, res) {
-  const id = toInt(req.params.paymentId, 0);
-  if (!id) return res.status(400).json({ message: "paymentId inválido." });
-
+// ======================================================
+// Sync payment_status en ecom_orders basado en ecom_payments
+// ======================================================
+async function syncOrderPaymentStatus(order_id, t) {
   const [rows] = await sequelize.query(
     `
-    SELECT
-      p.*,
-      o.public_code,
-      o.status AS order_status,
-      o.payment_status AS order_payment_status,
-      o.total AS order_total,
-      o.created_at AS order_created_at
-    FROM ecom_payments p
-    JOIN ecom_orders o ON o.id = p.order_id
-    WHERE p.id = :id
-    LIMIT 1
+    SELECT 
+      SUM(CASE WHEN LOWER(status) IN ('approved','paid') THEN 1 ELSE 0 END) AS paid_count,
+      SUM(CASE WHEN LOWER(status) IN ('pending') THEN 1 ELSE 0 END) AS pending_count,
+      MAX(paid_at) AS last_paid_at
+    FROM ecom_payments
+    WHERE order_id = :order_id
     `,
-    { replacements: { id } }
+    { replacements: { order_id }, transaction: t }
   );
 
-  const item = rows?.[0] || null;
-  if (!item) return res.status(404).json({ message: "Pago no encontrado." });
+  const paidCount = toInt(rows?.[0]?.paid_count, 0);
+  const pendingCount = toInt(rows?.[0]?.pending_count, 0);
+  const lastPaidAt = rows?.[0]?.last_paid_at || null;
 
-  return res.json({ ok: true, item });
-}
+  let payment_status = "unpaid";
+  let paid_at = null;
 
-async function patchPayment(req, res) {
-  const id = toInt(req.params.paymentId, 0);
-  if (!id) return res.status(400).json({ message: "paymentId inválido." });
-
-  const body = req.body || {};
-
-  // permitimos editar campos “manuales” típicos:
-  // status, reference, note, proof_url, bank_reference, external_status, status_detail, payer_email
-  const allowed = clean({
-    status: body.status ? toStr(body.status).toLowerCase() : undefined,
-    reference: body.reference !== undefined ? toStr(body.reference) || null : undefined,
-    note: body.note !== undefined ? toStr(body.note) || null : undefined,
-    proof_url: body.proof_url !== undefined ? toStr(body.proof_url) || null : undefined,
-    bank_reference: body.bank_reference !== undefined ? toStr(body.bank_reference) || null : undefined,
-    external_status: body.external_status !== undefined ? toStr(body.external_status) || null : undefined,
-    status_detail: body.status_detail !== undefined ? toStr(body.status_detail) || null : undefined,
-    payer_email: body.payer_email !== undefined ? toStr(body.payer_email) || null : undefined,
-  });
-
-  if (!Object.keys(allowed).length) {
-    return res.status(400).json({ message: "Nada para actualizar." });
-  }
-
-  const sets = [];
-  const repl = { id };
-
-  for (const [k, v] of Object.entries(allowed)) {
-    sets.push(`${k} = :${k}`);
-    repl[k] = v;
+  if (paidCount > 0) {
+    payment_status = "paid";
+    paid_at = lastPaidAt || new Date();
+  } else if (pendingCount > 0) {
+    payment_status = "pending";
   }
 
   await sequelize.query(
     `
-    UPDATE ecom_payments
-    SET ${sets.join(", ")}, updated_at = CURRENT_TIMESTAMP
-    WHERE id = :id
+    UPDATE ecom_orders
+    SET payment_status = :payment_status,
+        paid_at = :paid_at,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = :order_id
     `,
-    { replacements: repl }
+    { replacements: { order_id, payment_status, paid_at }, transaction: t }
   );
 
-  return getPaymentById(req, res);
+  return { payment_status, paid_at };
 }
 
-async function markPaid(req, res) {
-  const id = toInt(req.params.paymentId, 0);
-  if (!id) return res.status(400).json({ message: "paymentId inválido." });
+// ======================================================
+// GET /api/v1/admin/shop/payments
+// Lista pagos (con order + customer)
+// Filtros:
+// - provider (mercadopago|transfer|cash|other|seller|credit_sjt...)
+// - status   (created|pending|approved|rejected|...)
+// - q        (public_code / external_id / customer email / customer name / payment id)
+// - created_from, created_to (YYYY-MM-DD o datetime)
+// - paid_from, paid_to
+// - page, limit
+// ======================================================
+async function listAdminShopPayments(req, res) {
+  const { page, limit, offset } = paginate(req.query || {});
 
-  // buscamos order_id
-  const [r] = await sequelize.query(`SELECT id, order_id FROM ecom_payments WHERE id = :id LIMIT 1`, {
-    replacements: { id },
-  });
-  const pay = r?.[0];
-  if (!pay) return res.status(404).json({ message: "Pago no encontrado." });
+  const provider = toStr(req.query?.provider).toLowerCase();
+  const status = toStr(req.query?.status).toLowerCase();
+  const q = cleanLike(req.query?.q || req.query?.search || "");
+  const public_code = cleanLike(req.query?.public_code || "");
 
-  await sequelize.transaction(async (t) => {
-    await sequelize.query(
+  const created_from = toStr(req.query?.created_from);
+  const created_to = toStr(req.query?.created_to);
+
+  const paid_from = toStr(req.query?.paid_from);
+  const paid_to = toStr(req.query?.paid_to);
+
+  try {
+    const repl = { limit, offset };
+    const cond = [];
+
+    if (provider) {
+      cond.push(`LOWER(p.provider) = :provider`);
+      repl.provider = provider;
+    }
+    if (status) {
+      cond.push(`LOWER(p.status) = :status`);
+      repl.status = status;
+    }
+    if (public_code) {
+      cond.push(`o.public_code LIKE :public_code`);
+      repl.public_code = `%${public_code}%`;
+    }
+    if (created_from) {
+      cond.push(`p.created_at >= :created_from`);
+      repl.created_from = created_from;
+    }
+    if (created_to) {
+      cond.push(`p.created_at <= :created_to`);
+      repl.created_to = created_to;
+    }
+    if (paid_from) {
+      cond.push(`p.paid_at >= :paid_from`);
+      repl.paid_from = paid_from;
+    }
+    if (paid_to) {
+      cond.push(`p.paid_at <= :paid_to`);
+      repl.paid_to = paid_to;
+    }
+
+    if (q) {
+      repl.q = `%${q}%`;
+      cond.push(
+        `(
+          o.public_code LIKE :q
+          OR CAST(p.id AS CHAR) = :q_exact
+          OR p.external_id LIKE :q
+          OR c.email LIKE :q
+          OR CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,'')) LIKE :q
+        )`
+      );
+      repl.q_exact = q;
+    }
+
+    const whereSql = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
+
+    const baseFrom = `
+      FROM ecom_payments p
+      INNER JOIN ecom_orders o ON o.id = p.order_id
+      LEFT JOIN ecom_customers c ON c.id = o.customer_id
+    `;
+
+    const [countRows] = await sequelize.query(
       `
-      UPDATE ecom_payments
-      SET status = 'paid',
-          external_status = COALESCE(external_status, 'manual_paid'),
-          paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = :id
+      SELECT COUNT(*) AS total
+      ${baseFrom}
+      ${whereSql}
       `,
-      { replacements: { id }, transaction: t }
+      { replacements: repl }
     );
 
-    await sequelize.query(
-      `
-      UPDATE ecom_orders
-      SET payment_status = 'paid',
-          paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = :oid
-      `,
-      { replacements: { oid: pay.order_id }, transaction: t }
-    );
-  });
+    const total = toInt(countRows?.[0]?.total, 0);
+    const pages = Math.max(1, Math.ceil(total / limit));
 
-  return getPaymentById(req, res);
+    const [rows] = await sequelize.query(
+      `
+      SELECT
+        p.id,
+        p.order_id,
+        p.provider,
+        p.status,
+        p.amount,
+        p.external_id,
+        p.external_status,
+        p.paid_at,
+        p.created_at,
+        p.updated_at,
+
+        o.public_code,
+        o.status AS order_status,
+        o.payment_status AS order_payment_status,
+        o.total AS order_total,
+        o.currency AS order_currency,
+        o.fulfillment_type,
+        o.ship_name, o.ship_phone, o.ship_city, o.ship_province, o.ship_zip,
+
+        c.email AS customer_email,
+        CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,'')) AS customer_name,
+        c.phone AS customer_phone
+      ${baseFrom}
+      ${whereSql}
+      ORDER BY p.id DESC
+      LIMIT :limit OFFSET :offset
+      `,
+      { replacements: repl }
+    );
+
+    return res.json({
+      ok: true,
+      meta: { total, pages, page, limit },
+      items: rows || [],
+    });
+  } catch (e) {
+    console.error("❌ listAdminShopPayments error:", e);
+    return res.status(500).json({
+      ok: false,
+      message: "Error listando pagos.",
+      detail: e?.message || String(e),
+    });
+  }
 }
 
-async function markUnpaid(req, res) {
-  const id = toInt(req.params.paymentId, 0);
-  if (!id) return res.status(400).json({ message: "paymentId inválido." });
+// ======================================================
+// GET /api/v1/admin/shop/payments/:paymentId
+// Detalle pago + pedido + cliente + items
+// ======================================================
+async function getAdminShopPayment(req, res) {
+  const id = toInt(req.params?.paymentId, 0);
+  if (!id) return res.status(400).json({ ok: false, message: "ID inválido." });
 
-  const [r] = await sequelize.query(`SELECT id, order_id FROM ecom_payments WHERE id = :id LIMIT 1`, {
-    replacements: { id },
-  });
-  const pay = r?.[0];
-  if (!pay) return res.status(404).json({ message: "Pago no encontrado." });
-
-  await sequelize.transaction(async (t) => {
-    await sequelize.query(
+  try {
+    const [rows] = await sequelize.query(
       `
-      UPDATE ecom_payments
-      SET status = 'pending',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = :id
+      SELECT
+        p.*,
+
+        o.public_code,
+        o.status AS order_status,
+        o.payment_status AS order_payment_status,
+        o.currency AS order_currency,
+        o.subtotal AS order_subtotal,
+        o.discount_total AS order_discount_total,
+        o.shipping_total AS order_shipping_total,
+        o.total AS order_total,
+        o.fulfillment_type,
+        o.ship_name, o.ship_phone, o.ship_address1, o.ship_address2, o.ship_city, o.ship_province, o.ship_zip,
+        o.notes AS order_notes,
+        o.created_at AS order_created_at,
+        o.updated_at AS order_updated_at,
+        o.paid_at AS order_paid_at,
+        o.cancelled_at AS order_cancelled_at,
+
+        c.email AS customer_email,
+        c.first_name AS customer_first_name,
+        c.last_name AS customer_last_name,
+        c.phone AS customer_phone,
+        c.doc_number AS customer_doc_number
+      FROM ecom_payments p
+      INNER JOIN ecom_orders o ON o.id = p.order_id
+      LEFT JOIN ecom_customers c ON c.id = o.customer_id
+      WHERE p.id = :id
+      LIMIT 1
       `,
-      { replacements: { id }, transaction: t }
+      { replacements: { id } }
     );
 
-    await sequelize.query(
-      `
-      UPDATE ecom_orders
-      SET payment_status = 'unpaid',
-          paid_at = NULL,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = :oid
-      `,
-      { replacements: { oid: pay.order_id }, transaction: t }
-    );
-  });
+    const pay = rows?.[0] || null;
+    if (!pay) return res.status(404).json({ ok: false, message: "Pago no encontrado." });
 
-  return getPaymentById(req, res);
+    const [items] = await sequelize.query(
+      `
+      SELECT
+        oi.id,
+        oi.order_id,
+        oi.product_id,
+        oi.qty,
+        oi.unit_price,
+        oi.line_total,
+        pr.name AS product_name
+      FROM ecom_order_items oi
+      LEFT JOIN products pr ON pr.id = oi.product_id
+      WHERE oi.order_id = :order_id
+      ORDER BY oi.id ASC
+      `,
+      { replacements: { order_id: pay.order_id } }
+    );
+
+    return res.json({ ok: true, item: pay, order_items: items || [] });
+  } catch (e) {
+    console.error("❌ getAdminShopPayment error:", e);
+    return res.status(500).json({ ok: false, message: "Error obteniendo pago.", detail: e?.message || String(e) });
+  }
+}
+
+// ======================================================
+// PATCH /api/v1/admin/shop/payments/:paymentId
+// Permite actualizar status/provider/external_status/external_id/paid_at y review_note
+// (sin asumir columnas mp_* ni method)
+// ======================================================
+async function updateAdminShopPayment(req, res) {
+  const id = toInt(req.params?.paymentId, 0);
+  if (!id) return res.status(400).json({ ok: false, message: "ID inválido." });
+
+  const body = req.body || {};
+  const userId = pickUserId(req);
+
+  try {
+    const result = await sequelize.transaction(async (t) => {
+      const [rows] = await sequelize.query(
+        `SELECT id, order_id FROM ecom_payments WHERE id = :id LIMIT 1`,
+        { replacements: { id }, transaction: t }
+      );
+      const row = rows?.[0] || null;
+      if (!row) return { error: { status: 404, message: "Pago no encontrado." } };
+
+      const sets = [];
+      const repl = { id };
+
+      // ✅ columnas “seguras”
+      const map = [
+        ["status", "status", (v) => toStr(v).toLowerCase() || null],
+        ["provider", "provider", (v) => toStr(v).toLowerCase() || null],
+        ["external_status", "external_status", (v) => toStr(v) || null],
+        ["external_id", "external_id", (v) => toStr(v) || null],
+      ];
+
+      for (const [k, col, fn] of map) {
+        if (body[k] === undefined) continue;
+        sets.push(`${col} = :${k}`);
+        repl[k] = fn(body[k]);
+      }
+
+      if (body.paid_at !== undefined) {
+        sets.push(`paid_at = :paid_at`);
+        repl.paid_at = body.paid_at ? body.paid_at : null;
+      }
+
+      // review_note / reviewed_by / reviewed_at (si existen en tu tabla)
+      if (body.review_note !== undefined) {
+        sets.push(`review_note = :review_note`);
+        repl.review_note = toStr(body.review_note) || null;
+      }
+
+      // Si tocaron algo => reviewed_by/at (si tu tabla los tiene)
+      // Si NO existen en tu tabla, comentá estas 2 líneas.
+      if (sets.length) {
+        sets.push(`reviewed_at = CURRENT_TIMESTAMP`);
+        sets.push(`reviewed_by = :reviewed_by`);
+        repl.reviewed_by = userId;
+      }
+
+      if (!sets.length) return { ok: true, changed: false, order_id: row.order_id };
+
+      await sequelize.query(
+        `
+        UPDATE ecom_payments
+        SET ${sets.join(", ")},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = :id
+        `,
+        { replacements: repl, transaction: t }
+      );
+
+      const sync = await syncOrderPaymentStatus(row.order_id, t);
+      return { ok: true, changed: true, order_id: row.order_id, sync };
+    });
+
+    if (result?.error) return res.status(result.error.status || 400).json({ ok: false, message: result.error.message });
+    return res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("❌ updateAdminShopPayment error:", e);
+    return res.status(500).json({ ok: false, message: "Error actualizando pago.", detail: e?.message || String(e) });
+  }
+}
+
+// ======================================================
+// POST /api/v1/admin/shop/payments/:paymentId/mark-paid
+// ======================================================
+async function markAdminShopPaymentPaid(req, res) {
+  const id = toInt(req.params?.paymentId, 0);
+  if (!id) return res.status(400).json({ ok: false, message: "ID inválido." });
+
+  const userId = pickUserId(req);
+
+  try {
+    const result = await sequelize.transaction(async (t) => {
+      const [rows] = await sequelize.query(
+        `SELECT id, order_id FROM ecom_payments WHERE id = :id LIMIT 1`,
+        { replacements: { id }, transaction: t }
+      );
+      const row = rows?.[0] || null;
+      if (!row) return { error: { status: 404, message: "Pago no encontrado." } };
+
+      await sequelize.query(
+        `
+        UPDATE ecom_payments
+        SET status = 'approved',
+            paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+            reviewed_by = :reviewed_by,
+            reviewed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = :id
+        `,
+        { replacements: { id, reviewed_by: userId }, transaction: t }
+      );
+
+      const sync = await syncOrderPaymentStatus(row.order_id, t);
+      return { ok: true, order_id: row.order_id, sync };
+    });
+
+    if (result?.error) return res.status(result.error.status || 400).json({ ok: false, message: result.error.message });
+    return res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("❌ markAdminShopPaymentPaid error:", e);
+    return res.status(500).json({ ok: false, message: "Error marcando como pagado.", detail: e?.message || String(e) });
+  }
+}
+
+// ======================================================
+// POST /api/v1/admin/shop/payments/:paymentId/mark-unpaid
+// ======================================================
+async function markAdminShopPaymentUnpaid(req, res) {
+  const id = toInt(req.params?.paymentId, 0);
+  if (!id) return res.status(400).json({ ok: false, message: "ID inválido." });
+
+  const userId = pickUserId(req);
+
+  try {
+    const result = await sequelize.transaction(async (t) => {
+      const [rows] = await sequelize.query(
+        `SELECT id, order_id FROM ecom_payments WHERE id = :id LIMIT 1`,
+        { replacements: { id }, transaction: t }
+      );
+      const row = rows?.[0] || null;
+      if (!row) return { error: { status: 404, message: "Pago no encontrado." } };
+
+      await sequelize.query(
+        `
+        UPDATE ecom_payments
+        SET status = 'rejected',
+            paid_at = NULL,
+            reviewed_by = :reviewed_by,
+            reviewed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = :id
+        `,
+        { replacements: { id, reviewed_by: userId }, transaction: t }
+      );
+
+      const sync = await syncOrderPaymentStatus(row.order_id, t);
+      return { ok: true, order_id: row.order_id, sync };
+    });
+
+    if (result?.error) return res.status(result.error.status || 400).json({ ok: false, message: result.error.message });
+    return res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("❌ markAdminShopPaymentUnpaid error:", e);
+    return res.status(500).json({ ok: false, message: "Error marcando como impago.", detail: e?.message || String(e) });
+  }
 }
 
 module.exports = {
-  listPayments,
-  getPaymentById,
-  patchPayment,
-  markPaid,
-  markUnpaid,
+  listAdminShopPayments,
+  getAdminShopPayment,
+  updateAdminShopPayment,
+  markAdminShopPaymentPaid,
+  markAdminShopPaymentUnpaid,
 };

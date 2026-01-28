@@ -3,6 +3,7 @@
 // ✅ FIX: no rompe si NO existe publicLinks.routes / admin.shopLinks.routes
 // ✅ FIX: carga publicInstagram.routes (si existe)
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
+// ✅ NUEVO: monta /public/payment-methods (DB-first)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -99,6 +100,15 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
+// ✅ NUEVO: métodos de pago (DB-first)
+let publicPaymentMethodsRoutes = null;
+try {
+  publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
+} catch (e) {
+  console.log("⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)");
+  publicPaymentMethodsRoutes = null;
+}
+
 // ✅ CAMINO B: Links públicos — NO ROMPER SI NO EXISTE
 let publicLinksRoutes = null;
 try {
@@ -166,6 +176,9 @@ safeUse("/auth", authRoutes);
 
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
+
+// ✅ NUEVO: /api/v1/public/payment-methods
+if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
 
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
