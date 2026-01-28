@@ -6,6 +6,7 @@
 // - strict_search + exclude_terms
 // - Branding público + Config pagos
 // - ✅ Producto individual devuelve MÚLTIPLES IMÁGENES (product_images)
+// - ✅ NUEVO: stock_by_branch en catálogo y producto (para validar pickup antes de pagar)
 
 const { sequelize } = require("../models");
 
@@ -32,6 +33,54 @@ function toInt(v, d = 0) {
 function toStr(v) {
   const s = String(v ?? "").trim();
   return s.length ? s : "";
+}
+
+// =========================
+// ✅ NUEVO: stock_by_branch
+// =========================
+// Usamos v_public_catalog porque ya tiene (branch_id, product_id, stock_qty)
+// y además respeta lógica de negocio que ya tengas dentro de la view.
+async function getStockByBranchMap(productIds = []) {
+  const ids = Array.from(
+    new Set((productIds || []).map((x) => Number(x)).filter(Boolean))
+  );
+  if (!ids.length) return {};
+
+  // Traemos stock por sucursal SOLO de sucursales activas.
+  // Nota: NO filtramos por branch_id acá, porque queremos "todas las sucursales"
+  // para que el checkout pueda validar pickup antes de pagar.
+  const [rows] = await sequelize.query(
+    `
+    SELECT
+      vc.product_id,
+      vc.branch_id,
+      CAST(COALESCE(vc.stock_qty, 0) AS SIGNED) AS qty
+    FROM v_public_catalog vc
+    INNER JOIN branches b
+      ON b.id = vc.branch_id
+     AND b.is_active = 1
+    WHERE vc.is_active = 1
+      AND vc.product_id IN (:ids)
+    `,
+    { replacements: { ids } }
+  );
+
+  const map = {};
+  for (const r of rows || []) {
+    const pid = Number(r.product_id || 0);
+    const bid = Number(r.branch_id || 0);
+    const qty = Number(r.qty || 0);
+    if (!pid || !bid) continue;
+    if (!map[pid]) map[pid] = [];
+    map[pid].push({ branch_id: bid, qty });
+  }
+
+  // orden estable
+  for (const pid of Object.keys(map)) {
+    map[pid].sort((a, b) => a.branch_id - b.branch_id);
+  }
+
+  return map;
 }
 
 module.exports = {
@@ -191,7 +240,7 @@ module.exports = {
       { replacements: repl }
     );
 
-    const [items] = await sequelize.query(
+    const [itemsRaw] = await sequelize.query(
       `
       SELECT vc.*
       FROM v_public_catalog vc
@@ -202,10 +251,28 @@ module.exports = {
       { replacements: repl }
     );
 
+    const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);
 
+    // ============================
+    // ✅ NUEVO: inyectar stock_by_branch
+    // ============================
+    const productIds = items
+      .map((it) => Number(it.product_id || it.id || 0))
+      .filter(Boolean);
+
+    if (productIds.length) {
+      const stockMap = await getStockByBranchMap(productIds);
+      for (const it of items) {
+        const pid = Number(it.product_id || it.id || 0);
+        it.stock_by_branch = stockMap[pid] || [];
+      }
+    } else {
+      for (const it of items) it.stock_by_branch = [];
+    }
+
     return {
-      items: items || [],
+      items,
       page: pg,
       limit: lim,
       total,
@@ -315,6 +382,12 @@ module.exports = {
     if (!String(item.image_url || "").trim() && item.image_urls.length) {
       item.image_url = item.image_urls[0];
     }
+
+    // ============================
+    // ✅ NUEVO: stock_by_branch en producto individual
+    // ============================
+    const stockMap = await getStockByBranchMap([pid]);
+    item.stock_by_branch = stockMap[pid] || [];
 
     return item;
   },
