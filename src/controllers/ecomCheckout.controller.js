@@ -1,5 +1,5 @@
 // src/controllers/ecomCheckout.controller.js
-// ✅ COPY-PASTE FINAL (alineado FRONT/STEPper + DB-first + MP real)
+// ✅ COPY-PASTE FINAL (FIX insertId: usa LAST_INSERT_ID() + detail siempre)
 // POST /api/v1/ecom/checkout
 
 const crypto = require("crypto");
@@ -33,6 +33,12 @@ async function getColumns(tableName, transaction) {
     { replacements: { t: tableName }, transaction }
   );
   return new Set((rows || []).map((r) => String(r.name)));
+}
+
+// ✅ FIX: fallback a LAST_INSERT_ID() dentro de la misma transacción
+async function getLastInsertId(transaction) {
+  const [rows] = await sequelize.query(`SELECT LAST_INSERT_ID() AS id`, { transaction });
+  return toInt(rows?.[0]?.id, 0) || 0;
 }
 
 /**
@@ -236,11 +242,7 @@ async function checkout(req, res) {
     methodRow = mrows?.[0] || null;
   } catch (e) {
     const detail =
-      e?.original?.sqlMessage ||
-      e?.original?.message ||
-      e?.sqlMessage ||
-      e?.message ||
-      String(e);
+      e?.original?.sqlMessage || e?.original?.message || e?.sqlMessage || e?.message || String(e);
 
     console.error("❌ PAYMENT_METHODS_TABLE_ERROR", { request_id, detail });
 
@@ -320,7 +322,8 @@ async function checkout(req, res) {
             transaction: t,
           });
 
-          customer_id = toInt(cres?.insertId, 0) || null;
+          // ✅ FIX: si no viene insertId
+          customer_id = toInt(cres?.insertId, 0) || (await getLastInsertId(t)) || null;
         }
       }
 
@@ -430,9 +433,19 @@ async function checkout(req, res) {
         }
       );
 
-      const order_id = toInt(ores?.insertId, 0);
+      // ✅ FIX: insertId robusto
+      let order_id = toInt(ores?.insertId, 0);
+      if (!order_id) order_id = await getLastInsertId(t);
+
       if (!order_id) {
-        return { error: { status: 500, code: "ORDER_CREATE_FAILED", message: "No se pudo crear el pedido." } };
+        return {
+          error: {
+            status: 500,
+            code: "ORDER_CREATE_FAILED",
+            message: "No se pudo crear el pedido.",
+            detail: { debug: "NO_INSERT_ID", ores: ores || null },
+          },
+        };
       }
 
       // ---- (D) Insert items ----
@@ -485,7 +498,8 @@ async function checkout(req, res) {
           }
         );
 
-        const pay_id = toInt(pres?.insertId, 0);
+        let pay_id = toInt(pres?.insertId, 0);
+        if (!pay_id) pay_id = await getLastInsertId(t);
 
         return {
           order: {
@@ -500,7 +514,7 @@ async function checkout(req, res) {
             payment_status: order_payment_status,
           },
           payment: {
-            id: pay_id,
+            id: pay_id || null,
             provider,
             status: "created",
             external_reference: public_code,
@@ -533,7 +547,7 @@ async function checkout(req, res) {
         pickup_branch_id: pickup_branch_id || null,
       };
 
-      const [pres] = await sequelize.query(
+      const [pres2] = await sequelize.query(
         `
         INSERT INTO ecom_payments
         (order_id, provider, method, status, amount, currency, external_reference,
@@ -555,7 +569,8 @@ async function checkout(req, res) {
         }
       );
 
-      const pay_id = toInt(pres?.insertId, 0);
+      let pay_id = toInt(pres2?.insertId, 0);
+      if (!pay_id) pay_id = await getLastInsertId(t);
 
       return {
         order: {
@@ -570,7 +585,7 @@ async function checkout(req, res) {
           payment_status: "pending",
         },
         payment: {
-          id: pay_id,
+          id: pay_id || null,
           provider: "mercadopago",
           status: "pending",
           external_reference: public_code,
@@ -585,6 +600,7 @@ async function checkout(req, res) {
         ok: false,
         code: result.error.code || "CHECKOUT_ERROR",
         message: result.error.message || "Error en checkout.",
+        detail: result.error.detail || null, // ✅ SIEMPRE visible
         request_id,
       });
     }
