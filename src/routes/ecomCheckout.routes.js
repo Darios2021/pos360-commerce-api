@@ -5,7 +5,10 @@
 // Endpoints:
 // GET  /api/v1/ecom/health
 // POST /api/v1/ecom/checkout
-// POST /api/v1/ecom/webhooks/mercadopago
+//
+// ✅ IMPORTANTE:
+// - El webhook de MercadoPago se monta SOLO en ecomPayments.routes.js
+//   POST /api/v1/ecom/webhooks/mercadopago
 
 const express = require("express");
 const router = express.Router();
@@ -41,18 +44,10 @@ function mustFn(fn, name) {
 }
 
 // =========================
-// Controllers (robusto)
+// Controller checkout (robusto)
 // =========================
 const checkoutMod = require("../controllers/ecomCheckout.controller");
 const checkout = mustFn(resolveFn(checkoutMod, ["checkout"]), "checkout");
-
-let mpWebhook = null;
-try {
-  const mpMod = require("../controllers/mpWebhook.controller");
-  mpWebhook = resolveFn(mpMod, ["mercadopagoWebhook", "webhook", "handle"]);
-} catch (e) {
-  mpWebhook = null;
-}
 
 // =========================
 // Health
@@ -65,14 +60,5 @@ router.get("/health", (req, res) => {
 // Checkout
 // =========================
 router.post("/checkout", express.json({ limit: "2mb" }), checkout);
-
-// =========================
-// Webhook MercadoPago (si existe controller)
-// =========================
-if (typeof mpWebhook === "function") {
-  router.post("/webhooks/mercadopago", express.json({ limit: "2mb" }), mpWebhook);
-} else {
-  console.log("⚠️ mpWebhook.controller no cargado o sin export mercadopagoWebhook (se omite /webhooks/mercadopago)");
-}
 
 module.exports = router;

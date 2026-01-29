@@ -6,21 +6,19 @@
 // - Consultar el detalle a MP vía API (fetch nativo Node 20)
 // - Actualizar ecom_payments + ecom_orders según status
 //
-// ENV requeridas:
+// ENV requerida:
 // - MERCADOPAGO_ACCESS_TOKEN
 //
 // Opcionales:
 // - MP_WEBHOOK_LOG_PAYLOAD=1  (loggea body completo)
 // - MP_WEBHOOK_STRICT=1       (si falta topic/id => 400)
 //
-// Tablas esperadas (mínimo):
-// - ecom_payments: id, provider, status, external_id, external_reference, external_status, status_detail,
-//                 external_payload (JSON), payer_email, mp_preference_id, updated_at
-// - ecom_orders: id, payment_status, status, updated_at
+// Ruta esperada (1 sola):
+// POST /api/v1/ecom/webhooks/mercadopago
 //
-// NOTA:
-// - Este controller no depende de rutas específicas. Lo podés montar en:
-//   POST /api/v1/ecom/webhooks/mercadopago
+// Nota:
+// - ecom_payments.status => approved | pending | rejected | cancelled | refunded | chargeback | created
+// - ecom_orders.payment_status => paid | pending | unpaid
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -33,10 +31,6 @@ function reqId() {
 }
 function toStr(v) {
   return String(v ?? "").trim();
-}
-function toInt(v, d = 0) {
-  const n = parseInt(String(v ?? ""), 10);
-  return Number.isFinite(n) ? n : d;
 }
 function log(rid, ...args) {
   console.log(`[MP WEBHOOK] [${rid}]`, ...args);
@@ -85,10 +79,6 @@ async function mpGetJson(url, rid) {
 
 // Deriva paymentId/topic/id desde distintas formas que manda MP
 function parseMpNotification(req) {
-  // MP a veces manda por query:
-  // ?type=payment&data.id=123
-  // ?topic=payment&id=123
-  // o body json con { type, data: { id } }
   const q = req.query || {};
   const b = req.body || {};
 
@@ -97,7 +87,7 @@ function parseMpNotification(req) {
     toStr(q.topic) ||
     toStr(b.type) ||
     toStr(b.topic) ||
-    toStr(b.action); // a veces viene action
+    toStr(b.action);
 
   const dataId =
     toStr(q["data.id"]) ||
@@ -107,7 +97,6 @@ function parseMpNotification(req) {
     toStr(b?.data_id) ||
     toStr(b?.id);
 
-  // Normalizamos topic/type
   const t = toStr(type).toLowerCase();
   let topic = "";
   if (t.includes("payment")) topic = "payment";
@@ -117,25 +106,34 @@ function parseMpNotification(req) {
   return { topic, id: dataId };
 }
 
-function mapPaymentStatus(mpStatus) {
+function mapMpStatusToLocalPaymentStatus(mpStatus) {
   const s = toStr(mpStatus).toLowerCase();
-  // MP statuses comunes: approved, pending, in_process, rejected, cancelled, refunded, charged_back
-  if (s === "approved") return "paid";
+  // MP: approved, pending, in_process, rejected, cancelled, refunded, charged_back
+  if (s === "approved") return "approved";
   if (s === "pending" || s === "in_process") return "pending";
-  if (s === "refunded" || s === "charged_back") return "refunded";
-  if (s === "cancelled") return "cancelled";
   if (s === "rejected") return "rejected";
-  return "pending";
+  if (s === "cancelled") return "cancelled";
+  if (s === "refunded") return "refunded";
+  if (s === "charged_back") return "chargeback";
+  return s || "pending";
+}
+
+function mapLocalToOrderPaymentStatus(localPayStatus) {
+  const s = toStr(localPayStatus).toLowerCase();
+  if (s === "approved") return "paid";
+  if (s === "pending") return "pending";
+  return "unpaid";
 }
 
 async function findPaymentByMpExternal({ mp_payment_id, external_reference, t }) {
-  // 1) match por external_id
+  // 1) match por external_id o mp_payment_id si existe columna
   if (mp_payment_id) {
     const [rows] = await sequelize.query(
       `
       SELECT id, order_id, provider
       FROM ecom_payments
       WHERE (external_id = :external_id OR mp_payment_id = :external_id)
+      ORDER BY id DESC
       LIMIT 1
       `,
       { replacements: { external_id: String(mp_payment_id) }, transaction: t }
@@ -147,10 +145,11 @@ async function findPaymentByMpExternal({ mp_payment_id, external_reference, t })
   if (external_reference) {
     const [rows] = await sequelize.query(
       `
-      SELECT id, order_id, provider
-      FROM ecom_payments
-      WHERE external_reference = :external_reference
-      ORDER BY id DESC
+      SELECT p.id, p.order_id, p.provider
+      FROM ecom_payments p
+      JOIN ecom_orders o ON o.id = p.order_id
+      WHERE o.public_code = :external_reference
+      ORDER BY p.id DESC
       LIMIT 1
       `,
       { replacements: { external_reference: String(external_reference) }, transaction: t }
@@ -161,13 +160,13 @@ async function findPaymentByMpExternal({ mp_payment_id, external_reference, t })
   return null;
 }
 
-async function updatePaymentAndOrder({ paymentRow, mp, mappedStatus, rid, t }) {
+async function updatePaymentAndOrder({ paymentRow, mp, localPayStatus, rid, t }) {
   const payment_id = Number(paymentRow.id);
   const order_id = Number(paymentRow.order_id);
 
-  // Datos relevantes
   const mp_payment_id = mp?.id ? String(mp.id) : null;
   const external_reference = mp?.external_reference ? String(mp.external_reference) : null;
+
   const mp_status = toStr(mp?.status);
   const mp_status_detail = toStr(mp?.status_detail);
   const payer_email = toStr(mp?.payer?.email || mp?.payer_email || "");
@@ -191,7 +190,7 @@ async function updatePaymentAndOrder({ paymentRow, mp, mappedStatus, rid, t }) {
     {
       replacements: {
         id: payment_id,
-        status: mappedStatus,
+        status: localPayStatus,
         external_id: mp_payment_id,
         external_reference,
         external_status: mp_status || null,
@@ -203,11 +202,7 @@ async function updatePaymentAndOrder({ paymentRow, mp, mappedStatus, rid, t }) {
     }
   );
 
-  // Orden: payment_status coherente
-  let orderPaymentStatus = mappedStatus;
-  if (mappedStatus === "paid") orderPaymentStatus = "paid";
-  else if (mappedStatus === "pending") orderPaymentStatus = "pending";
-  else orderPaymentStatus = "unpaid";
+  const orderPaymentStatus = mapLocalToOrderPaymentStatus(localPayStatus);
 
   await sequelize.query(
     `
@@ -223,7 +218,14 @@ async function updatePaymentAndOrder({ paymentRow, mp, mappedStatus, rid, t }) {
     }
   );
 
-  log(rid, "updated", { payment_id, order_id, mp_payment_id, mp_status, mappedStatus });
+  log(rid, "updated", {
+    payment_id,
+    order_id,
+    mp_payment_id,
+    mp_status,
+    localPayStatus,
+    orderPaymentStatus,
+  });
 }
 
 // ---------------------
@@ -259,7 +261,7 @@ async function mercadopagoWebhook(req, res) {
     });
   }
 
-  // Si no puedo determinar -> ACK 200 igual (MP reintenta, pero no quiero tumbar)
+  // Si no puedo determinar -> ACK 200 igual (no tumbar)
   if (!topic || !id) {
     return res.status(200).json({ ok: true, rid, ignored: true });
   }
@@ -271,54 +273,50 @@ async function mercadopagoWebhook(req, res) {
     if (topic === "payment") {
       mpData = await mpGetJson(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(id)}`, rid);
     } else if (topic === "merchant_order") {
-      // merchant order: traemos la orden y, si tiene payments, tomamos el último
-      const mo = await mpGetJson(
-        `https://api.mercadopago.com/merchant_orders/${encodeURIComponent(id)}`,
-        rid
-      );
-      const lastPay = Array.isArray(mo?.payments) && mo.payments.length ? mo.payments[mo.payments.length - 1] : null;
+      const mo = await mpGetJson(`https://api.mercadopago.com/merchant_orders/${encodeURIComponent(id)}`, rid);
+      const lastPay =
+        Array.isArray(mo?.payments) && mo.payments.length ? mo.payments[mo.payments.length - 1] : null;
+
       if (lastPay?.id) {
         mpData = await mpGetJson(
           `https://api.mercadopago.com/v1/payments/${encodeURIComponent(lastPay.id)}`,
           rid
         );
       } else {
-        mpData = mo; // fallback
+        // sin payments => ACK
+        return res.status(200).json({ ok: true, rid, ignored: true, topic, reason: "MO_WITHOUT_PAYMENTS" });
       }
     } else {
-      // topic desconocido => ACK
       return res.status(200).json({ ok: true, rid, ignored: true, topic });
     }
 
-    // 2) Derivar ids para matchear ecom_payments
     const mp_payment_id = mpData?.id ? String(mpData.id) : null;
     const external_reference = mpData?.external_reference ? String(mpData.external_reference) : null;
 
-    const mappedStatus = mapPaymentStatus(mpData?.status);
+    const localPayStatus = mapMpStatusToLocalPaymentStatus(mpData?.status);
 
-    // 3) Update DB
     const out = await sequelize.transaction(async (t) => {
       const payRow = await findPaymentByMpExternal({ mp_payment_id, external_reference, t });
 
       if (!payRow?.id) {
         log(rid, "payment not found", { mp_payment_id, external_reference });
-        // ACK 200 para que MP no te haga retry infinito
         return { ok: true, rid, not_found: true, mp_payment_id, external_reference };
       }
 
-      await updatePaymentAndOrder({ paymentRow: payRow, mp: mpData, mappedStatus, rid, t });
+      await updatePaymentAndOrder({ paymentRow: payRow, mp: mpData, localPayStatus, rid, t });
 
-      return { ok: true, rid, updated: true, mappedStatus, payment_id: payRow.id, order_id: payRow.order_id };
+      return { ok: true, rid, updated: true, localPayStatus, payment_id: payRow.id, order_id: payRow.order_id };
     });
 
     return res.status(200).json(out);
   } catch (e) {
-    const status = Number(e?.statusCode || 200); // Importante: a MP conviene responder 200 para que no te “castigue”
+    // A MP conviene responder 200 para evitar retries infinitos, pero devolvemos info.
     log(rid, "ERROR", { message: e?.message || String(e), statusCode: e?.statusCode, payload: e?.payload || null });
 
-    return res.status(status).json({
-      ok: false,
+    return res.status(200).json({
+      ok: true,
       rid,
+      processed: false,
       code: e?.code || "WEBHOOK_ERROR",
       message: "Error procesando webhook MercadoPago",
       detail: e?.payload || e?.message || String(e),

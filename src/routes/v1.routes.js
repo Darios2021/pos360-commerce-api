@@ -101,12 +101,13 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// ✅ métodos de pago públicos
+// ✅ métodos de pago públicos (opcional)
 let publicPaymentMethodsRoutes = null;
 try {
   publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
 } catch (e) {
-  console.log("⚠️ publicPaymentMethodsRoutes no cargado");
+  console.log("⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)");
+  publicPaymentMethodsRoutes = null;
 }
 
 // Links públicos (opcional)
@@ -114,7 +115,8 @@ let publicLinksRoutes = null;
 try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
-  console.log("⚠️ publicLinksRoutes no cargado");
+  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
+  publicLinksRoutes = null;
 }
 
 // Instagram Graph (opcional)
@@ -151,22 +153,35 @@ const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
 const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
-const adminShopBranchesRoutes = require("./admin.shopBranches.routes");
+
+// ✅ NUEVO: /admin/shop/branches (si existe)
+let adminShopBranchesRoutes = null;
+try {
+  adminShopBranchesRoutes = require("./admin.shopBranches.routes");
+} catch (e) {
+  console.log("⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)");
+  adminShopBranchesRoutes = null;
+}
 
 // Admin links (opcional)
 let adminShopLinksRoutes = null;
 try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
-  console.log("⚠️ adminShopLinksRoutes no cargado");
+  console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
+  adminShopLinksRoutes = null;
 }
 
-// Admin media
-let adminMediaRoutes;
+// Admin media (fallback por nombre)
+let adminMediaRoutes = null;
 try {
   adminMediaRoutes = require("./adminMedia.routes");
 } catch (e1) {
-  adminMediaRoutes = require("./admin.media.routes");
+  try {
+    adminMediaRoutes = require("./admin.media.routes");
+  } catch (e2) {
+    adminMediaRoutes = null;
+  }
 }
 
 // =========================
@@ -182,6 +197,7 @@ if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
 
+// ✅ Ecommerce
 safeUse("/ecom", ecomCheckoutRoutes);
 safeUse("/ecom", ecomPaymentsRoutes);
 
@@ -189,6 +205,7 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // Mount: Protected
 // =========================
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
+
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
 safeUse("/branches", requireAuth, branchesRoutes);
@@ -208,13 +225,20 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
-safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBranchesRoutes);
+
+if (adminShopBranchesRoutes) {
+  safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBranchesRoutes);
+}
 
 if (adminShopLinksRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
 }
 
 // Admin media
-safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
+if (adminMediaRoutes) {
+  safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
+} else {
+  console.log("⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)");
+}
 
 module.exports = router;
