@@ -1,24 +1,20 @@
 // src/controllers/public.shopConfig.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (SELLADO)
-// Public config para checkout (SIN AUTH)
+// ✅ COPY-PASTE FINAL COMPLETO
 //
 // GET /api/v1/public/shop/payment-config
 //
-// Lee shop_settings('payments') y devuelve:
-// {
-//   transfer: { enabled, bank, alias, cbu, holder, instructions },
-//   mercadopago: { enabled },
-//   cash: { enabled, note }
-// }
-//
-// ✅ REAL/SELLADO:
-// MP solo si:
+// MP habilitado solo si:
 // - payments.mp_enabled === true (DB)
-// - y existe token REAL en ENV: MERCADOPAGO_ACCESS_TOKEN
-// ❌ NO usa tokens desde DB
-// ❌ NO usa fallback legacy
+// - y existe token REAL en ENV según modo:
+//    test -> MERCADOPAGO_ACCESS_TOKEN_TEST
+//    prod -> MERCADOPAGO_ACCESS_TOKEN_PROD
+//
+// Modo:
+// - payments.mp_mode (DB) si existe
+// - sino MP_MODE (ENV)
 
 const { sequelize } = require("../models");
+const { resolveMode, isConfigured } = require("../services/mercadopago.service");
 
 function safeStr(v) {
   return String(v ?? "").trim();
@@ -27,7 +23,7 @@ function safeStr(v) {
 async function getPaymentsConfig(req, res) {
   const out = {
     transfer: { enabled: true, bank: "", alias: "", cbu: "", holder: "", instructions: "" },
-    mercadopago: { enabled: false },
+    mercadopago: { enabled: false, mode: "prod", configured: false },
     cash: { enabled: true, note: "" },
   };
 
@@ -46,16 +42,18 @@ async function getPaymentsConfig(req, res) {
     out.transfer.holder = safeStr(p.transfer_holder);
     out.transfer.instructions = safeStr(p.transfer_instructions);
 
-    // ✅ Token REAL (ENV) - SELLADO
-    const envMp = !!safeStr(process.env.MERCADOPAGO_ACCESS_TOKEN);
-    out.mercadopago.enabled = !!p.mp_enabled && envMp;
+    const mode = resolveMode(p);          // "test" | "prod"
+    const configured = isConfigured(mode); // token existe para ese modo
+
+    out.mercadopago.mode = mode;
+    out.mercadopago.configured = configured;
+    out.mercadopago.enabled = !!p.mp_enabled && configured;
 
     out.cash.enabled = !!p.cash_enabled;
     out.cash.note = safeStr(p.cash_note);
 
     return res.json({ ok: true, ...out });
   } catch (e) {
-    // fallback seguro
     return res.json({ ok: true, ...out });
   }
 }

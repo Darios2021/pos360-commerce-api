@@ -1,6 +1,13 @@
 // src/controllers/ecomCheckout.controller.js
-// ✅ COPY-PASTE FINAL (FIX insertId: usa LAST_INSERT_ID() + detail siempre)
+// ✅ COPY-PASTE FINAL COMPLETO
 // POST /api/v1/ecom/checkout
+//
+// Cambios clave:
+// - ✅ Soporta MP_MODE test/prod (desde DB payments.mp_mode o process.env.MP_MODE)
+// - ✅ Usa tokens separados: MERCADOPAGO_ACCESS_TOKEN_TEST / _PROD
+// - ✅ En TEST usa sandbox_init_point y excluye account_money (saldo)
+// - ✅ notification_url usa MP_NOTIFICATION_URL si existe
+// - ✅ Mantiene DB-first y FIX insertId con LAST_INSERT_ID()
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -41,10 +48,121 @@ async function getLastInsertId(transaction) {
   return toInt(rows?.[0]?.id, 0) || 0;
 }
 
+/* ============================================================
+   SETTINGS (DB) — best effort
+   Queremos leer payments.mp_mode si existe.
+   Detecta automáticamente si hay una tabla de settings conocida.
+============================================================ */
+async function tableExists(tableName, transaction) {
+  const [rows] = await sequelize.query(
+    `
+    SELECT COUNT(*) AS c
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t
+    `,
+    { replacements: { t: tableName }, transaction }
+  );
+  return toInt(rows?.[0]?.c, 0) > 0;
+}
+
+// Best effort: lee el setting "payments" desde alguna tabla común.
+// Soporta esquemas típicos:
+// - shop_settings(key, value)
+// - ecom_settings(key, value)
+// - settings(key, value)
+// y variantes (name/code en vez de key).
+async function loadPaymentsSetting(transaction) {
+  const candidates = ["shop_settings", "ecom_settings", "settings"];
+  let table = null;
+
+  for (const tname of candidates) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await tableExists(tname, transaction)) {
+      table = tname;
+      break;
+    }
+  }
+  if (!table) return null;
+
+  const cols = await getColumns(table, transaction);
+
+  const keyCol = cols.has("key") ? "key" : cols.has("name") ? "name" : cols.has("code") ? "code" : null;
+  const valCol = cols.has("value") ? "value" : cols.has("json") ? "json" : cols.has("data") ? "data" : null;
+
+  if (!keyCol || !valCol) return null;
+
+  const [rows] = await sequelize.query(
+    `SELECT \`${valCol}\` AS v FROM \`${table}\` WHERE \`${keyCol}\` = :k LIMIT 1`,
+    { replacements: { k: "payments" }, transaction }
+  );
+
+  const raw = rows?.[0]?.v ?? null;
+  if (!raw) return null;
+
+  // value puede venir como string JSON o ya objeto (según dialecto)
+  if (typeof raw === "object") return raw;
+
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+}
+
+/* ============================================================
+   MERCADOPAGO MODE + TOKENS
+============================================================ */
+
+function normalizeMpMode(v) {
+  const m = lower(v);
+  if (m === "test" || m === "sandbox") return "test";
+  if (m === "prod" || m === "production" || m === "live") return "prod";
+  return "";
+}
+
+function pickEnvToken(mode) {
+  if (mode === "test") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_TEST);
+  if (mode === "prod") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_PROD);
+
+  // fallback legacy (si alguien aún usa MERCADOPAGO_ACCESS_TOKEN único)
+  const legacy = toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN);
+  return legacy;
+}
+
+async function resolveMpRuntimeConfig(transaction) {
+  // 1) DB setting payments.mp_mode (si existe)
+  let dbMode = "";
+  try {
+    const payments = await loadPaymentsSetting(transaction);
+    dbMode = normalizeMpMode(payments?.mp_mode);
+  } catch {
+    // ignore
+  }
+
+  // 2) env MP_MODE
+  const envMode = normalizeMpMode(process.env.MP_MODE);
+
+  const mode = dbMode || envMode || "prod"; // default prod (si tu server está en producción)
+  const accessToken = pickEnvToken(mode);
+
+  const publicBaseUrl =
+    toStr(process.env.PUBLIC_BASE_URL) ||
+    toStr(process.env.ECOMMERCE_PUBLIC_URL) ||
+    toStr(process.env.FRONTEND_PUBLIC_URL) ||
+    toStr(process.env.BASE_URL);
+
+  // Preferimos env explícito
+  const notificationUrl =
+    toStr(process.env.MP_NOTIFICATION_URL) ||
+    (publicBaseUrl ? `${String(publicBaseUrl).replace(/\/$/, "")}/api/v1/webhooks/mercadopago` : "");
+
+  return { mode, accessToken, publicBaseUrl, notificationUrl };
+}
+
 /**
  * MercadoPago: crear preferencia via API (sin SDK)
  */
-async function createMpPreference({ accessToken, publicBaseUrl, order, buyer, items }) {
+async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl, mode, order, buyer, items }) {
   if (!accessToken) throw new Error("MP_ACCESS_TOKEN_MISSING");
 
   const base = String(publicBaseUrl || "").replace(/\/$/, "");
@@ -72,15 +190,28 @@ async function createMpPreference({ accessToken, publicBaseUrl, order, buyer, it
 
   const payload = {
     external_reference: order.public_code,
+
+    // OJO: Mantengo payer (te sirve para recibos/orden),
+    // pero NO mandamos id ni datos raros.
     payer: {
       name: String(buyer?.name || ""),
       email: String(buyer?.email || ""),
     },
+
     items: mpItems,
     back_urls: { success, pending, failure },
     auto_return: "approved",
-    notification_url: `${base}/api/v1/ecom/webhooks/mercadopago`,
+
+    // ✅ usa env si existe
+    notification_url: notificationUrl || `${base}/api/v1/webhooks/mercadopago`,
   };
+
+  // ✅ En TEST, evitamos el bug de "saldo/dinero disponible"
+  if (mode === "test") {
+    payload.payment_methods = {
+      excluded_payment_types: [{ id: "account_money" }],
+    };
+  }
 
   const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
     method: "POST",
@@ -377,7 +508,6 @@ async function checkout(req, res) {
 
       // ---- (C) Insert order ----
       const public_code = genPublicCode();
-
       const branch_id_for_order = fulfillment_type === "pickup" ? pickup_branch_id : branch_id_input;
 
       const ship_name =
@@ -468,7 +598,7 @@ async function checkout(req, res) {
         );
       }
 
-      // ---- (E) Insert payment ----
+      // ---- (E) Insert payment (NO MP) ----
       if (provider !== "mercadopago") {
         const external_payload = {
           method_code,
@@ -524,21 +654,39 @@ async function checkout(req, res) {
         };
       }
 
-      const accessToken = process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN || "";
-      const publicBaseUrl =
-        process.env.PUBLIC_BASE_URL || process.env.FRONTEND_PUBLIC_URL || process.env.BASE_URL || "";
+      // ---- (F) MercadoPago ----
+      const mpCfg = await resolveMpRuntimeConfig(t);
+
+      if (!mpCfg.accessToken) {
+        return {
+          error: {
+            status: 400,
+            code: "MP_NOT_CONFIGURED",
+            message: "Mercado Pago no disponible: falta configuración en el servidor.",
+            detail: {
+              mp_mode: mpCfg.mode,
+              missing: mpCfg.mode === "test" ? "MERCADOPAGO_ACCESS_TOKEN_TEST" : "MERCADOPAGO_ACCESS_TOKEN_PROD",
+            },
+          },
+        };
+      }
 
       const mp = await createMpPreference({
-        accessToken,
-        publicBaseUrl,
+        accessToken: mpCfg.accessToken,
+        publicBaseUrl: mpCfg.publicBaseUrl,
+        notificationUrl: mpCfg.notificationUrl,
+        mode: mpCfg.mode,
         order: { public_code, total },
         buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone },
         items: orderItems,
       });
 
-      const redirect_url = mp.init_point || null;
+      // ✅ En TEST usamos sandbox_init_point
+      const redirect_url =
+        mpCfg.mode === "test" ? (mp.sandbox_init_point || mp.init_point || null) : (mp.init_point || null);
 
       const mpPayload = {
+        mp_mode: mpCfg.mode,
         mp_preference: { id: mp.id, init_point: mp.init_point, sandbox_init_point: mp.sandbox_init_point },
         mp_raw: mp.raw || null,
         method_code,
@@ -591,7 +739,7 @@ async function checkout(req, res) {
           external_reference: public_code,
         },
         redirect_url,
-        mp: { id: mp.id, init_point: mp.init_point, sandbox_init_point: mp.sandbox_init_point },
+        mp: { id: mp.id, init_point: mp.init_point, sandbox_init_point: mp.sandbox_init_point, mode: mpCfg.mode },
       };
     });
 
@@ -600,7 +748,7 @@ async function checkout(req, res) {
         ok: false,
         code: result.error.code || "CHECKOUT_ERROR",
         message: result.error.message || "Error en checkout.",
-        detail: result.error.detail || null, // ✅ SIEMPRE visible
+        detail: result.error.detail || null,
         request_id,
       });
     }

@@ -1,25 +1,48 @@
 // src/services/mercadopago.service.js
 // ✅ COPY-PASTE FINAL COMPLETO (SIN axios - usa fetch nativo Node 18/20)
-// Crea preferencia en MercadoPago con token desde ENV:
-// - MERCADOPAGO_ACCESS_TOKEN
+//
+// Soporta TEST/PROD sin mezclar:
+// - mode: payments.mp_mode (DB) o process.env.MP_MODE
+// - tokens:
+//    MERCADOPAGO_ACCESS_TOKEN_TEST=TEST-...
+//    MERCADOPAGO_ACCESS_TOKEN_PROD=APP_USR-...
 //
 // Exporta:
-// - createPreference(payload)
-//
-// Nota:
-// - NO loguea token
-// - Devuelve objeto JSON de MP
-// - Lanza error con { statusCode, payload } para que el controller lo maneje
+// - createPreference(payload, { mode })
+// - resolveMode(payments)
+// - getAccessToken(mode)
+// - isConfigured(mode)
 
-function mustEnv(name) {
-  const v = String(process.env[name] || "").trim();
-  if (!v) {
-    const err = new Error(`Missing env ${name}`);
-    err.code = "ENV_MISSING";
-    err.env = name;
-    throw err;
-  }
-  return v;
+function toStr(v) {
+  return String(v ?? "").trim();
+}
+function lower(v) {
+  return toStr(v).toLowerCase();
+}
+
+function normalizeMode(v) {
+  const m = lower(v);
+  if (m === "test" || m === "sandbox") return "test";
+  if (m === "prod" || m === "production" || m === "live") return "prod";
+  return "";
+}
+
+function resolveMode(payments) {
+  const dbMode = normalizeMode(payments?.mp_mode);
+  const envMode = normalizeMode(process.env.MP_MODE);
+  return dbMode || envMode || "prod";
+}
+
+function getAccessToken(mode) {
+  if (mode === "test") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_TEST);
+  if (mode === "prod") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_PROD);
+
+  // legacy fallback (por compat)
+  return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN);
+}
+
+function isConfigured(mode) {
+  return !!getAccessToken(mode);
 }
 
 function safeJsonParse(text) {
@@ -30,8 +53,16 @@ function safeJsonParse(text) {
   }
 }
 
-async function createPreference(payload) {
-  const token = mustEnv("MERCADOPAGO_ACCESS_TOKEN");
+async function createPreference(payload, opts = {}) {
+  const mode = normalizeMode(opts?.mode) || normalizeMode(process.env.MP_MODE) || "prod";
+  const token = getAccessToken(mode);
+
+  if (!token) {
+    const err = new Error(`Missing MercadoPago token for mode=${mode}`);
+    err.code = "ENV_MISSING";
+    err.env = mode === "test" ? "MERCADOPAGO_ACCESS_TOKEN_TEST" : "MERCADOPAGO_ACCESS_TOKEN_PROD";
+    throw err;
+  }
 
   const url = "https://api.mercadopago.com/checkout/preferences";
 
@@ -59,4 +90,10 @@ async function createPreference(payload) {
   return data;
 }
 
-module.exports = { createPreference };
+module.exports = {
+  createPreference,
+  resolveMode,
+  getAccessToken,
+  isConfigured,
+  normalizeMode,
+};

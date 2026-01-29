@@ -1,49 +1,65 @@
 // src/controllers/mpWebhook.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (DB-FIRST + Node20 fetch) — Webhook MercadoPago robusto
 //
-// Objetivo:
-// - Recibir notificaciones de MP (payment / merchant_order)
-// - Consultar el detalle a MP vía API (fetch nativo Node 20)
-// - Actualizar ecom_payments + ecom_orders según status
-//
-// ENV requerida:
-// - MERCADOPAGO_ACCESS_TOKEN
-//
-// Opcionales:
-// - MP_WEBHOOK_LOG_PAYLOAD=1  (loggea body completo)
-// - MP_WEBHOOK_STRICT=1       (si falta topic/id => 400)
-//
-// Ruta única esperada:
+// Ruta esperada:
 // POST /api/v1/ecom/webhooks/mercadopago
 //
-// Mapeos:
-// - ecom_payments.status => approved | pending | rejected | cancelled | refunded | chargeback | created
-// - ecom_orders.payment_status => paid | pending | unpaid
+// ENV:
+// - MP_MODE=test|prod
+// - MERCADOPAGO_ACCESS_TOKEN_TEST
+// - MERCADOPAGO_ACCESS_TOKEN_PROD
+//
+// Opcionales:
+// - MP_WEBHOOK_LOG_PAYLOAD=1
+// - MP_WEBHOOK_STRICT=1
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
 
-// ---------------------
-// helpers
-// ---------------------
 function reqId() {
   return crypto.randomBytes(8).toString("hex");
 }
 function toStr(v) {
   return String(v ?? "").trim();
 }
+function lower(v) {
+  return toStr(v).toLowerCase();
+}
 function log(rid, ...args) {
   console.log(`[MP WEBHOOK] [${rid}]`, ...args);
 }
+
+function normalizeMode(v) {
+  const m = lower(v);
+  if (m === "test" || m === "sandbox") return "test";
+  if (m === "prod" || m === "production" || m === "live") return "prod";
+  return "";
+}
+function getMpMode() {
+  return normalizeMode(process.env.MP_MODE) || "prod";
+}
 function mpToken() {
-  return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN);
+  const mode = getMpMode();
+  const tok =
+    mode === "test"
+      ? toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_TEST)
+      : toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_PROD);
+
+  if (tok) return tok;
+
+  // fallback legacy
+  return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN);
 }
 
 async function mpGetJson(url, rid) {
   const token = mpToken();
   if (!token) {
-    const err = new Error("Falta MERCADOPAGO_ACCESS_TOKEN");
+    const err = new Error("Falta token MercadoPago (TEST/PROD)");
     err.code = "MP_TOKEN_MISSING";
+    err.detail = {
+      MP_MODE: getMpMode(),
+      missing: getMpMode() === "test" ? "MERCADOPAGO_ACCESS_TOKEN_TEST" : "MERCADOPAGO_ACCESS_TOKEN_PROD",
+    };
     throw err;
   }
 
@@ -76,17 +92,12 @@ async function mpGetJson(url, rid) {
   return json;
 }
 
-// Deriva paymentId/topic/id desde distintas formas que manda MP
 function parseMpNotification(req) {
   const q = req.query || {};
   const b = req.body || {};
 
   const type =
-    toStr(q.type) ||
-    toStr(q.topic) ||
-    toStr(b.type) ||
-    toStr(b.topic) ||
-    toStr(b.action);
+    toStr(q.type) || toStr(q.topic) || toStr(b.type) || toStr(b.topic) || toStr(b.action);
 
   const dataId =
     toStr(q["data.id"]) ||
@@ -107,7 +118,6 @@ function parseMpNotification(req) {
 
 function mapMpStatusToLocalPaymentStatus(mpStatus) {
   const s = toStr(mpStatus).toLowerCase();
-  // MP: approved, pending, in_process, rejected, cancelled, refunded, charged_back
   if (s === "approved") return "approved";
   if (s === "pending" || s === "in_process") return "pending";
   if (s === "rejected") return "rejected";
@@ -128,11 +138,7 @@ function isApproved(localPayStatus) {
   return toStr(localPayStatus).toLowerCase() === "approved";
 }
 
-// ---------------------
-// DB: locate payment row
-// ---------------------
 async function findPaymentByMpExternal({ mp_payment_id, external_id, external_reference, t }) {
-  // 1) mp_payment_id
   if (mp_payment_id) {
     const [rows] = await sequelize.query(
       `
@@ -147,7 +153,6 @@ async function findPaymentByMpExternal({ mp_payment_id, external_id, external_re
     if (rows?.length) return rows[0];
   }
 
-  // 2) external_id (a veces lo usan como payment_id)
   if (external_id) {
     const [rows] = await sequelize.query(
       `
@@ -162,7 +167,6 @@ async function findPaymentByMpExternal({ mp_payment_id, external_id, external_re
     if (rows?.length) return rows[0];
   }
 
-  // 3) external_reference => public_code del pedido
   if (external_reference) {
     const [rows] = await sequelize.query(
       `
@@ -201,11 +205,9 @@ async function updatePaymentAndOrder({ paymentRow, mp, merchantOrderId, localPay
       provider = 'mercadopago',
       status = :status,
 
-      -- ✅ guardamos ids dedicados
       mp_payment_id = COALESCE(:mp_payment_id, mp_payment_id),
       mp_merchant_order_id = COALESCE(:mp_merchant_order_id, mp_merchant_order_id),
 
-      -- ✅ mantenemos compat: external_id también con payment_id si venía vacío
       external_id = COALESCE(:external_id, external_id),
       external_reference = COALESCE(:external_reference, external_reference),
 
@@ -213,7 +215,6 @@ async function updatePaymentAndOrder({ paymentRow, mp, merchantOrderId, localPay
       status_detail = :status_detail,
       payer_email = COALESCE(NULLIF(:payer_email,''), payer_email),
 
-      -- payload JSON
       external_payload = JSON_SET(
         COALESCE(external_payload, JSON_OBJECT()),
         '$.mp_payment',
@@ -234,7 +235,7 @@ async function updatePaymentAndOrder({ paymentRow, mp, merchantOrderId, localPay
         status: localPayStatus,
         mp_payment_id,
         mp_merchant_order_id: merchantOrderId ? String(merchantOrderId) : null,
-        external_id: mp_payment_id, // compat
+        external_id: mp_payment_id,
         external_reference,
         external_status: mp_status || null,
         status_detail: mp_status_detail || null,
@@ -281,9 +282,6 @@ async function updatePaymentAndOrder({ paymentRow, mp, merchantOrderId, localPay
   });
 }
 
-// ---------------------
-// Controller
-// ---------------------
 async function mercadopagoWebhook(req, res) {
   const rid = reqId();
 
@@ -314,7 +312,6 @@ async function mercadopagoWebhook(req, res) {
     });
   }
 
-  // Si no puedo determinar -> ACK 200 igual
   if (!topic || !id) {
     return res.status(200).json({ ok: true, rid, ignored: true });
   }
@@ -352,7 +349,7 @@ async function mercadopagoWebhook(req, res) {
     const out = await sequelize.transaction(async (t) => {
       const payRow = await findPaymentByMpExternal({
         mp_payment_id,
-        external_id: mp_payment_id, // compat
+        external_id: mp_payment_id,
         external_reference,
         t,
       });
@@ -383,7 +380,6 @@ async function mercadopagoWebhook(req, res) {
 
     return res.status(200).json(out);
   } catch (e) {
-    // A MP conviene responder 200 para evitar retries infinitos
     log(rid, "ERROR", { message: e?.message || String(e), statusCode: e?.statusCode, payload: e?.payload || null });
 
     return res.status(200).json({
@@ -392,7 +388,7 @@ async function mercadopagoWebhook(req, res) {
       processed: false,
       code: e?.code || "WEBHOOK_ERROR",
       message: "Error procesando webhook MercadoPago",
-      detail: e?.payload || e?.message || String(e),
+      detail: e?.payload || e?.detail || e?.message || String(e),
     });
   }
 }
