@@ -5,7 +5,7 @@
 // Cambios clave:
 // - ✅ Soporta MP_MODE test/prod (desde DB payments.mp_mode o process.env.MP_MODE)
 // - ✅ Usa tokens separados: MERCADOPAGO_ACCESS_TOKEN_TEST / _PROD
-// - ✅ En TEST usa sandbox_init_point y excluye account_money (saldo)
+// - ✅ En TEST usa sandbox_init_point y excluye account_money (saldo) ✅ FIX correcto
 // - ✅ notification_url usa MP_NOTIFICATION_URL si existe
 // - ✅ Mantiene DB-first y FIX insertId con LAST_INSERT_ID()
 
@@ -191,8 +191,6 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
   const payload = {
     external_reference: order.public_code,
 
-    // OJO: Mantengo payer (te sirve para recibos/orden),
-    // pero NO mandamos id ni datos raros.
     payer: {
       name: String(buyer?.name || ""),
       email: String(buyer?.email || ""),
@@ -206,10 +204,11 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     notification_url: notificationUrl || `${base}/api/v1/webhooks/mercadopago`,
   };
 
-  // ✅ En TEST, evitamos el bug de "saldo/dinero disponible"
+  // ✅ TEST: excluir saldo (account_money) ✅ FIX CORRECTO
+  // Antes estaba mal: excluded_payment_types (account_money NO es type)
   if (mode === "test") {
     payload.payment_methods = {
-      excluded_payment_types: [{ id: "account_money" }],
+      excluded_payment_methods: [{ id: "account_money" }],
     };
   }
 
@@ -372,8 +371,7 @@ async function checkout(req, res) {
     );
     methodRow = mrows?.[0] || null;
   } catch (e) {
-    const detail =
-      e?.original?.sqlMessage || e?.original?.message || e?.sqlMessage || e?.message || String(e);
+    const detail = e?.original?.sqlMessage || e?.original?.message || e?.sqlMessage || e?.message || String(e);
 
     console.error("❌ PAYMENT_METHODS_TABLE_ERROR", { request_id, detail });
 
@@ -510,10 +508,8 @@ async function checkout(req, res) {
       const public_code = genPublicCode();
       const branch_id_for_order = fulfillment_type === "pickup" ? pickup_branch_id : branch_id_input;
 
-      const ship_name =
-        fulfillment_type === "delivery" ? toStr(shipping?.contact_name || buyer_name) || null : null;
-      const ship_phone =
-        fulfillment_type === "delivery" ? toStr(shipping?.ship_phone || buyer_phone) || null : null;
+      const ship_name = fulfillment_type === "delivery" ? toStr(shipping?.contact_name || buyer_name) || null : null;
+      const ship_phone = fulfillment_type === "delivery" ? toStr(shipping?.ship_phone || buyer_phone) || null : null;
       const ship_address1 = fulfillment_type === "delivery" ? toStr(shipping?.address1) || null : null;
       const ship_address2 = fulfillment_type === "delivery" ? toStr(shipping?.address2) || null : null;
       const ship_city = fulfillment_type === "delivery" ? toStr(shipping?.city) || null : null;
