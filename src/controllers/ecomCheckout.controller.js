@@ -162,6 +162,10 @@ async function resolveMpRuntimeConfig(transaction) {
 /**
  * MercadoPago: crear preferencia via API (sin SDK)
  */
+/**
+ * MercadoPago: crear preferencia via API (sin SDK)
+ * ✅ FIX: si MP rechaza excluir account_money => reintenta SIN excluir
+ */
 async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl, mode, order, buyer, items }) {
   if (!accessToken) throw new Error("MP_ACCESS_TOKEN_MISSING");
 
@@ -188,56 +192,92 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     });
   }
 
-  const payload = {
+  const basePayload = {
     external_reference: order.public_code,
-
     payer: {
       name: String(buyer?.name || ""),
       email: String(buyer?.email || ""),
     },
-
     items: mpItems,
     back_urls: { success, pending, failure },
     auto_return: "approved",
-
-    // ✅ usa env si existe
     notification_url: notificationUrl || `${base}/api/v1/webhooks/mercadopago`,
   };
 
-  // ✅ TEST: excluir saldo (account_money) ✅ FIX CORRECTO
-  // Antes estaba mal: excluded_payment_types (account_money NO es type)
+  // 1) Primer intento: en TEST tratamos de excluir saldo (si MP lo permite)
+  const payload1 = { ...basePayload };
+
   if (mode === "test") {
-    payload.payment_methods = {
+    payload1.payment_methods = {
       excluded_payment_methods: [{ id: "account_money" }],
     };
   }
 
-  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  async function mpCreatePreference(payload) {
+    const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  const data = await r.json().catch(() => ({}));
+    const data = await r.json().catch(() => ({}));
 
-  if (!r.ok) {
-    const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
-    const detail = data?.cause || data || null;
-    const err = new Error(msg);
-    err.detail = detail;
-    throw err;
+    if (!r.ok) {
+      const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
+      const detail = data?.cause || data || null;
+      const err = new Error(msg);
+      err.detail = detail;
+      err.http_status = r.status;
+      err.mp_body = data;
+      throw err;
+    }
+
+    return data;
   }
 
-  return {
-    id: data.id || null,
-    init_point: data.init_point || null,
-    sandbox_init_point: data.sandbox_init_point || null,
-    raw: data,
-  };
+  try {
+    const data = await mpCreatePreference(payload1);
+    return {
+      id: data.id || null,
+      init_point: data.init_point || null,
+      sandbox_init_point: data.sandbox_init_point || null,
+      raw: data,
+    };
+  } catch (e) {
+    const msg = String(e?.message || "").toLowerCase();
+    const bodyMsg = String(e?.mp_body?.message || "").toLowerCase();
+
+    const isAccountMoneyRejected =
+      msg.includes("account_money") ||
+      bodyMsg.includes("account_money") ||
+      JSON.stringify(e?.mp_body || {}).toLowerCase().includes("account_money");
+
+    // 2) Fallback: si MP no permite excluir account_money -> reintenta sin payment_methods
+    if (mode === "test" && isAccountMoneyRejected) {
+      console.warn("⚠️ MP rechazó excluir account_money. Reintentando sin payment_methods...", {
+        mp_message: e?.message,
+        mp_body: e?.mp_body || null,
+      });
+
+      const payload2 = { ...basePayload }; // sin payment_methods
+      const data2 = await mpCreatePreference(payload2);
+
+      return {
+        id: data2.id || null,
+        init_point: data2.init_point || null,
+        sandbox_init_point: data2.sandbox_init_point || null,
+        raw: data2,
+      };
+    }
+
+    throw e;
+  }
 }
+
+
 
 // =========================
 // Normalizadores (compat front)
