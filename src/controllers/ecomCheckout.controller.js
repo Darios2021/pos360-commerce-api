@@ -71,6 +71,13 @@ async function tableExists(tableName, transaction) {
 // - ecom_settings(key, value)
 // - settings(key, value)
 // y variantes (name/code en vez de key).
+// Best effort: lee el setting "payments" desde alguna tabla común.
+// Soporta esquemas típicos:
+// - shop_settings(key, value)
+// - shop_settings(key, value_json) ✅
+// - ecom_settings(key, value)
+// - settings(key, value)
+// y variantes (name/code en vez de key).
 async function loadPaymentsSetting(transaction) {
   const candidates = ["shop_settings", "ecom_settings", "settings"];
   let table = null;
@@ -87,7 +94,18 @@ async function loadPaymentsSetting(transaction) {
   const cols = await getColumns(table, transaction);
 
   const keyCol = cols.has("key") ? "key" : cols.has("name") ? "name" : cols.has("code") ? "code" : null;
-  const valCol = cols.has("value") ? "value" : cols.has("json") ? "json" : cols.has("data") ? "data" : null;
+
+  // ✅ FIX: soportar value_json (tu caso)
+const valCol = cols.has("value")
+  ? "value"
+  : cols.has("value_json")
+  ? "value_json"
+  : cols.has("json")
+  ? "json"
+  : cols.has("data")
+  ? "data"
+  : null;
+
 
   if (!keyCol || !valCol) return null;
 
@@ -99,7 +117,7 @@ async function loadPaymentsSetting(transaction) {
   const raw = rows?.[0]?.v ?? null;
   if (!raw) return null;
 
-  // value puede venir como string JSON o ya objeto (según dialecto)
+  // value_json puede venir como JSON real (obj) o string JSON
   if (typeof raw === "object") return raw;
 
   try {
@@ -108,6 +126,7 @@ async function loadPaymentsSetting(transaction) {
     return null;
   }
 }
+
 
 /* ============================================================
    MERCADOPAGO MODE + TOKENS
