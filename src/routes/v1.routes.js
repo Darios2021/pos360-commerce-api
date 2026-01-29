@@ -4,6 +4,7 @@
 // ✅ FIX: carga publicInstagram.routes (si existe)
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
+// ✅ NUEVO: monta /admin/shop/branches (reusa branches.controller.js)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -100,25 +101,23 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// ✅ NUEVO: métodos de pago (DB-first)
+// ✅ métodos de pago públicos
 let publicPaymentMethodsRoutes = null;
 try {
   publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
 } catch (e) {
-  console.log("⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)");
-  publicPaymentMethodsRoutes = null;
+  console.log("⚠️ publicPaymentMethodsRoutes no cargado");
 }
 
-// ✅ CAMINO B: Links públicos — NO ROMPER SI NO EXISTE
+// Links públicos (opcional)
 let publicLinksRoutes = null;
 try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
-  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
-  publicLinksRoutes = null;
+  console.log("⚠️ publicLinksRoutes no cargado");
 }
 
-// ✅ (opcional) IG Graph
+// Instagram Graph (opcional)
 let publicInstagramRoutes = null;
 try {
   publicInstagramRoutes = require("./publicInstagram.routes");
@@ -126,12 +125,12 @@ try {
   publicInstagramRoutes = null;
 }
 
-// Ecommerce (público)
+// Ecommerce público
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
 
 // =========================
-// Protected
+// Protected (operación)
 // =========================
 const productsRoutes = require("./products.routes");
 const categoriesRoutes = require("./categories.routes");
@@ -144,23 +143,25 @@ const dashboardRoutes = require("./dashboard.routes");
 const posRoutes = require("./pos.routes");
 const meRoutes = require("./me.routes");
 
+// =========================
 // Admin
+// =========================
 const adminUsersRoutes = require("./adminUsers.routes");
 const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
 const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
+const adminShopBranchesRoutes = require("./admin.shopBranches.routes");
 
-// ✅ CAMINO B: Admin links — NO ROMPER SI NO EXISTE
+// Admin links (opcional)
 let adminShopLinksRoutes = null;
 try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
-  console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
-  adminShopLinksRoutes = null;
+  console.log("⚠️ adminShopLinksRoutes no cargado");
 }
 
-// ✅ Admin Media (Galería multimedia)
+// Admin media
 let adminMediaRoutes;
 try {
   adminMediaRoutes = require("./adminMedia.routes");
@@ -169,7 +170,7 @@ try {
 }
 
 // =========================
-// Mount: Public primero
+// Mount: Public
 // =========================
 safeUse("/health", healthRoutes);
 safeUse("/auth", authRoutes);
@@ -177,21 +178,17 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ NUEVO: /api/v1/public/payment-methods
 if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
-
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
 
-// ✅ Ecommerce público
 safeUse("/ecom", ecomCheckoutRoutes);
 safeUse("/ecom", ecomPaymentsRoutes);
 
 // =========================
-// Mount: Protected (operación)
+// Mount: Protected
 // =========================
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
-
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
 safeUse("/branches", requireAuth, branchesRoutes);
@@ -203,7 +200,7 @@ safeUse("/pos", requireAuth, posRoutes);
 safeUse("/me", requireAuth, meRoutes);
 
 // =========================
-// Mount: Admin (RBAC context)
+// Mount: Admin (RBAC)
 // =========================
 safeUse("/admin/users", requireAuth, attachAccessContext, adminUsersRoutes);
 
@@ -211,10 +208,13 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
+safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBranchesRoutes);
 
-if (adminShopLinksRoutes) safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
+if (adminShopLinksRoutes) {
+  safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
+}
 
-// ✅ /admin/media (galería)
+// Admin media
 safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
 
 module.exports = router;
