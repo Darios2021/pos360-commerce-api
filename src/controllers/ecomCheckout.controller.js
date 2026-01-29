@@ -4,14 +4,22 @@
 //
 // Cambios clave:
 // - ✅ Soporta MP_MODE test/prod (desde DB payments.mp_mode o process.env.MP_MODE)
-// - ✅ Usa tokens separados: MERCADOPAGO_ACCESS_TOKEN_TEST / _PROD
-// - ✅ En TEST usa sandbox_init_point y excluye account_money (saldo) ✅ FIX correcto
+// - ✅ Usa tokens separados: MERCADOPAGO_ACCESS_TOKEN_TEST / _PROD (fallback legacy)
+// - ✅ Lee settings desde shop_settings/ecom_settings/settings soportando value_json ✅
+// - ✅ En TEST usa sandbox_init_point
+// - ✅ En TEST intenta excluir account_money (saldo). ✅
+//    ⚠️ Si MP rechaza eso, NO hacemos fallback silencioso (para no crear preferencia “mala”).
 // - ✅ notification_url usa MP_NOTIFICATION_URL si existe
 // - ✅ Mantiene DB-first y FIX insertId con LAST_INSERT_ID()
+
+/* global fetch */
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
 
+/* =========================
+   Helpers
+========================= */
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
@@ -50,8 +58,8 @@ async function getLastInsertId(transaction) {
 
 /* ============================================================
    SETTINGS (DB) — best effort
-   Queremos leer payments.mp_mode si existe.
-   Detecta automáticamente si hay una tabla de settings conocida.
+   Lee payments desde shop_settings/ecom_settings/settings
+   y soporta value_json (tu caso real)
 ============================================================ */
 async function tableExists(tableName, transaction) {
   const [rows] = await sequelize.query(
@@ -65,31 +73,6 @@ async function tableExists(tableName, transaction) {
   return toInt(rows?.[0]?.c, 0) > 0;
 }
 
-// Best effort: lee el setting "payments" desde alguna tabla común.
-// Soporta esquemas típicos:
-// - shop_settings(key, value)
-// - ecom_settings(key, value)
-// - settings(key, value)
-// y variantes (name/code en vez de key).
-// Best effort: lee el setting "payments" desde alguna tabla común.
-// Soporta esquemas típicos:
-// - shop_settings(key, value)
-// - shop_settings(key, value_json) ✅
-// - ecom_settings(key, value)
-// - settings(key, value)
-// y variantes (name/code en vez de key).
-// Best effort: lee el setting "payments" desde alguna tabla común.
-// Soporta esquemas típicos:
-// - shop_settings(key, value_json/value/json/data)
-// - ecom_settings(key, value/json/data)
-// - settings(key, value/json/data)
-// y variantes (name/code en vez de key).
-// Best effort: lee el setting "payments" desde alguna tabla común.
-// Soporta esquemas típicos:
-// - shop_settings(key, value_json/value/json/data)
-// - ecom_settings(key, value/json/data)
-// - settings(key, value/json/data)
-// y variantes (name/code en vez de key).
 async function loadPaymentsSetting(transaction) {
   const candidates = ["shop_settings", "ecom_settings", "settings"];
   let table = null;
@@ -105,15 +88,9 @@ async function loadPaymentsSetting(transaction) {
 
   const cols = await getColumns(table, transaction);
 
-  const keyCol = cols.has("key")
-    ? "key"
-    : cols.has("name")
-    ? "name"
-    : cols.has("code")
-    ? "code"
-    : null;
+  const keyCol = cols.has("key") ? "key" : cols.has("name") ? "name" : cols.has("code") ? "code" : null;
 
-  // ✅ FIX CLAVE: soportar value_json (tu caso real)
+  // ✅ soporta value_json primero (tu caso)
   const valCol = cols.has("value_json")
     ? "value_json"
     : cols.has("value")
@@ -134,7 +111,7 @@ async function loadPaymentsSetting(transaction) {
   const raw = rows?.[0]?.v ?? null;
   if (!raw) return null;
 
-  // value_json puede venir como string JSON o ya objeto
+  // value_json puede venir como objeto o string JSON
   if (typeof raw === "object") return raw;
 
   try {
@@ -144,11 +121,9 @@ async function loadPaymentsSetting(transaction) {
   }
 }
 
-
 /* ============================================================
    MERCADOPAGO MODE + TOKENS
 ============================================================ */
-
 function normalizeMpMode(v) {
   const m = lower(v);
   if (m === "test" || m === "sandbox") return "test";
@@ -160,13 +135,12 @@ function pickEnvToken(mode) {
   if (mode === "test") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_TEST);
   if (mode === "prod") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_PROD);
 
-  // fallback legacy (si alguien aún usa MERCADOPAGO_ACCESS_TOKEN único)
-  const legacy = toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN);
-  return legacy;
+  // legacy fallback (si alguien aún usa MERCADOPAGO_ACCESS_TOKEN único)
+  return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN);
 }
 
 async function resolveMpRuntimeConfig(transaction) {
-  // 1) DB setting payments.mp_mode (si existe)
+  // 1) DB payments.mp_mode (si existe)
   let dbMode = "";
   try {
     const payments = await loadPaymentsSetting(transaction);
@@ -175,10 +149,10 @@ async function resolveMpRuntimeConfig(transaction) {
     // ignore
   }
 
-  // 2) env MP_MODE
+  // 2) env MP_MODE (fallback)
   const envMode = normalizeMpMode(process.env.MP_MODE);
 
-  const mode = dbMode || envMode || "prod"; // default prod (si tu server está en producción)
+  const mode = dbMode || envMode || "prod";
   const accessToken = pickEnvToken(mode);
 
   const publicBaseUrl =
@@ -187,7 +161,6 @@ async function resolveMpRuntimeConfig(transaction) {
     toStr(process.env.FRONTEND_PUBLIC_URL) ||
     toStr(process.env.BASE_URL);
 
-  // Preferimos env explícito
   const notificationUrl =
     toStr(process.env.MP_NOTIFICATION_URL) ||
     (publicBaseUrl ? `${String(publicBaseUrl).replace(/\/$/, "")}/api/v1/webhooks/mercadopago` : "");
@@ -195,13 +168,32 @@ async function resolveMpRuntimeConfig(transaction) {
   return { mode, accessToken, publicBaseUrl, notificationUrl };
 }
 
-/**
- * MercadoPago: crear preferencia via API (sin SDK)
- */
-/**
- * MercadoPago: crear preferencia via API (sin SDK)
- * ✅ FIX: si MP rechaza excluir account_money => reintenta SIN excluir
- */
+/* ============================================================
+   MERCADOPAGO: Preference (sin SDK)
+   ✅ En TEST: intentamos excluir account_money.
+   ✅ Si MP rechaza eso: NO fallback silencioso (para no crear preferencia mal).
+============================================================ */
+function cleanPaymentMethods(pm) {
+  if (!pm || typeof pm !== "object") return undefined;
+
+  const cleanArr = (arr) =>
+    Array.isArray(arr)
+      ? arr
+          .map((x) => ({ id: String(x?.id ?? "").trim() }))
+          .filter((x) => x.id)
+      : undefined;
+
+  const out = { ...pm };
+  if ("excluded_payment_methods" in out) out.excluded_payment_methods = cleanArr(out.excluded_payment_methods);
+  if ("excluded_payment_types" in out) out.excluded_payment_types = cleanArr(out.excluded_payment_types);
+
+  const hasAny =
+    (out.excluded_payment_methods && out.excluded_payment_methods.length) ||
+    (out.excluded_payment_types && out.excluded_payment_types.length);
+
+  return hasAny ? out : undefined;
+}
+
 async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl, mode, order, buyer, items }) {
   if (!accessToken) throw new Error("MP_ACCESS_TOKEN_MISSING");
 
@@ -230,94 +222,64 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
 
   const basePayload = {
     external_reference: order.public_code,
+
     payer: {
       name: String(buyer?.name || ""),
       email: String(buyer?.email || ""),
     },
+
     items: mpItems,
     back_urls: { success, pending, failure },
     auto_return: "approved",
+
     notification_url: notificationUrl || `${base}/api/v1/webhooks/mercadopago`,
   };
 
-  // 1) Primer intento: en TEST tratamos de excluir saldo (si MP lo permite)
-  const payload1 = { ...basePayload };
+  const payload = { ...basePayload };
 
+  // ✅ TEST: excluir saldo (account_money)
   if (mode === "test") {
-    payload1.payment_methods = {
+    payload.payment_methods = cleanPaymentMethods({
       excluded_payment_methods: [{ id: "account_money" }],
-    };
-  }
-
-  async function mpCreatePreference(payload) {
-    const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
     });
-
-    const data = await r.json().catch(() => ({}));
-
-    if (!r.ok) {
-      const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
-      const detail = data?.cause || data || null;
-      const err = new Error(msg);
-      err.detail = detail;
-      err.http_status = r.status;
-      err.mp_body = data;
-      throw err;
-    }
-
-    return data;
   }
 
-  try {
-    const data = await mpCreatePreference(payload1);
-    return {
-      id: data.id || null,
-      init_point: data.init_point || null,
-      sandbox_init_point: data.sandbox_init_point || null,
-      raw: data,
-    };
-  } catch (e) {
-    const msg = String(e?.message || "").toLowerCase();
-    const bodyMsg = String(e?.mp_body?.message || "").toLowerCase();
+  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 
-    const isAccountMoneyRejected =
-      msg.includes("account_money") ||
-      bodyMsg.includes("account_money") ||
-      JSON.stringify(e?.mp_body || {}).toLowerCase().includes("account_money");
+  const data = await r.json().catch(() => ({}));
 
-    // 2) Fallback: si MP no permite excluir account_money -> reintenta sin payment_methods
-    if (mode === "test" && isAccountMoneyRejected) {
-      console.warn("⚠️ MP rechazó excluir account_money. Reintentando sin payment_methods...", {
-        mp_message: e?.message,
-        mp_body: e?.mp_body || null,
-      });
+  if (!r.ok) {
+    const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
+    const detail = data?.cause || data || null;
+    const err = new Error(msg);
+    err.detail = detail;
+    err.http_status = r.status;
+    err.mp_body = data;
 
-      const payload2 = { ...basePayload }; // sin payment_methods
-      const data2 = await mpCreatePreference(payload2);
-
-      return {
-        id: data2.id || null,
-        init_point: data2.init_point || null,
-        sandbox_init_point: data2.sandbox_init_point || null,
-        raw: data2,
-      };
-    }
-
-    throw e;
+    // ✅ En TEST: NO fallback silencioso. Si MP no permite excluir saldo, queremos verlo.
+    // Así evitamos crear preferencia sin exclusión y que el checkout “se rompa” con dinero en cuenta.
+    throw err;
   }
+
+  return {
+    id: data.id || null,
+    init_point: data.init_point || null,
+    sandbox_init_point: data.sandbox_init_point || null,
+    raw: data,
+  };
 }
 
-
-
-// =========================
-// Normalizadores (compat front)
-// =========================
+/* ============================================================
+   Normalizadores (compat front)
+============================================================ */
 function normalizeFulfillmentType(body) {
   let ft = lower(body?.fulfillment_type);
   if (!ft) ft = lower(body?.delivery?.mode);
@@ -364,7 +326,9 @@ function normalizePayment(body) {
   return x;
 }
 
-// ✅ Export que espera el route: "checkout"
+/* ============================================================
+   Controller
+============================================================ */
 async function checkout(req, res) {
   const body = req.body || {};
   const request_id = crypto.randomBytes(8).toString("hex");
@@ -519,15 +483,14 @@ async function checkout(req, res) {
           if (ccols.has("updated_at")) ins.updated_at = new Date();
 
           const keys = Object.keys(ins);
-          const cols = keys.join(", ");
+          const colsList = keys.join(", ");
           const vals = keys.map((k) => `:${k}`).join(", ");
 
-          const [cres] = await sequelize.query(`INSERT INTO ecom_customers (${cols}) VALUES (${vals})`, {
+          const [cres] = await sequelize.query(`INSERT INTO ecom_customers (${colsList}) VALUES (${vals})`, {
             replacements: ins,
             transaction: t,
           });
 
-          // ✅ FIX: si no viene insertId
           customer_id = toInt(cres?.insertId, 0) || (await getLastInsertId(t)) || null;
         }
       }
@@ -574,9 +537,7 @@ async function checkout(req, res) {
       }
 
       const shipping_total =
-        fulfillment_type === "delivery"
-          ? toNum(body.shipping_total, 0) || toNum(shipping?.amount, 0) || 0
-          : 0;
+        fulfillment_type === "delivery" ? toNum(body.shipping_total, 0) || toNum(shipping?.amount, 0) || 0 : 0;
 
       const total = subtotal + shipping_total;
 
@@ -635,7 +596,6 @@ async function checkout(req, res) {
         }
       );
 
-      // ✅ FIX: insertId robusto
       let order_id = toInt(ores?.insertId, 0);
       if (!order_id) order_id = await getLastInsertId(t);
 
@@ -743,19 +703,38 @@ async function checkout(req, res) {
         };
       }
 
-      const mp = await createMpPreference({
-        accessToken: mpCfg.accessToken,
-        publicBaseUrl: mpCfg.publicBaseUrl,
-        notificationUrl: mpCfg.notificationUrl,
-        mode: mpCfg.mode,
-        order: { public_code, total },
-        buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone },
-        items: orderItems,
-      });
+      let mp = null;
+
+      try {
+        mp = await createMpPreference({
+          accessToken: mpCfg.accessToken,
+          publicBaseUrl: mpCfg.publicBaseUrl,
+          notificationUrl: mpCfg.notificationUrl,
+          mode: mpCfg.mode,
+          order: { public_code, total },
+          buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone },
+          items: orderItems,
+        });
+      } catch (e) {
+        // ✅ Si falla crear preferencia, devolvemos error con detalle útil
+        return {
+          error: {
+            status: 400,
+            code: "MP_PREFERENCE_FAILED",
+            message: "No se pudo crear la preferencia de Mercado Pago.",
+            detail: {
+              mp_mode: mpCfg.mode,
+              http_status: e?.http_status || null,
+              mp_message: e?.message || null,
+              mp_body: e?.mp_body || null,
+              mp_detail: e?.detail || null,
+            },
+          },
+        };
+      }
 
       // ✅ En TEST usamos sandbox_init_point
-      const redirect_url =
-        mpCfg.mode === "test" ? (mp.sandbox_init_point || mp.init_point || null) : (mp.init_point || null);
+      const redirect_url = mpCfg.mode === "test" ? mp.sandbox_init_point || mp.init_point || null : mp.init_point || null;
 
       const mpPayload = {
         mp_mode: mpCfg.mode,
