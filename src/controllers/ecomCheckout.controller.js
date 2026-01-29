@@ -193,7 +193,6 @@ function cleanPaymentMethods(pm) {
 
   return hasAny ? out : undefined;
 }
-
 async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl, mode, order, buyer, items }) {
   if (!accessToken) throw new Error("MP_ACCESS_TOKEN_MISSING");
 
@@ -222,53 +221,84 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
 
   const basePayload = {
     external_reference: order.public_code,
-
     payer: {
       name: String(buyer?.name || ""),
       email: String(buyer?.email || ""),
     },
-
     items: mpItems,
     back_urls: { success, pending, failure },
     auto_return: "approved",
-
     notification_url: notificationUrl || `${base}/api/v1/webhooks/mercadopago`,
   };
 
-  const payload = { ...basePayload };
-
-  // ✅ TEST: excluir saldo (account_money)
-  if (mode === "test") {
-    payload.payment_methods = cleanPaymentMethods({
-      excluded_payment_methods: [{ id: "account_money" }],
+  async function mpCreatePreference(payload) {
+    const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
     });
+
+    const text = await r.text();
+    let data = {};
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!r.ok) {
+      const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
+      const err = new Error(msg);
+      err.http_status = r.status;
+      err.mp_body = data;
+      throw err;
+    }
+
+    return data;
   }
 
-  const r = await fetch("https://api.mercadopago.com/checkout/preferences", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  // ✅ IMPORTANTE:
+  // Hoy MP te devuelve: "account_money cannot be excluded"
+  // Entonces: en TEST intentamos excluir SOLO si querés, pero si falla -> reintento SIN payment_methods.
+  // Si querés ir directo al grano: podés comentar el bloque del intento 1 y listo.
 
-  const data = await r.json().catch(() => ({}));
+  if (mode === "test") {
+    // 1) intento con exclude (opcional)
+    const payload1 = {
+      ...basePayload,
+      payment_methods: {
+        excluded_payment_methods: [{ id: "account_money" }],
+      },
+    };
 
-  if (!r.ok) {
-    const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
-    const detail = data?.cause || data || null;
-    const err = new Error(msg);
-    err.detail = detail;
-    err.http_status = r.status;
-    err.mp_body = data;
+    try {
+      const data1 = await mpCreatePreference(payload1);
+      return {
+        id: data1.id || null,
+        init_point: data1.init_point || null,
+        sandbox_init_point: data1.sandbox_init_point || null,
+        raw: data1,
+      };
+    } catch (e) {
+      // 2) fallback SIEMPRE en TEST: reintentar sin payment_methods
+      console.warn("⚠️ MP TEST: preference con exclude falló, reintentando SIN excluir...", {
+        mp_message: e?.message,
+        http_status: e?.http_status,
+        mp_body: e?.mp_body || null,
+      });
 
-    // ✅ En TEST: NO fallback silencioso. Si MP no permite excluir saldo, queremos verlo.
-    // Así evitamos crear preferencia sin exclusión y que el checkout “se rompa” con dinero en cuenta.
-    throw err;
+      const data2 = await mpCreatePreference({ ...basePayload });
+      return {
+        id: data2.id || null,
+        init_point: data2.init_point || null,
+        sandbox_init_point: data2.sandbox_init_point || null,
+        raw: data2,
+      };
+    }
   }
 
+  // PROD: directo
+  const data = await mpCreatePreference({ ...basePayload });
   return {
     id: data.id || null,
     init_point: data.init_point || null,
@@ -276,6 +306,8 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     raw: data,
   };
 }
+
+
 
 /* ============================================================
    Normalizadores (compat front)
