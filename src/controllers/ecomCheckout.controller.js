@@ -163,7 +163,8 @@ async function resolveMpRuntimeConfig(transaction) {
 
   const notificationUrl =
     toStr(process.env.MP_NOTIFICATION_URL) ||
-    (publicBaseUrl ? `${String(publicBaseUrl).replace(/\/$/, "")}/api/v1/webhooks/mercadopago` : "");
+    (publicBaseUrl ? `${String(publicBaseUrl).replace(/\/$/, "")}/api/v1/ecom/webhooks/mercadopago` : "");
+
 
   return { mode, accessToken, publicBaseUrl, notificationUrl };
 }
