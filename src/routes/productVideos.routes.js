@@ -1,13 +1,18 @@
 // src/routes/productVideos.routes.js
 // ✅ COPY-PASTE FINAL COMPLETO
-// ADMIN / PROTECTED (se monta en /api/v1/admin/products)
+// Público:
+//   GET    /api/v1/products/:id/videos
 //
-// POST   /api/v1/admin/products/:id/videos/youtube
-// POST   /api/v1/admin/products/:id/videos/upload
-// DELETE /api/v1/admin/products/:id/videos/:videoId
+// Protegido (requiere Bearer token):
+//   POST   /api/v1/products/:id/videos/youtube
+//   POST   /api/v1/products/:id/videos/upload
+//   DELETE /api/v1/products/:id/videos/:videoId
+//
+// Nota: YA NO dependemos de requireAuth en v1.routes mount para que el GET sea público.
 
 const router = require("express").Router();
 const multer = require("multer");
+const { requireAuth } = require("../middlewares/auth");
 const ctrl = require("../controllers/productVideos.controller");
 
 // ✅ buffer en memoria (req.file.buffer)
@@ -16,13 +21,16 @@ const upload = multer({
   limits: { fileSize: 80 * 1024 * 1024 }, // 80MB
 });
 
-// ADD YOUTUBE
-router.post("/:id/videos/youtube", ctrl.addYoutube);
+// =========================
+// PUBLIC
+// =========================
+router.get("/:id/videos", ctrl.list);
 
-// UPLOAD FILE
-router.post("/:id/videos/upload", upload.single("file"), ctrl.upload);
-
-// REMOVE (soft delete)
-router.delete("/:id/videos/:videoId", ctrl.remove);
+// =========================
+// PROTECTED
+// =========================
+router.post("/:id/videos/youtube", requireAuth, ctrl.addYoutube);
+router.post("/:id/videos/upload", requireAuth, upload.single("file"), ctrl.upload);
+router.delete("/:id/videos/:videoId", requireAuth, ctrl.remove);
 
 module.exports = router;
