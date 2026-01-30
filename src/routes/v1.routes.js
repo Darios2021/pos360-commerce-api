@@ -5,10 +5,9 @@
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
 // ✅ NUEVO: monta /admin/shop/branches (opcional)
-// ✅ NUEVO: monta videos:
-//    - /products/:id/videos (principal)
-//    - /admin/products/:id/videos (ALIAS para compat con tu front)
-// ✅ FIX CLAVE: orden de montaje -> primero VIDEOS, después PRODUCTS (evita que /:id coma /:id/videos)
+// ✅ VIDEOS (FINAL):
+//    - PUBLIC:  GET /public/products/:id/videos   (sin auth)
+//    - ADMIN:   POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -75,7 +74,7 @@ router.get("/_version", (req, res) => {
   });
 });
 
-// ✅ PING (debug deploy) -> podés borrarlo si querés
+// ✅ PING (debug deploy)
 router.get("/__ping_v1", (req, res) => {
   res.json({ ok: true, ping: "v1", ts: new Date().toISOString() });
 });
@@ -95,10 +94,7 @@ const branchContextMod = require("../middlewares/branchContext.middleware");
 const branchContext = resolveFn(branchContextMod, ["branchContext"]);
 if (!branchContext) {
   // eslint-disable-next-line no-console
-  console.error(
-    "❌ branchContext NO resolvió a function. keys:",
-    Object.keys(branchContextMod || {})
-  );
+  console.error("❌ branchContext NO resolvió a function. keys:", Object.keys(branchContextMod || {}));
   throw new Error("BRANCH_CONTEXT_INVALID_EXPORT");
 }
 
@@ -106,10 +102,7 @@ const rbacMod = require("../middlewares/rbac.middleware");
 const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
 if (!attachAccessContext) {
   // eslint-disable-next-line no-console
-  console.error(
-    "❌ attachAccessContext NO resolvió a function. keys:",
-    Object.keys(rbacMod || {})
-  );
+  console.error("❌ attachAccessContext NO resolvió a function. keys:", Object.keys(rbacMod || {}));
   throw new Error("RBAC_INVALID_EXPORT");
 }
 
@@ -128,9 +121,7 @@ try {
   publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)"
-  );
+  console.log("⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)");
   publicPaymentMethodsRoutes = null;
 }
 
@@ -140,9 +131,7 @@ try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)"
-  );
+  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
   publicLinksRoutes = null;
 }
 
@@ -154,6 +143,9 @@ try {
   publicInstagramRoutes = null;
 }
 
+// ✅ NUEVO: videos públicos por producto (GET /public/products/:id/videos)
+const publicProductVideosRoutes = require("./publicProductVideos.routes");
+
 // Ecommerce público
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
 const ecomPaymentsRoutes = require("./ecomPayments.routes");
@@ -161,7 +153,6 @@ const ecomPaymentsRoutes = require("./ecomPayments.routes");
 // =========================
 // Protected (operación)
 // =========================
-const productVideosRoutes = require("./productVideos.routes"); // ✅ VIDEOS
 const productsRoutes = require("./products.routes");
 
 const categoriesRoutes = require("./categories.routes");
@@ -183,15 +174,16 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
+// ✅ admin videos (POST/UPLOAD/DELETE)
+const productVideosRoutes = require("./productVideos.routes");
+
 // ✅ /admin/shop/branches (opcional)
 let adminShopBranchesRoutes = null;
 try {
   adminShopBranchesRoutes = require("./admin.shopBranches.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)"
-  );
+  console.log("⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)");
   adminShopBranchesRoutes = null;
 }
 
@@ -201,9 +193,7 @@ try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)"
-  );
+  console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
   adminShopLinksRoutes = null;
 }
 
@@ -228,6 +218,9 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
+// ✅ Videos públicos (GET)
+safeUse("/public", publicProductVideosRoutes);
+
 if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
@@ -239,13 +232,7 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // =========================
 // Mount: Protected
 // =========================
-
-// ✅ FIX CLAVE: primero VIDEOS, después PRODUCTS (evita que /:id “coma” /:id/videos)
-safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
-
-// ✅ ALIAS admin para compat con tu front: /api/v1/admin/products/:id/videos
-safeUse("/admin/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
@@ -274,6 +261,9 @@ if (adminShopBranchesRoutes) {
 if (adminShopLinksRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
 }
+
+// ✅ ADMIN videos (protegido)
+safeUse("/admin/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 
 // Admin media
 if (adminMediaRoutes) {
