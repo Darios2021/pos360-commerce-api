@@ -1,67 +1,83 @@
 // src/config/minio.js
-// ✅ COPY-PASTE FINAL
-const Minio = require("minio");
+// ✅ COPY-PASTE FINAL (WRAPPER SOBRE s3.js)
+// - NO usa lib "minio"
+// - Reusa AWS SDK v3 (@aws-sdk/client-s3)
+// - Compatible con MinIO y S3
+// - Mismos helpers que espera el controller
 
-function toInt(v, d = 0) {
-  const n = parseInt(String(v ?? ""), 10);
-  return Number.isFinite(n) ? n : d;
-}
-function toBool(v, d = false) {
-  if (typeof v === "boolean") return v;
-  const s = String(v ?? "").trim().toLowerCase();
-  if (s === "true" || s === "1") return true;
-  if (s === "false" || s === "0") return false;
-  return d;
-}
+const { s3, s3Config } = require("./s3");
+const {
+  HeadBucketCommand,
+  CreateBucketCommand,
+  PutObjectCommand,
+} = require("@aws-sdk/client-s3");
+
 function toStr(v, d = "") {
   const s = String(v ?? "").trim();
   return s ? s : d;
 }
 
-const MINIO_ENDPOINT = toStr(process.env.MINIO_ENDPOINT, "localhost");
-const MINIO_PORT = toInt(process.env.MINIO_PORT, 9000);
-const MINIO_USE_SSL = toBool(process.env.MINIO_USE_SSL, false);
+const MINIO_BUCKET = s3Config.bucket;
+const MINIO_PUBLIC_BASE_URL = toStr(process.env.S3_PUBLIC_BASE_URL, "");
 
-const MINIO_ACCESS_KEY = toStr(process.env.MINIO_ACCESS_KEY, "");
-const MINIO_SECRET_KEY = toStr(process.env.MINIO_SECRET_KEY, "");
-
-const MINIO_BUCKET = toStr(process.env.MINIO_BUCKET, "pos360");
-const MINIO_PUBLIC_BASE_URL = toStr(process.env.MINIO_PUBLIC_BASE_URL, "");
-
-if (!MINIO_ACCESS_KEY || !MINIO_SECRET_KEY) {
-  console.warn("[MINIO] ⚠️ Falta MINIO_ACCESS_KEY / MINIO_SECRET_KEY (revisar env)");
-}
-
-const minioClient = new Minio.Client({
-  endPoint: MINIO_ENDPOINT,
-  port: MINIO_PORT,
-  useSSL: MINIO_USE_SSL,
-  accessKey: MINIO_ACCESS_KEY,
-  secretKey: MINIO_SECRET_KEY,
-});
-
-async function ensureBucket(bucketName = MINIO_BUCKET) {
-  const b = toStr(bucketName, MINIO_BUCKET);
-  const exists = await minioClient.bucketExists(b).catch(() => false);
-  if (!exists) {
-    await minioClient.makeBucket(b, "us-east-1");
-    console.log(`[MINIO] ✅ Bucket creado: ${b}`);
+/**
+ * Simula ensureBucket() del client minio
+ */
+async function ensureBucket(bucket = MINIO_BUCKET) {
+  try {
+    await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+    return bucket;
+  } catch (e) {
+    // En MinIO suele permitir crear bucket
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+    console.log(`[S3] ✅ Bucket creado: ${bucket}`);
+    return bucket;
   }
-  return b;
 }
 
-function buildPublicUrl(objectKey) {
-  const key = toStr(objectKey, "");
+/**
+ * Subida simple (buffer)
+ */
+async function putObject({
+  bucket = MINIO_BUCKET,
+  key,
+  body,
+  contentType,
+}) {
+  if (!key) throw new Error("putObject: key requerido");
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    })
+  );
+
+  return {
+    bucket,
+    key,
+    url: buildPublicUrl(key),
+  };
+}
+
+function buildPublicUrl(key) {
   if (!key) return "";
   if (!MINIO_PUBLIC_BASE_URL) return "";
   return `${MINIO_PUBLIC_BASE_URL.replace(/\/+$/, "")}/${encodeURI(key)}`;
 }
 
 module.exports = {
-  minioClient,
-  MINIO_BUCKET,
-  bucket: MINIO_BUCKET, // alias común
-  MINIO_PUBLIC_BASE_URL,
+  // alias esperados
+  minioClient: {
+    putObject,
+  },
   ensureBucket,
   buildPublicUrl,
+
+  // info
+  MINIO_BUCKET,
+  bucket: MINIO_BUCKET,
+  MINIO_PUBLIC_BASE_URL,
 };
