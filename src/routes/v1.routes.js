@@ -4,8 +4,10 @@
 // ✅ FIX: carga publicInstagram.routes (si existe)
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
-// ✅ NUEVO: monta /admin/shop/branches (reusa branches.controller.js)
-// ✅ NUEVO: monta /products/:id/videos (productVideos.routes.js)
+// ✅ NUEVO: monta /admin/shop/branches (opcional)
+// ✅ NUEVO: monta videos:
+//    - /products/:id/videos (principal)
+//    - /admin/products/:id/videos (ALIAS para compat con tu front)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -68,6 +70,11 @@ router.get("/_version", (req, res) => {
   });
 });
 
+// ✅ PING (debug deploy) -> BORRALO si querés después
+router.get("/__ping_v1", (req, res) => {
+  res.json({ ok: true, ping: "v1", ts: new Date().toISOString() });
+});
+
 // (opcional) debug auth rápido
 router.get("/_whoami", requireAuth, (req, res) => {
   res.json({
@@ -82,14 +89,20 @@ router.get("/_whoami", requireAuth, (req, res) => {
 const branchContextMod = require("../middlewares/branchContext.middleware");
 const branchContext = resolveFn(branchContextMod, ["branchContext"]);
 if (!branchContext) {
-  console.error("❌ branchContext NO resolvió a function. keys:", Object.keys(branchContextMod || {}));
+  console.error(
+    "❌ branchContext NO resolvió a function. keys:",
+    Object.keys(branchContextMod || {})
+  );
   throw new Error("BRANCH_CONTEXT_INVALID_EXPORT");
 }
 
 const rbacMod = require("../middlewares/rbac.middleware");
 const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
 if (!attachAccessContext) {
-  console.error("❌ attachAccessContext NO resolvió a function. keys:", Object.keys(rbacMod || {}));
+  console.error(
+    "❌ attachAccessContext NO resolvió a function. keys:",
+    Object.keys(rbacMod || {})
+  );
   throw new Error("RBAC_INVALID_EXPORT");
 }
 
@@ -107,7 +120,9 @@ let publicPaymentMethodsRoutes = null;
 try {
   publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
 } catch (e) {
-  console.log("⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)");
+  console.log(
+    "⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)"
+  );
   publicPaymentMethodsRoutes = null;
 }
 
@@ -116,7 +131,9 @@ let publicLinksRoutes = null;
 try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
-  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
+  console.log(
+    "⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)"
+  );
   publicLinksRoutes = null;
 }
 
@@ -161,7 +178,9 @@ let adminShopBranchesRoutes = null;
 try {
   adminShopBranchesRoutes = require("./admin.shopBranches.routes");
 } catch (e) {
-  console.log("⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)");
+  console.log(
+    "⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)"
+  );
   adminShopBranchesRoutes = null;
 }
 
@@ -170,7 +189,9 @@ let adminShopLinksRoutes = null;
 try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
-  console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
+  console.log(
+    "⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)"
+  );
   adminShopLinksRoutes = null;
 }
 
@@ -207,7 +228,19 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // Mount: Protected
 // =========================
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
-safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes); // ✅ NUEVO
+
+// ✅ Videos (principal): /api/v1/products/:id/videos
+safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
+
+// ✅ ALIAS para compat con tu front: /api/v1/admin/products/:id/videos
+// (mismo router, distinto prefijo)
+safeUse(
+  "/admin/products",
+  requireAuth,
+  attachAccessContext,
+  branchContext,
+  productVideosRoutes
+);
 
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
@@ -241,7 +274,9 @@ if (adminShopLinksRoutes) {
 if (adminMediaRoutes) {
   safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
 } else {
-  console.log("⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)");
+  console.log(
+    "⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)"
+  );
 }
 
 module.exports = router;
