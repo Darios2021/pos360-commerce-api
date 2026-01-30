@@ -1,6 +1,5 @@
 // src/controllers/productVideos.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (S3.js + ANTI-CRASH + modelo ProductVideo auto-resolve)
-// Videos por producto (YouTube link o Upload S3/MinIO via @aws-sdk/client-s3)
+// ✅ COPY-PASTE FINAL COMPLETO (DB-column aware + ANTI-CRASH + auto public url for uploads)
 //
 // Rutas sugeridas (compat):
 // GET    /api/v1/products/:id/videos
@@ -11,7 +10,7 @@
 //
 // Requiere:
 // - src/config/s3.js exporta { s3, s3Config }
-// - ProductVideo model exista y esté cargado por Sequelize (sequelize.models)
+// - ProductVideo model exista y esté cargado por Sequelize
 
 const crypto = require("crypto");
 const path = require("path");
@@ -34,19 +33,27 @@ function toStr(v) {
   return String(v ?? "").trim();
 }
 
+function resolveSequelize() {
+  try {
+    if (models?.sequelize) return models.sequelize;
+  } catch (_) {}
+  try {
+    const { sequelize } = require("../models");
+    return sequelize;
+  } catch (_) {}
+  return null;
+}
+
 function resolveProductVideoModel() {
-  // 1) desde index ../models
   if (models && typeof models === "object") {
     if (models.ProductVideo) return models.ProductVideo;
     if (models.ProductVideos) return models.ProductVideos;
     if (models.productVideo) return models.productVideo;
     if (models.product_videos) return models.product_videos;
-    if (models.product_videos_model) return models.product_videos_model;
     if (models.sequelize?.models?.ProductVideo) return models.sequelize.models.ProductVideo;
     if (models.sequelize?.models?.ProductVideos) return models.sequelize.models.ProductVideos;
   }
 
-  // 2) si existe models/index.js con sequelize exportado globalmente
   try {
     const { sequelize } = require("../models");
     if (sequelize?.models?.ProductVideo) return sequelize.models.ProductVideo;
@@ -54,8 +61,23 @@ function resolveProductVideoModel() {
   } catch (e) {
     // ignore
   }
-
   return null;
+}
+
+async function getColumns(tableName, transaction) {
+  const sequelize = resolveSequelize();
+  if (!sequelize) return new Set();
+
+  const [rows] = await sequelize.query(
+    `
+    SELECT COLUMN_NAME AS name
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t
+    `,
+    { replacements: { t: tableName }, transaction }
+  );
+
+  return new Set((rows || []).map((r) => String(r.name || "").toLowerCase()));
 }
 
 function extractYoutubeId(url) {
@@ -97,6 +119,24 @@ function buildVideoKey(productId, originalName, mime) {
   return `products/${productId}/videos/${rnd}${ext}`;
 }
 
+function buildPublicObjectUrl(bucket, key) {
+  // Prioridad:
+  // 1) S3_PUBLIC_BASE_URL (recomendado) ej: https://cdn.tudominio.com
+  // 2) S3_ENDPOINT como base (si expone HTTP)
+  // 3) null
+  const base =
+    toStr(process.env.S3_PUBLIC_BASE_URL) ||
+    toStr(process.env.MINIO_PUBLIC_BASE_URL) ||
+    toStr(process.env.S3_ENDPOINT);
+
+  if (!base || !bucket || !key) return null;
+
+  const b = base.replace(/\/+$/, "");
+  const k = String(key).replace(/^\/+/, "");
+  // estilo path: /<bucket>/<key>
+  return `${b}/${bucket}/${k}`;
+}
+
 async function list(req, res) {
   try {
     const ProductVideo = resolveProductVideoModel();
@@ -112,12 +152,35 @@ async function list(req, res) {
     const productId = toInt(req.params.id, 0);
     if (!productId) return res.status(400).json({ ok: false, message: "Invalid product id" });
 
-    const rows = await ProductVideo.findAll({
-      where: { product_id: productId, is_active: true },
-      order: [["sort_order", "ASC"], ["id", "DESC"]],
+    // Detectar columnas reales
+    const cols = await getColumns("product_videos");
+    const hasIsActive = cols.has("is_active");
+    const hasSort = cols.has("sort_order");
+
+    const where = { product_id: productId };
+    if (hasIsActive) where.is_active = true;
+
+    const order = [];
+    if (hasSort) order.push(["sort_order", "ASC"]);
+    order.push(["id", "DESC"]);
+
+    const rows = await ProductVideo.findAll({ where, order });
+
+    // Si hay uploads sin url, intentamos armar url pública (si existen columnas bucket/key)
+    const hasBucket = cols.has("storage_bucket");
+    const hasKey = cols.has("storage_key");
+    const hasUrl = cols.has("url");
+
+    const data = (rows || []).map((r) => {
+      const obj = r?.toJSON ? r.toJSON() : r;
+      if (hasUrl && !obj.url && hasBucket && hasKey && obj.storage_bucket && obj.storage_key) {
+        const pub = buildPublicObjectUrl(obj.storage_bucket, obj.storage_key);
+        if (pub) obj.url = pub;
+      }
+      return obj;
     });
 
-    return res.json({ ok: true, data: rows });
+    return res.json({ ok: true, data });
   } catch (e) {
     console.error("[productVideos.list] error:", e);
     return res.status(500).json({ ok: false, code: "VIDEO_LIST_ERROR", message: e.message || "Error" });
@@ -150,16 +213,20 @@ async function addYoutube(req, res) {
       });
     }
 
-    const row = await ProductVideo.create({
+    const cols = await getColumns("product_videos");
+    const payload = {
       product_id: productId,
       provider: "youtube",
       title: title || null,
       url: embed,
-      mime: "text/html",
-      sort_order: 0,
-      is_active: true,
-    });
+    };
 
+    // set opcionales solo si existen
+    if (cols.has("mime")) payload.mime = "text/html";
+    if (cols.has("sort_order")) payload.sort_order = 0;
+    if (cols.has("is_active")) payload.is_active = true;
+
+    const row = await ProductVideo.create(payload);
     return res.json({ ok: true, data: row });
   } catch (e) {
     console.error("[productVideos.addYoutube] error:", e);
@@ -194,7 +261,7 @@ async function upload(req, res) {
       return res.status(400).json({ ok: false, message: "Video muy grande (max 80MB)" });
     }
 
-    const bucket = s3Config.bucket; // usa tu S3_BUCKET
+    const bucket = s3Config.bucket;
     const key = buildVideoKey(productId, f.originalname, mime);
 
     await s3.send(
@@ -206,20 +273,32 @@ async function upload(req, res) {
       })
     );
 
-    const row = await ProductVideo.create({
+    const cols = await getColumns("product_videos");
+    const publicUrl = buildPublicObjectUrl(bucket, key);
+
+    const payload = {
       product_id: productId,
       provider: s3Config.provider || "s3",
       title: toStr(req.body?.title) || null,
-      url: null,
-      storage_bucket: bucket,
-      storage_key: key,
-      mime,
-      size_bytes: size || null,
-      sort_order: 0,
-      is_active: true,
-    });
+    };
 
-    return res.json({ ok: true, data: row });
+    if (cols.has("storage_bucket")) payload.storage_bucket = bucket;
+    if (cols.has("storage_key")) payload.storage_key = key;
+    if (cols.has("mime")) payload.mime = mime || null;
+    if (cols.has("size_bytes")) payload.size_bytes = size || null;
+    if (cols.has("sort_order")) payload.sort_order = 0;
+    if (cols.has("is_active")) payload.is_active = true;
+
+    // clave: si existe url, la llenamos para que el frontend siempre tenga algo reproducible
+    if (cols.has("url")) payload.url = publicUrl || null;
+
+    const row = await ProductVideo.create(payload);
+
+    // devolver además url pública calculada (aunque la tabla no tenga url)
+    const out = row?.toJSON ? row.toJSON() : row;
+    if (!out.url && publicUrl) out.url = publicUrl;
+
+    return res.json({ ok: true, data: out });
   } catch (e) {
     console.error("[productVideos.upload] error:", e);
     return res.status(500).json({ ok: false, code: "VIDEO_UPLOAD_ERROR", message: e.message || "Error" });
@@ -244,21 +323,29 @@ async function remove(req, res) {
     const row = await ProductVideo.findOne({ where: { id: videoId, product_id: productId } });
     if (!row) return res.status(404).json({ ok: false, message: "Not found" });
 
-    // soft-delete
-    row.is_active = false;
-    await row.save();
+    const cols = await getColumns("product_videos");
+    const hasIsActive = cols.has("is_active");
 
-    // opcional: borrar del bucket si querés (yo lo dejo safe: solo si tiene key+bucket)
-    if (row.storage_bucket && row.storage_key) {
+    // 1) soft delete si existe is_active
+    if (hasIsActive) {
+      row.is_active = false;
+      await row.save();
+    } else {
+      // 2) si no existe, delete físico
+      await row.destroy();
+    }
+
+    // opcional: borrar objeto del bucket si existe
+    const obj = row?.toJSON ? row.toJSON() : row;
+    if (obj.storage_bucket && obj.storage_key) {
       try {
         await s3.send(
           new DeleteObjectCommand({
-            Bucket: row.storage_bucket,
-            Key: row.storage_key,
+            Bucket: obj.storage_bucket,
+            Key: obj.storage_key,
           })
         );
       } catch (e) {
-        // no frenamos: ya quedó inactivo en DB
         console.warn("[productVideos.remove] DeleteObject warning:", e?.message || e);
       }
     }
