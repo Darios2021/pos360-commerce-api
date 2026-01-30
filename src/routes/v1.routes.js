@@ -70,7 +70,7 @@ router.get("/_version", (req, res) => {
   });
 });
 
-// ✅ PING (debug deploy) -> BORRALO si querés después
+// ✅ PING (debug deploy)
 router.get("/__ping_v1", (req, res) => {
   res.json({ ok: true, ping: "v1", ts: new Date().toISOString() });
 });
@@ -152,8 +152,9 @@ const ecomPaymentsRoutes = require("./ecomPayments.routes");
 // =========================
 // Protected (operación)
 // =========================
+const productVideosRoutes = require("./productVideos.routes"); // ✅ VIDEOS
 const productsRoutes = require("./products.routes");
-const productVideosRoutes = require("./productVideos.routes"); // ✅ NUEVO
+
 const categoriesRoutes = require("./categories.routes");
 const subcategoriesRoutes = require("./subcategories.routes");
 const branchesRoutes = require("./branches.routes");
@@ -227,20 +228,13 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // =========================
 // Mount: Protected
 // =========================
+
+// ✅ IMPORTANTÍSIMO: primero VIDEOS, después PRODUCTS (evita que /:id “coma” /:id/videos)
+safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
 
-// ✅ Videos (principal): /api/v1/products/:id/videos
-safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
-
-// ✅ ALIAS para compat con tu front: /api/v1/admin/products/:id/videos
-// (mismo router, distinto prefijo)
-safeUse(
-  "/admin/products",
-  requireAuth,
-  attachAccessContext,
-  branchContext,
-  productVideosRoutes
-);
+// ✅ ALIAS admin para compat con front: /api/v1/admin/products/:id/videos
+safeUse("/admin/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
