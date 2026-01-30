@@ -1,19 +1,26 @@
 // src/routes/productVideos.routes.js
-const express = require("express");
-const router = express.Router();
+// ✅ COPY-PASTE FINAL COMPLETO
+// Rutas:
+// GET    /api/v1/products/:id/videos
+// POST   /api/v1/products/:id/videos/youtube
+// POST   /api/v1/products/:id/videos/upload
+// DELETE /api/v1/products/:id/videos/:videoId
 
+const router = require("express").Router();
+const multer = require("multer");
 const ctrl = require("../controllers/productVideos.controller");
 
-// multer memory
-const multer = require("multer");
-const upload = multer({ storage: multer.memoryStorage() });
+// Multer memory (subida a buffer) - igual a imágenes
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 80 * 1024 * 1024, // 80MB
+  },
+});
 
-// 🔒 poné tu middleware admin real si ya existe
-// const { requireAdmin } = require("../middlewares/auth");
-
-router.get("/admin/products/:id/videos", /*requireAdmin,*/ ctrl.list);
-router.post("/admin/products/:id/videos/youtube", /*requireAdmin,*/ express.json(), ctrl.addYoutube);
-router.post("/admin/products/:id/videos/upload", /*requireAdmin,*/ upload.single("file"), ctrl.upload);
-router.delete("/admin/products/:id/videos/:videoId", /*requireAdmin,*/ ctrl.remove);
+router.get("/:id/videos", ctrl.list);
+router.post("/:id/videos/youtube", ctrl.addYoutube);
+router.post("/:id/videos/upload", upload.single("file"), ctrl.upload);
+router.delete("/:id/videos/:videoId", ctrl.remove);
 
 module.exports = router;
