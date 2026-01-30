@@ -8,6 +8,7 @@
 // ✅ NUEVO: monta videos:
 //    - /products/:id/videos (principal)
 //    - /admin/products/:id/videos (ALIAS para compat con tu front)
+// ✅ FIX CLAVE: orden de montaje -> primero VIDEOS, después PRODUCTS (evita que /:id coma /:id/videos)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -47,9 +48,13 @@ function safeUse(path, ...mws) {
     }
 
     const keys = mw && typeof mw === "object" ? Object.keys(mw) : null;
+    // eslint-disable-next-line no-console
     console.error("❌ [v1.routes] Middleware inválido en router.use()");
+    // eslint-disable-next-line no-console
     console.error("   path:", path);
+    // eslint-disable-next-line no-console
     console.error("   typeof:", typeof mw);
+    // eslint-disable-next-line no-console
     console.error("   keys:", keys);
     throw new Error(`INVALID_MIDDLEWARE_FOR_${path}`);
   }
@@ -70,7 +75,7 @@ router.get("/_version", (req, res) => {
   });
 });
 
-// ✅ PING (debug deploy)
+// ✅ PING (debug deploy) -> podés borrarlo si querés
 router.get("/__ping_v1", (req, res) => {
   res.json({ ok: true, ping: "v1", ts: new Date().toISOString() });
 });
@@ -89,6 +94,7 @@ router.get("/_whoami", requireAuth, (req, res) => {
 const branchContextMod = require("../middlewares/branchContext.middleware");
 const branchContext = resolveFn(branchContextMod, ["branchContext"]);
 if (!branchContext) {
+  // eslint-disable-next-line no-console
   console.error(
     "❌ branchContext NO resolvió a function. keys:",
     Object.keys(branchContextMod || {})
@@ -99,6 +105,7 @@ if (!branchContext) {
 const rbacMod = require("../middlewares/rbac.middleware");
 const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
 if (!attachAccessContext) {
+  // eslint-disable-next-line no-console
   console.error(
     "❌ attachAccessContext NO resolvió a function. keys:",
     Object.keys(rbacMod || {})
@@ -120,6 +127,7 @@ let publicPaymentMethodsRoutes = null;
 try {
   publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
 } catch (e) {
+  // eslint-disable-next-line no-console
   console.log(
     "⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)"
   );
@@ -131,6 +139,7 @@ let publicLinksRoutes = null;
 try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
+  // eslint-disable-next-line no-console
   console.log(
     "⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)"
   );
@@ -174,11 +183,12 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
-// ✅ NUEVO: /admin/shop/branches (si existe)
+// ✅ /admin/shop/branches (opcional)
 let adminShopBranchesRoutes = null;
 try {
   adminShopBranchesRoutes = require("./admin.shopBranches.routes");
 } catch (e) {
+  // eslint-disable-next-line no-console
   console.log(
     "⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)"
   );
@@ -190,6 +200,7 @@ let adminShopLinksRoutes = null;
 try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
+  // eslint-disable-next-line no-console
   console.log(
     "⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)"
   );
@@ -229,11 +240,11 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // Mount: Protected
 // =========================
 
-// ✅ IMPORTANTÍSIMO: primero VIDEOS, después PRODUCTS (evita que /:id “coma” /:id/videos)
+// ✅ FIX CLAVE: primero VIDEOS, después PRODUCTS (evita que /:id “coma” /:id/videos)
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
 
-// ✅ ALIAS admin para compat con front: /api/v1/admin/products/:id/videos
+// ✅ ALIAS admin para compat con tu front: /api/v1/admin/products/:id/videos
 safeUse("/admin/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 
 safeUse("/categories", requireAuth, categoriesRoutes);
@@ -268,9 +279,8 @@ if (adminShopLinksRoutes) {
 if (adminMediaRoutes) {
   safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
 } else {
-  console.log(
-    "⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)"
-  );
+  // eslint-disable-next-line no-console
+  console.log("⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)");
 }
 
 module.exports = router;

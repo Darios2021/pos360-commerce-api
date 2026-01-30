@@ -1,7 +1,9 @@
 // src/models/ProductVideo.js
 // ✅ COPY-PASTE FINAL
 // Tabla: product_videos
-// Guarda videos por producto: youtube (url embed) o upload (S3 key + bucket)
+// Campos según tu DB:
+// id, product_id, provider, title, url, storage_bucket, storage_key, mime,
+// size_bytes, sort_order, is_active, created_at, updated_at
 
 module.exports = (sequelize, DataTypes) => {
   const ProductVideo = sequelize.define(
@@ -11,7 +13,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.BIGINT.UNSIGNED,
         primaryKey: true,
         autoIncrement: true,
-        allowNull: false,
       },
 
       product_id: {
@@ -20,9 +21,9 @@ module.exports = (sequelize, DataTypes) => {
       },
 
       provider: {
-        type: DataTypes.STRING(32),
+        type: DataTypes.ENUM("youtube", "minio", "other"),
         allowNull: false,
-        defaultValue: "youtube", // youtube | s3 | minio
+        defaultValue: "youtube",
       },
 
       title: {
@@ -30,19 +31,18 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
 
-      // Para YouTube (embed url)
       url: {
-        type: DataTypes.TEXT,
+        type: DataTypes.STRING(2048),
         allowNull: true,
       },
 
-      // Para uploads (S3/MinIO)
       storage_bucket: {
-        type: DataTypes.STRING(255),
+        type: DataTypes.STRING(128),
         allowNull: true,
       },
+
       storage_key: {
-        type: DataTypes.STRING(1024),
+        type: DataTypes.STRING(512),
         allowNull: true,
       },
 
@@ -52,20 +52,20 @@ module.exports = (sequelize, DataTypes) => {
       },
 
       size_bytes: {
-        type: DataTypes.BIGINT,
+        type: DataTypes.BIGINT.UNSIGNED,
         allowNull: true,
       },
 
       sort_order: {
-        type: DataTypes.INTEGER,
+        type: DataTypes.INTEGER.UNSIGNED,
         allowNull: false,
         defaultValue: 0,
       },
 
       is_active: {
-        type: DataTypes.BOOLEAN,
+        type: DataTypes.TINYINT(1),
         allowNull: false,
-        defaultValue: true,
+        defaultValue: 1,
       },
 
       created_at: {
@@ -82,15 +82,10 @@ module.exports = (sequelize, DataTypes) => {
     },
     {
       tableName: "product_videos",
-      freezeTableName: true,
       timestamps: true,
       createdAt: "created_at",
       updatedAt: "updated_at",
-      indexes: [
-        { fields: ["product_id"] },
-        { fields: ["is_active"] },
-        { fields: ["product_id", "is_active"] },
-      ],
+      underscored: true,
     }
   );
 
