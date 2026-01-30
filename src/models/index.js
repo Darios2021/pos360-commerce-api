@@ -1,5 +1,8 @@
 // src/models/index.js
-// ✅ COPY-PASTE FINAL (Subcategory + Product->createdByUser + SaleRefund/SaleExchange + blindado + ShopLink opcional)
+// ✅ COPY-PASTE FINAL
+// - Subcategory + Product->createdByUser + SaleRefund/SaleExchange
+// - blindado anti-crash + ShopLink opcional
+// - ✅ ProductVideo + asociaciones Product ↔ ProductVideo (videos)
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -30,6 +33,16 @@ const Warehouse = require("./Warehouse")(sequelize, DataTypes);
 const StockBalance = require("./StockBalance")(sequelize, DataTypes);
 const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
+
+// ✅ ProductVideo (EXISTE EN DB: product_videos)
+let ProductVideo = null;
+try {
+  ProductVideo = require("./ProductVideo")(sequelize, DataTypes);
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.log("⚠️ ProductVideo no cargado (models/ProductVideo.js no encontrado o falló)");
+  ProductVideo = null;
+}
 
 // ===== POS =====
 const Sale = require("./sale.model")(sequelize, DataTypes);
@@ -158,6 +171,12 @@ safeHasMany(Subcategory, Product, { foreignKey: "subcategory_id", as: "products"
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
 safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
+// ✅ Product ↔ Videos (SOLO si existe el model)
+if (ProductVideo) {
+  safeHasMany(Product, ProductVideo, { foreignKey: "product_id", as: "videos" });
+  safeBelongsTo(ProductVideo, Product, { foreignKey: "product_id", as: "product" });
+}
+
 // Warehouse ↔ Branch
 safeBelongsTo(Warehouse, Branch, { foreignKey: "branch_id", as: "branch" });
 safeHasMany(Branch, Warehouse, { foreignKey: "branch_id", as: "warehouses" });
@@ -216,6 +235,7 @@ module.exports = {
   Subcategory,
   Product,
   ProductImage,
+  ProductVideo, // ✅ EXPORT CLAVE
   Branch,
   Warehouse,
   StockBalance,
@@ -231,6 +251,6 @@ module.exports = {
   SaleRefund,
   SaleExchange,
 
-  // ✅ CAMINO B
+  // Shop
   ShopLink,
 };

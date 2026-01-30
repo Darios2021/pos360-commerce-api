@@ -1,9 +1,9 @@
 // src/models/ProductVideo.js
 // ✅ COPY-PASTE FINAL
-// Tabla: product_videos
-// Campos según tu DB:
-// id, product_id, provider, title, url, storage_bucket, storage_key, mime,
-// size_bytes, sort_order, is_active, created_at, updated_at
+// Model Sequelize para tabla: product_videos
+// Columnas (según tu DB):
+// id, product_id, provider, title, url, storage_bucket, storage_key,
+// mime, size_bytes, sort_order, is_active, created_at, updated_at
 
 module.exports = (sequelize, DataTypes) => {
   const ProductVideo = sequelize.define(
@@ -11,8 +11,8 @@ module.exports = (sequelize, DataTypes) => {
     {
       id: {
         type: DataTypes.BIGINT.UNSIGNED,
-        primaryKey: true,
         autoIncrement: true,
+        primaryKey: true,
       },
 
       product_id: {
@@ -23,7 +23,7 @@ module.exports = (sequelize, DataTypes) => {
       provider: {
         type: DataTypes.ENUM("youtube", "minio", "other"),
         allowNull: false,
-        defaultValue: "youtube",
+        defaultValue: "other",
       },
 
       title: {
@@ -83,9 +83,9 @@ module.exports = (sequelize, DataTypes) => {
     {
       tableName: "product_videos",
       timestamps: true,
+      underscored: true,
       createdAt: "created_at",
       updatedAt: "updated_at",
-      underscored: true,
     }
   );
 
