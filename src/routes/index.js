@@ -1,5 +1,8 @@
 // src/models/index.js
-// ✅ COPY-PASTE FINAL (Subcategory + ProductVideo + Product->createdByUser + SaleRefund/SaleExchange + blindado + ShopLink opcional)
+// ✅ COPY-PASTE FINAL
+// - Subcategory + Product->createdByUser + SaleRefund/SaleExchange
+// - blindado anti-crash + ShopLink opcional
+// - ✅ NUEVO: ProductVideo (opcional) + asociaciones Product ↔ ProductVideo
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -25,12 +28,27 @@ const Category = require("./Category")(sequelize, DataTypes);
 const Subcategory = require("./Subcategory")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
 const ProductImage = require("./ProductImage")(sequelize, DataTypes);
-const ProductVideo = require("./ProductVideo")(sequelize, DataTypes); // ✅ NUEVO
 const Branch = require("./Branch")(sequelize, DataTypes);
 const Warehouse = require("./Warehouse")(sequelize, DataTypes);
 const StockBalance = require("./StockBalance")(sequelize, DataTypes);
 const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
+
+// ✅ NUEVO: ProductVideo (puede no existir todavía)
+let ProductVideo = null;
+try {
+  // opción A: models/ProductVideo.js
+  ProductVideo = require("./ProductVideo")(sequelize, DataTypes);
+} catch (e1) {
+  try {
+    // opción B: models/productVideo.model.js (por si lo nombraste así)
+    ProductVideo = require("./productVideo.model")(sequelize, DataTypes);
+  } catch (e2) {
+    // eslint-disable-next-line no-console
+    console.log("⚠️ ProductVideo no cargado (models/ProductVideo.js no encontrado o falló)");
+    ProductVideo = null;
+  }
+}
 
 // ===== POS =====
 const Sale = require("./sale.model")(sequelize, DataTypes);
@@ -159,9 +177,11 @@ safeHasMany(Subcategory, Product, { foreignKey: "subcategory_id", as: "products"
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
 safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
-// ✅ Product ↔ Videos
-safeHasMany(Product, ProductVideo, { foreignKey: "product_id", as: "videos" });
-safeBelongsTo(ProductVideo, Product, { foreignKey: "product_id", as: "product" });
+// ✅ Product ↔ Videos (SOLO si existe el model)
+if (ProductVideo) {
+  safeHasMany(Product, ProductVideo, { foreignKey: "product_id", as: "videos" });
+  safeBelongsTo(ProductVideo, Product, { foreignKey: "product_id", as: "product" });
+}
 
 // Warehouse ↔ Branch
 safeBelongsTo(Warehouse, Branch, { foreignKey: "branch_id", as: "branch" });
@@ -237,6 +257,6 @@ module.exports = {
   SaleRefund,
   SaleExchange,
 
-  // ✅ CAMINO B
+  // Shop
   ShopLink,
 };
