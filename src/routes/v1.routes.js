@@ -7,7 +7,8 @@
 // ✅ NUEVO: monta /admin/shop/branches (opcional)
 // ✅ VIDEOS (FINAL):
 //    - PUBLIC:  GET /public/products/:id/videos   (sin auth)
-//    - ADMIN:   POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
+//    - ADMIN:   GET/POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
+// ✅ OPCIONAL (compat): GET /products/:id/videos (sin auth) como ALIAS al public
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -121,6 +122,13 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
+// ✅ videos públicos por producto (GET /public/products/:id/videos)
+const publicProductVideosRoutes = require("./publicProductVideos.routes");
+
+// Ecommerce público
+const ecomCheckoutRoutes = require("./ecomCheckout.routes");
+const ecomPaymentsRoutes = require("./ecomPayments.routes");
+
 // ✅ métodos de pago públicos (opcional)
 let publicPaymentMethodsRoutes = null;
 try {
@@ -153,13 +161,6 @@ try {
   publicInstagramRoutes = null;
 }
 
-// ✅ VIDEOS públicos por producto (GET /public/products/:id/videos)
-const publicProductVideosRoutes = require("./publicProductVideos.routes");
-
-// Ecommerce público
-const ecomCheckoutRoutes = require("./ecomCheckout.routes");
-const ecomPaymentsRoutes = require("./ecomPayments.routes");
-
 // =========================
 // Protected (operación)
 // =========================
@@ -184,7 +185,7 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
-// ✅ admin videos (POST/UPLOAD/DELETE)
+// ✅ admin videos (GET/POST/UPLOAD/DELETE)
 const productVideosRoutes = require("./productVideos.routes");
 
 // ✅ /admin/shop/branches (opcional)
@@ -232,8 +233,12 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ Videos públicos (GET)
+// ✅ Videos públicos (GET /api/v1/public/products/:id/videos)
 safeUse("/public", publicProductVideosRoutes);
+
+// ✅ OPCIONAL (compat): GET /api/v1/products/:id/videos (alias al public)
+// Si no querés alias, borrá este bloque.
+safeUse("/", publicProductVideosRoutes);
 
 if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
@@ -259,7 +264,7 @@ safeUse("/pos", requireAuth, posRoutes);
 safeUse("/me", requireAuth, meRoutes);
 
 // =========================
-// Mount: Admin (RBAC)
+// Mount: Admin
 // =========================
 safeUse("/admin/users", requireAuth, attachAccessContext, adminUsersRoutes);
 
@@ -276,7 +281,7 @@ if (adminShopLinksRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
 }
 
-// ✅ ADMIN videos (protegido)
+// ✅ ADMIN videos: /api/v1/admin/products/:id/videos
 safeUse("/admin/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 
 // Admin media
