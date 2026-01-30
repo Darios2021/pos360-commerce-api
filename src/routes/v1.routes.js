@@ -5,6 +5,7 @@
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
 // ✅ NUEVO: monta /admin/shop/branches (reusa branches.controller.js)
+// ✅ NUEVO: monta /products/:id/videos (productVideos.routes.js)
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -135,6 +136,7 @@ const ecomPaymentsRoutes = require("./ecomPayments.routes");
 // Protected (operación)
 // =========================
 const productsRoutes = require("./products.routes");
+const productVideosRoutes = require("./productVideos.routes"); // ✅ NUEVO
 const categoriesRoutes = require("./categories.routes");
 const subcategoriesRoutes = require("./subcategories.routes");
 const branchesRoutes = require("./branches.routes");
@@ -205,6 +207,7 @@ safeUse("/ecom", ecomPaymentsRoutes);
 // Mount: Protected
 // =========================
 safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRoutes);
+safeUse("/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes); // ✅ NUEVO
 
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);

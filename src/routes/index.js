@@ -23,6 +23,7 @@ try {
 const Category = require("./Category")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
 const ProductImage = require("./ProductImage")(sequelize, DataTypes);
+const ProductVideo = require("./ProductVideo")(sequelize, DataTypes); // ✅ NUEVO
 const Branch = require("./Branch")(sequelize, DataTypes);
 const Warehouse = require("./Warehouse")(sequelize, DataTypes);
 const StockBalance = require("./StockBalance")(sequelize, DataTypes);
@@ -44,24 +45,16 @@ let EcomPayment = null;
 
 try {
   EcomCustomer = require("./ecom_customer.model")(sequelize, DataTypes);
-} catch (e) {
-  // ok: puede no existir
-}
+} catch (e) {}
 try {
   EcomOrder = require("./ecom_order.model")(sequelize, DataTypes);
-} catch (e) {
-  // ok: puede no existir
-}
+} catch (e) {}
 try {
   EcomOrderItem = require("./ecom_order_item.model")(sequelize, DataTypes);
-} catch (e) {
-  // ok: puede no existir
-}
+} catch (e) {}
 try {
   EcomPayment = require("./ecom_payment.model")(sequelize, DataTypes);
-} catch (e) {
-  // ok: puede no existir
-}
+} catch (e) {}
 
 // ==========================================
 // ASOCIACIONES
@@ -141,6 +134,14 @@ if (!Product.associations?.images) {
 }
 if (!ProductImage.associations?.product) {
   ProductImage.belongsTo(Product, { foreignKey: "product_id", as: "product" });
+}
+
+// ✅ Product ↔ Videos (NUEVO)
+if (!Product.associations?.videos) {
+  Product.hasMany(ProductVideo, { foreignKey: "product_id", as: "videos" });
+}
+if (!ProductVideo.associations?.product) {
+  ProductVideo.belongsTo(Product, { foreignKey: "product_id", as: "product" });
 }
 
 // Branch/Warehouse
@@ -245,6 +246,7 @@ module.exports = {
   Category,
   Product,
   ProductImage,
+  ProductVideo, // ✅ NUEVO
   Branch,
   Warehouse,
 
