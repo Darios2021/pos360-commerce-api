@@ -5,10 +5,10 @@
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
 // ✅ NUEVO: monta /admin/shop/branches (opcional)
-// ✅ NUEVO (THEME):
-//    - PUBLIC: GET  /public/theme
-//    - ADMIN:  GET  /admin/shop/theme
-//    - ADMIN:  PUT  /admin/shop/theme
+// ✅ NUEVO: THEME
+//    - PUBLIC: GET  /api/v1/public/theme
+//    - ADMIN:  GET  /api/v1/admin/shop/theme
+//             PUT  /api/v1/admin/shop/theme
 // ✅ VIDEOS (FINAL):
 //    - PUBLIC:  GET /public/products/:id/videos   (sin auth)
 //    - ADMIN:   GET/POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
@@ -126,11 +126,16 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
-// ✅ shop public routes (incluye /theme)
-const shopPublicRoutes = require("./shop.public.routes");
-
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = require("./publicProductVideos.routes");
+
+// ✅ THEME (public)
+let publicThemeRoutes = null;
+try {
+  publicThemeRoutes = require("./publicTheme.routes");
+} catch (e) {
+  publicThemeRoutes = null;
+}
 
 // Ecommerce público
 const ecomCheckoutRoutes = require("./ecomCheckout.routes");
@@ -192,15 +197,11 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
-// ✅ THEME admin (/admin/shop/theme)
+// ✅ THEME (admin)
 let adminShopThemeRoutes = null;
 try {
   adminShopThemeRoutes = require("./admin.shopTheme.routes");
 } catch (e) {
-  // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ adminShopThemeRoutes no cargado (routes/admin.shopTheme.routes.js no existe todavía)"
-  );
   adminShopThemeRoutes = null;
 }
 
@@ -252,15 +253,14 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ Shop public: /api/v1/public/theme (y más si agregás)
-safeUse("/public", shopPublicRoutes);
-
 // ✅ Videos públicos (GET /api/v1/public/products/:id/videos)
 safeUse("/public", publicProductVideosRoutes);
 
 // ✅ OPCIONAL (compat): GET /api/v1/products/:id/videos (alias al public)
-// Si no querés alias, borrá este bloque.
 safeUse("/", publicProductVideosRoutes);
+
+// ✅ THEME (si existe routes file)
+if (publicThemeRoutes) safeUse("/public", publicThemeRoutes);
 
 if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
@@ -295,7 +295,7 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
 
-// ✅ Theme admin: /api/v1/admin/shop/theme
+// ✅ THEME admin (si existe routes file)
 if (adminShopThemeRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopThemeRoutes);
 }
