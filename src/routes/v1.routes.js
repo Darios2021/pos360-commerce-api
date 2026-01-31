@@ -5,6 +5,10 @@
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
 // ✅ NUEVO: monta /admin/shop/branches (opcional)
+// ✅ NUEVO (THEME):
+//    - PUBLIC: GET  /public/theme
+//    - ADMIN:  GET  /admin/shop/theme
+//    - ADMIN:  PUT  /admin/shop/theme
 // ✅ VIDEOS (FINAL):
 //    - PUBLIC:  GET /public/products/:id/videos   (sin auth)
 //    - ADMIN:   GET/POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
@@ -122,6 +126,9 @@ const authRoutes = require("./auth.routes");
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
+// ✅ shop public routes (incluye /theme)
+const shopPublicRoutes = require("./shop.public.routes");
+
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = require("./publicProductVideos.routes");
 
@@ -185,6 +192,18 @@ const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
 const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
 const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
 
+// ✅ THEME admin (/admin/shop/theme)
+let adminShopThemeRoutes = null;
+try {
+  adminShopThemeRoutes = require("./admin.shopTheme.routes");
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.log(
+    "⚠️ adminShopThemeRoutes no cargado (routes/admin.shopTheme.routes.js no existe todavía)"
+  );
+  adminShopThemeRoutes = null;
+}
+
 // ✅ admin videos (GET/POST/UPLOAD/DELETE)
 const productVideosRoutes = require("./productVideos.routes");
 
@@ -233,6 +252,9 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
+// ✅ Shop public: /api/v1/public/theme (y más si agregás)
+safeUse("/public", shopPublicRoutes);
+
 // ✅ Videos públicos (GET /api/v1/public/products/:id/videos)
 safeUse("/public", publicProductVideosRoutes);
 
@@ -272,6 +294,11 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
+
+// ✅ Theme admin: /api/v1/admin/shop/theme
+if (adminShopThemeRoutes) {
+  safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopThemeRoutes);
+}
 
 if (adminShopBranchesRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBranchesRoutes);
