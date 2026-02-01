@@ -1,5 +1,6 @@
 // src/controllers/productVideos.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (DB-column aware + ANTI-CRASH + auto public url for uploads)
+// ✅ Incluye FEED público global con mini info del producto (CTA comprar)
 //
 // Rutas sugeridas (compat):
 // GET    /api/v1/products/:id/videos
@@ -8,7 +9,7 @@
 // POST   /api/v1/products/:id/videos/upload           multipart: file + title?
 // DELETE /api/v1/products/:id/videos/:videoId
 //
-// ✅ NUEVO (feed público global):
+// ✅ FEED público global:
 // GET    /api/v1/public/videos/feed?limit=18
 //
 // Requiere:
@@ -34,6 +35,10 @@ function toInt(v, d = 0) {
 }
 function toStr(v) {
   return String(v ?? "").trim();
+}
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 function resolveSequelize() {
@@ -61,6 +66,25 @@ function resolveProductVideoModel() {
     const { sequelize } = require("../models");
     if (sequelize?.models?.ProductVideo) return sequelize.models.ProductVideo;
     if (sequelize?.models?.ProductVideos) return sequelize.models.ProductVideos;
+  } catch (e) {
+    // ignore
+  }
+  return null;
+}
+
+function resolveProductModel() {
+  if (models && typeof models === "object") {
+    if (models.Product) return models.Product;
+    if (models.Products) return models.Products;
+    if (models.product) return models.product;
+    if (models.products) return models.products;
+    if (models.sequelize?.models?.Product) return models.sequelize.models.Product;
+    if (models.sequelize?.models?.Products) return models.sequelize.models.Products;
+  }
+  try {
+    const { sequelize } = require("../models");
+    if (sequelize?.models?.Product) return sequelize.models.Product;
+    if (sequelize?.models?.Products) return sequelize.models.Products;
   } catch (e) {
     // ignore
   }
@@ -108,6 +132,12 @@ function normalizeYoutubeEmbed(url) {
   return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 }
 
+function youtubeThumbFromUrl(url) {
+  const id = extractYoutubeId(url);
+  if (!id) return null;
+  return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+}
+
 function safeExtFromMime(mime) {
   const m = String(mime || "").toLowerCase();
   if (m.includes("mp4")) return ".mp4";
@@ -123,10 +153,6 @@ function buildVideoKey(productId, originalName, mime) {
 }
 
 function buildPublicObjectUrl(bucket, key) {
-  // Prioridad:
-  // 1) S3_PUBLIC_BASE_URL (recomendado) ej: https://cdn.tudominio.com
-  // 2) S3_ENDPOINT como base (si expone HTTP)
-  // 3) null
   const base =
     toStr(process.env.S3_PUBLIC_BASE_URL) ||
     toStr(process.env.MINIO_PUBLIC_BASE_URL) ||
@@ -136,12 +162,51 @@ function buildPublicObjectUrl(bucket, key) {
 
   const b = base.replace(/\/+$/, "");
   const k = String(key).replace(/^\/+/, "");
-  // estilo path: /<bucket>/<key>
   return `${b}/${bucket}/${k}`;
 }
 
+function pickFirst(obj, keys) {
+  for (const k of keys) {
+    if (obj && obj[k] != null && String(obj[k]).trim() !== "") return obj[k];
+  }
+  return null;
+}
+
+function buildProductMini(p, prodCols) {
+  if (!p) return null;
+  const obj = p?.toJSON ? p.toJSON() : p;
+
+  const id = Number(obj?.id || obj?.product_id || 0) || null;
+
+  const name = pickFirst(obj, ["name", "title", "nombre", "titulo"]) || null;
+  const slug = pickFirst(obj, ["slug", "handle", "permalink"]) || null;
+
+  const price = numOrNull(pickFirst(obj, ["price", "price_list", "list_price", "precio"]));
+  const price_discount = numOrNull(
+    pickFirst(obj, ["price_discount", "discount", "precio_descuento"])
+  );
+
+  const image =
+    pickFirst(obj, [
+      "image_url",
+      "main_image",
+      "cover_image",
+      "cover_url",
+      "thumbnail",
+      "thumb",
+      "image",
+    ]) || null;
+
+  const out = { id, name, slug, image, price, price_discount };
+
+  if (prodCols?.has("is_new")) out.is_new = Boolean(obj.is_new);
+  if (prodCols?.has("is_promo")) out.is_promo = Boolean(obj.is_promo);
+
+  return out;
+}
+
 /* =========================
-   LIST por producto (ya lo tenías)
+   LIST por producto
    ========================= */
 async function list(req, res) {
   try {
@@ -158,7 +223,6 @@ async function list(req, res) {
     const productId = toInt(req.params.id, 0);
     if (!productId) return res.status(400).json({ ok: false, message: "Invalid product id" });
 
-    // Detectar columnas reales
     const cols = await getColumns("product_videos");
     const hasIsActive = cols.has("is_active");
     const hasSort = cols.has("sort_order");
@@ -172,7 +236,6 @@ async function list(req, res) {
 
     const rows = await ProductVideo.findAll({ where, order });
 
-    // Si hay uploads sin url, intentamos armar url pública (si existen columnas bucket/key)
     const hasBucket = cols.has("storage_bucket");
     const hasKey = cols.has("storage_key");
     const hasUrl = cols.has("url");
@@ -194,8 +257,8 @@ async function list(req, res) {
 }
 
 /* =========================
-   ✅ NUEVO: FEED PUBLICO GLOBAL
-   Devuelve videos de TODOS los productos, para Home carousel.
+   ✅ FEED PUBLICO GLOBAL (mejorado)
+   - devuelve videos + product mini (name/price/image/slug)
    ========================= */
 async function listPublicFeed(req, res) {
   try {
@@ -208,15 +271,18 @@ async function listPublicFeed(req, res) {
       });
     }
 
-    const cols = await getColumns("product_videos");
-    const hasIsActive = cols.has("is_active");
-    const hasSort = cols.has("sort_order");
-    const hasCreatedAt = cols.has("created_at") || cols.has("createdat");
-    const hasBucket = cols.has("storage_bucket");
-    const hasKey = cols.has("storage_key");
-    const hasUrl = cols.has("url");
+    const Product = resolveProductModel(); // puede ser null, tenemos fallback SQL
 
-    // limit “seguro”
+    const videoCols = await getColumns("product_videos");
+    const prodCols = await getColumns("products"); // si tu tabla difiere, cambia acá
+
+    const hasIsActive = videoCols.has("is_active");
+    const hasSort = videoCols.has("sort_order");
+    const hasCreatedAt = videoCols.has("created_at") || videoCols.has("createdat");
+    const hasBucket = videoCols.has("storage_bucket");
+    const hasKey = videoCols.has("storage_key");
+    const hasUrl = videoCols.has("url");
+
     let limit = toInt(req.query.limit, 18);
     if (!limit || limit < 1) limit = 18;
     if (limit > 60) limit = 60;
@@ -224,28 +290,28 @@ async function listPublicFeed(req, res) {
     const where = {};
     if (hasIsActive) where.is_active = true;
 
-    // orden: sort_order si existe, sino created_at si existe, sino id
     const order = [];
     if (hasSort) order.push(["sort_order", "ASC"]);
     if (hasCreatedAt) order.push(["created_at", "DESC"]);
     order.push(["id", "DESC"]);
 
-    const rows = await ProductVideo.findAll({
-      where,
-      order,
-      limit,
-    });
+    const rows = await ProductVideo.findAll({ where, order, limit });
 
-    const data = (rows || []).map((r) => {
+    // 1) normalizar y completar url/thumb
+    const baseData = (rows || []).map((r) => {
       const obj = r?.toJSON ? r.toJSON() : r;
 
-      // completar url pública si viene de upload y falta url
       if (hasUrl && !obj.url && hasBucket && hasKey && obj.storage_bucket && obj.storage_key) {
         const pub = buildPublicObjectUrl(obj.storage_bucket, obj.storage_key);
         if (pub) obj.url = pub;
       }
 
-      // Normalizamos shape para frontend (sin romper si faltan columnas)
+      let thumb = obj.thumb || obj.thumbnail || obj.cover || null;
+      const provider = toStr(obj.provider).toLowerCase();
+      if (!thumb && (provider === "youtube" || /youtube\.com|youtu\.be/i.test(toStr(obj.url)))) {
+        thumb = youtubeThumbFromUrl(obj.url) || null;
+      }
+
       return {
         id: obj.id,
         product_id: obj.product_id ?? null,
@@ -255,15 +321,64 @@ async function listPublicFeed(req, res) {
         caption: obj.caption || null,
         url: obj.url || null,
         mime: obj.mime || null,
-        // si mañana guardás thumb en BD, el carousel lo usa
-        thumb: obj.thumb || obj.thumbnail || obj.cover || null,
+        thumb,
+      };
+    });
+
+    // 2) buscar productos por ids
+    const ids = Array.from(
+      new Set(
+        baseData
+          .map((x) => Number(x?.product_id || 0))
+          .filter((n) => Number.isFinite(n) && n > 0)
+      )
+    );
+
+    const prodMap = new Map();
+
+    if (ids.length) {
+      if (Product && typeof Product.findAll === "function") {
+        // Model
+        const prows = await Product.findAll({ where: { id: ids } });
+        for (const p of prows || []) {
+          const obj = p?.toJSON ? p.toJSON() : p;
+          const pid = Number(obj?.id || 0);
+          if (pid) prodMap.set(pid, obj);
+        }
+      } else {
+        // Fallback SQL
+        const sequelize = resolveSequelize();
+        if (sequelize) {
+          const [prows] = await sequelize.query(
+            `SELECT * FROM products WHERE id IN (:ids)`,
+            { replacements: { ids } }
+          );
+          for (const p of prows || []) {
+            const pid = Number(p?.id || 0);
+            if (pid) prodMap.set(pid, p);
+          }
+        }
+      }
+    }
+
+    // 3) adjuntar mini product
+    const data = baseData.map((v) => {
+      const pid = Number(v?.product_id || 0);
+      const p = pid ? prodMap.get(pid) : null;
+      return {
+        ...v,
+        product: p ? buildProductMini(p, prodCols) : null,
       };
     });
 
     return res.json({ ok: true, data });
   } catch (e) {
     console.error("[productVideos.listPublicFeed] error:", e);
-    return res.status(500).json({ ok: false, code: "VIDEO_PUBLIC_FEED_ERROR", message: e.message || "Error" });
+    return res.status(500).json({
+      ok: false,
+      code: "VIDEO_PUBLIC_FEED_ERROR",
+      message: e.message || "Error",
+    });
   }
 }
 
@@ -301,7 +416,6 @@ async function addYoutube(req, res) {
       url: embed,
     };
 
-    // set opcionales solo si existen
     if (cols.has("mime")) payload.mime = "text/html";
     if (cols.has("sort_order")) payload.sort_order = 0;
     if (cols.has("is_active")) payload.is_active = true;
@@ -368,13 +482,10 @@ async function upload(req, res) {
     if (cols.has("size_bytes")) payload.size_bytes = size || null;
     if (cols.has("sort_order")) payload.sort_order = 0;
     if (cols.has("is_active")) payload.is_active = true;
-
-    // clave: si existe url, la llenamos para que el frontend siempre tenga algo reproducible
     if (cols.has("url")) payload.url = publicUrl || null;
 
     const row = await ProductVideo.create(payload);
 
-    // devolver además url pública calculada (aunque la tabla no tenga url)
     const out = row?.toJSON ? row.toJSON() : row;
     if (!out.url && publicUrl) out.url = publicUrl;
 
@@ -406,16 +517,13 @@ async function remove(req, res) {
     const cols = await getColumns("product_videos");
     const hasIsActive = cols.has("is_active");
 
-    // 1) soft delete si existe is_active
     if (hasIsActive) {
       row.is_active = false;
       await row.save();
     } else {
-      // 2) si no existe, delete físico
       await row.destroy();
     }
 
-    // opcional: borrar objeto del bucket si existe
     const obj = row?.toJSON ? row.toJSON() : row;
     if (obj.storage_bucket && obj.storage_key) {
       try {
@@ -439,7 +547,7 @@ async function remove(req, res) {
 
 module.exports = {
   list,
-  listPublicFeed, // ✅ export nuevo
+  listPublicFeed, // ✅ ahora devuelve product mini
   addYoutube,
   upload,
   remove,
