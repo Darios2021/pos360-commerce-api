@@ -10,7 +10,8 @@
 //    - ADMIN:  GET  /api/v1/admin/shop/theme
 //             PUT  /api/v1/admin/shop/theme
 // ✅ VIDEOS (FINAL):
-//    - PUBLIC:  GET /public/products/:id/videos   (sin auth)
+//    - PUBLIC:  GET /public/products/:id/videos     (sin auth)
+//    - PUBLIC:  GET /public/videos/feed             (sin auth) ✅ NUEVO (HOME FEED)
 //    - ADMIN:   GET/POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
 // ✅ OPCIONAL (compat): GET /products/:id/videos (sin auth) como ALIAS al public
 
@@ -99,10 +100,7 @@ const branchContextMod = require("../middlewares/branchContext.middleware");
 const branchContext = resolveFn(branchContextMod, ["branchContext"]);
 if (!branchContext) {
   // eslint-disable-next-line no-console
-  console.error(
-    "❌ branchContext NO resolvió a function. keys:",
-    Object.keys(branchContextMod || {})
-  );
+  console.error("❌ branchContext NO resolvió a function. keys:", Object.keys(branchContextMod || {}));
   throw new Error("BRANCH_CONTEXT_INVALID_EXPORT");
 }
 
@@ -110,10 +108,7 @@ const rbacMod = require("../middlewares/rbac.middleware");
 const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
 if (!attachAccessContext) {
   // eslint-disable-next-line no-console
-  console.error(
-    "❌ attachAccessContext NO resolvió a function. keys:",
-    Object.keys(rbacMod || {})
-  );
+  console.error("❌ attachAccessContext NO resolvió a function. keys:", Object.keys(rbacMod || {}));
   throw new Error("RBAC_INVALID_EXPORT");
 }
 
@@ -128,6 +123,14 @@ const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = require("./publicProductVideos.routes");
+
+// ✅ videos feed global (GET /public/videos/feed) ✅ NUEVO
+let publicVideosFeedRoutes = null;
+try {
+  publicVideosFeedRoutes = require("./publicVideosFeed.routes");
+} catch (e) {
+  publicVideosFeedRoutes = null;
+}
 
 // ✅ THEME (public)
 let publicThemeRoutes = null;
@@ -159,9 +162,7 @@ try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)"
-  );
+  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
   publicLinksRoutes = null;
 }
 
@@ -226,9 +227,7 @@ try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)"
-  );
+  console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
   adminShopLinksRoutes = null;
 }
 
@@ -253,8 +252,11 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ Videos públicos (GET /api/v1/public/products/:id/videos)
+// ✅ Videos públicos por producto (GET /api/v1/public/products/:id/videos)
 safeUse("/public", publicProductVideosRoutes);
+
+// ✅ Videos feed global para Home (GET /api/v1/public/videos/feed)
+if (publicVideosFeedRoutes) safeUse("/public", publicVideosFeedRoutes);
 
 // ✅ OPCIONAL (compat): GET /api/v1/products/:id/videos (alias al public)
 safeUse("/", publicProductVideosRoutes);
@@ -316,9 +318,7 @@ if (adminMediaRoutes) {
   safeUse("/admin/media", requireAuth, attachAccessContext, adminMediaRoutes);
 } else {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)"
-  );
+  console.log("⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)");
 }
 
 module.exports = router;

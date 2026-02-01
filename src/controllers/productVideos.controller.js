@@ -8,6 +8,9 @@
 // POST   /api/v1/products/:id/videos/upload           multipart: file + title?
 // DELETE /api/v1/products/:id/videos/:videoId
 //
+// ✅ NUEVO (feed público global):
+// GET    /api/v1/public/videos/feed?limit=18
+//
 // Requiere:
 // - src/config/s3.js exporta { s3, s3Config }
 // - ProductVideo model exista y esté cargado por Sequelize
@@ -137,6 +140,9 @@ function buildPublicObjectUrl(bucket, key) {
   return `${b}/${bucket}/${k}`;
 }
 
+/* =========================
+   LIST por producto (ya lo tenías)
+   ========================= */
 async function list(req, res) {
   try {
     const ProductVideo = resolveProductVideoModel();
@@ -184,6 +190,80 @@ async function list(req, res) {
   } catch (e) {
     console.error("[productVideos.list] error:", e);
     return res.status(500).json({ ok: false, code: "VIDEO_LIST_ERROR", message: e.message || "Error" });
+  }
+}
+
+/* =========================
+   ✅ NUEVO: FEED PUBLICO GLOBAL
+   Devuelve videos de TODOS los productos, para Home carousel.
+   ========================= */
+async function listPublicFeed(req, res) {
+  try {
+    const ProductVideo = resolveProductVideoModel();
+    if (!ProductVideo || typeof ProductVideo.findAll !== "function") {
+      return res.status(500).json({
+        ok: false,
+        code: "PRODUCT_VIDEO_MODEL_NOT_FOUND",
+        message: "No se encontró el model ProductVideo (o no tiene findAll).",
+      });
+    }
+
+    const cols = await getColumns("product_videos");
+    const hasIsActive = cols.has("is_active");
+    const hasSort = cols.has("sort_order");
+    const hasCreatedAt = cols.has("created_at") || cols.has("createdat");
+    const hasBucket = cols.has("storage_bucket");
+    const hasKey = cols.has("storage_key");
+    const hasUrl = cols.has("url");
+
+    // limit “seguro”
+    let limit = toInt(req.query.limit, 18);
+    if (!limit || limit < 1) limit = 18;
+    if (limit > 60) limit = 60;
+
+    const where = {};
+    if (hasIsActive) where.is_active = true;
+
+    // orden: sort_order si existe, sino created_at si existe, sino id
+    const order = [];
+    if (hasSort) order.push(["sort_order", "ASC"]);
+    if (hasCreatedAt) order.push(["created_at", "DESC"]);
+    order.push(["id", "DESC"]);
+
+    const rows = await ProductVideo.findAll({
+      where,
+      order,
+      limit,
+    });
+
+    const data = (rows || []).map((r) => {
+      const obj = r?.toJSON ? r.toJSON() : r;
+
+      // completar url pública si viene de upload y falta url
+      if (hasUrl && !obj.url && hasBucket && hasKey && obj.storage_bucket && obj.storage_key) {
+        const pub = buildPublicObjectUrl(obj.storage_bucket, obj.storage_key);
+        if (pub) obj.url = pub;
+      }
+
+      // Normalizamos shape para frontend (sin romper si faltan columnas)
+      return {
+        id: obj.id,
+        product_id: obj.product_id ?? null,
+        provider: obj.provider || null,
+        title: obj.title || null,
+        subtitle: obj.subtitle || null,
+        caption: obj.caption || null,
+        url: obj.url || null,
+        mime: obj.mime || null,
+        // si mañana guardás thumb en BD, el carousel lo usa
+        thumb: obj.thumb || obj.thumbnail || obj.cover || null,
+      };
+    });
+
+    return res.json({ ok: true, data });
+  } catch (e) {
+    console.error("[productVideos.listPublicFeed] error:", e);
+    return res.status(500).json({ ok: false, code: "VIDEO_PUBLIC_FEED_ERROR", message: e.message || "Error" });
   }
 }
 
@@ -359,6 +439,7 @@ async function remove(req, res) {
 
 module.exports = {
   list,
+  listPublicFeed, // ✅ export nuevo
   addYoutube,
   upload,
   remove,
