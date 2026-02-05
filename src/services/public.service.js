@@ -1,13 +1,13 @@
-// src/services/public.service.js
 // ✅ COPY-PASTE FINAL COMPLETO
+// src/services/public.service.js
 // - /public/categories => SOLO categorías PADRE (categories.parent_id IS NULL)
 // - /public/subcategories => tabla subcategories
 // - Filtro correcto por subcategory_id
 // - strict_search + exclude_terms
 // - Branding público + Config pagos
 // - ✅ Producto individual devuelve MÚLTIPLES IMÁGENES (product_images)
+// - ✅ Catálogo (listCatalog) AHORA también devuelve image_urls/images para que el ProductCardSubcat tenga flechas
 // - ✅ NUEVO: stock_by_branch en catálogo y producto (para validar pickup antes de pagar)
-// - ✅ NUEVO: getProductMedia(product_id) SIN branch_id (para ProductCard gallery en grilla sin 401)
 
 const { sequelize } = require("../models");
 
@@ -40,9 +40,7 @@ function toStr(v) {
 // ✅ NUEVO: stock_by_branch
 // =========================
 async function getStockByBranchMap(productIds = []) {
-  const ids = Array.from(
-    new Set((productIds || []).map((x) => Number(x)).filter(Boolean))
-  );
+  const ids = Array.from(new Set((productIds || []).map((x) => Number(x)).filter(Boolean)));
   if (!ids.length) return {};
 
   const [rows] = await sequelize.query(
@@ -71,8 +69,39 @@ async function getStockByBranchMap(productIds = []) {
     map[pid].push({ branch_id: bid, qty });
   }
 
-  for (const pid of Object.keys(map)) {
-    map[pid].sort((a, b) => a.branch_id - b.branch_id);
+  for (const pid of Object.keys(map)) map[pid].sort((a, b) => a.branch_id - b.branch_id);
+  return map;
+}
+
+// =========================
+// ✅ NUEVO: imágenes múltiples para el catálogo
+// =========================
+async function getImagesByProductMap(productIds = []) {
+  const ids = Array.from(new Set((productIds || []).map((x) => Number(x)).filter(Boolean)));
+  if (!ids.length) return {};
+
+  const [rows] = await sequelize.query(
+    `
+    SELECT product_id, id, url, sort_order
+    FROM product_images
+    WHERE product_id IN (:ids)
+    ORDER BY product_id ASC, sort_order ASC, id ASC
+    `,
+    { replacements: { ids } }
+  );
+
+  const map = {};
+  for (const r of rows || []) {
+    const pid = Number(r.product_id || 0);
+    const url = String(r.url || "").trim();
+    if (!pid || !url) continue;
+
+    if (!map[pid]) map[pid] = [];
+    map[pid].push({
+      id: Number(r.id || 0),
+      url,
+      sort_order: Number(r.sort_order || 0),
+    });
   }
 
   return map;
@@ -249,11 +278,9 @@ module.exports = {
     const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);
 
-    // ✅ NUEVO: stock_by_branch en catálogo
-    const productIds = items
-      .map((it) => Number(it.product_id || it.id || 0))
-      .filter(Boolean);
+    const productIds = items.map((it) => Number(it.product_id || it.id || 0)).filter(Boolean);
 
+    // ✅ stock_by_branch
     if (productIds.length) {
       const stockMap = await getStockByBranchMap(productIds);
       for (const it of items) {
@@ -262,6 +289,34 @@ module.exports = {
       }
     } else {
       for (const it of items) it.stock_by_branch = [];
+    }
+
+    // ✅ imágenes múltiples (para flechas en card)
+    if (productIds.length) {
+      const imgMap = await getImagesByProductMap(productIds);
+
+      for (const it of items) {
+        const pid = Number(it.product_id || it.id || 0);
+        const images = imgMap[pid] || [];
+
+        it.images = images;
+        it.image_urls = images.map((x) => x.url).filter(Boolean);
+
+        // fallback: si la view trae image_url pero no hay product_images, lo usamos
+        const one = String(it.image_url || "").trim();
+        if (!it.image_urls.length && one) it.image_urls = [one];
+
+        // asegurar image_url principal
+        if (!String(it.image_url || "").trim() && it.image_urls.length) {
+          it.image_url = it.image_urls[0];
+        }
+      }
+    } else {
+      for (const it of items) {
+        const one = String(it.image_url || "").trim();
+        it.images = [];
+        it.image_urls = one ? [one] : [];
+      }
     }
 
     return {
@@ -376,64 +431,10 @@ module.exports = {
       item.image_url = item.image_urls[0];
     }
 
-    // ✅ NUEVO: stock_by_branch en producto individual
     const stockMap = await getStockByBranchMap([pid]);
     item.stock_by_branch = stockMap[pid] || [];
 
     return item;
-  },
-
-  // =====================================================
-  // ✅ NUEVO: MEDIA PÚBLICA PARA CARDS (SIN branch_id)
-  // GET /public/products/:id/media
-  // Devuelve: { product_id, image_url, images[], image_urls[] }
-  // =====================================================
-  async getProductMedia({ product_id }) {
-    const pid = toInt(product_id, 0);
-    if (!pid) return null;
-
-    // Validamos existencia básica (no requiere branch)
-    const [pRows] = await sequelize.query(
-      `
-      SELECT id
-      FROM products
-      WHERE id = :product_id
-        AND is_active = 1
-      LIMIT 1
-      `,
-      { replacements: { product_id: pid } }
-    );
-
-    const exists = pRows?.[0] || null;
-    if (!exists) return null;
-
-    const [imgs] = await sequelize.query(
-      `
-      SELECT id, url, sort_order
-      FROM product_images
-      WHERE product_id = :product_id
-      ORDER BY sort_order ASC, id ASC
-      `,
-      { replacements: { product_id: pid } }
-    );
-
-    const images = (imgs || [])
-      .map((r) => ({
-        id: Number(r.id),
-        url: String(r.url || "").trim(),
-        sort_order: Number(r.sort_order || 0),
-      }))
-      .filter((x) => x.url);
-
-    const image_urls = images.map((x) => x.url);
-    const image_url = image_urls[0] || "";
-
-    return {
-      product_id: pid,
-      image_url,
-      images,
-      image_urls,
-    };
   },
 
   // =========================
@@ -462,9 +463,7 @@ module.exports = {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
       favicon_url: r.favicon_url || "",
-      updated_at: r.updated_at
-        ? new Date(r.updated_at).toISOString()
-        : new Date().toISOString(),
+      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
     };
   },
 
@@ -494,14 +493,11 @@ module.exports = {
         holder: String(process.env.TRANSFER_HOLDER || "").trim(),
       };
 
-      const finalTransfer =
-        transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
+      const finalTransfer = transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
 
       return {
         transfer: finalTransfer,
-        mercadopago: {
-          enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim(),
-        },
+        mercadopago: { enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim() },
       };
     } catch (e) {
       return {
@@ -510,9 +506,7 @@ module.exports = {
           cbu: String(process.env.TRANSFER_CBU || "").trim(),
           holder: String(process.env.TRANSFER_HOLDER || "").trim(),
         },
-        mercadopago: {
-          enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim(),
-        },
+        mercadopago: { enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim() },
       };
     }
   },
