@@ -1,5 +1,6 @@
 // src/controllers/public.controller.js
 // ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms + SHOP BRANDING + PAYMENT CONFIG)
+// ✅ + NUEVO: /public/products/:id/media (imágenes para cards ML-like, SIN AUTH, SIN branch_id)
 
 const PublicService = require("../services/public.service");
 
@@ -136,6 +137,7 @@ module.exports = {
     }
   },
 
+  // ✅ DETALLE PÚBLICO (requiere branch_id por precios/stock)
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
@@ -165,6 +167,39 @@ module.exports = {
         ok: false,
         code: "PUBLIC_PRODUCT_ERROR",
         message: err?.message || "Error trayendo producto",
+      });
+    }
+  },
+
+  // ✅ NUEVO: MEDIA PÚBLICA PARA CARDS (SIN branch_id, SIN AUTH)
+  // GET /api/v1/public/products/:id/media
+  async getProductMedia(req, res) {
+    try {
+      const product_id = toInt(req.params.id);
+      if (!product_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "id es obligatorio",
+        });
+      }
+
+      const item = await PublicService.getProductMedia({ product_id });
+      if (!item) {
+        return res.status(404).json({
+          ok: false,
+          code: "NOT_FOUND",
+          message: "Producto no encontrado",
+        });
+      }
+
+      return res.json({ ok: true, item });
+    } catch (err) {
+      console.error("PUBLIC_PRODUCT_MEDIA_ERROR", err);
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_PRODUCT_MEDIA_ERROR",
+        message: err?.message || "Error trayendo media del producto",
       });
     }
   },

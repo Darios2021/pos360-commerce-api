@@ -7,6 +7,7 @@
 // - Branding público + Config pagos
 // - ✅ Producto individual devuelve MÚLTIPLES IMÁGENES (product_images)
 // - ✅ NUEVO: stock_by_branch en catálogo y producto (para validar pickup antes de pagar)
+// - ✅ NUEVO: getProductMedia(product_id) SIN branch_id (para ProductCard gallery en grilla sin 401)
 
 const { sequelize } = require("../models");
 
@@ -38,17 +39,12 @@ function toStr(v) {
 // =========================
 // ✅ NUEVO: stock_by_branch
 // =========================
-// Usamos v_public_catalog porque ya tiene (branch_id, product_id, stock_qty)
-// y además respeta lógica de negocio que ya tengas dentro de la view.
 async function getStockByBranchMap(productIds = []) {
   const ids = Array.from(
     new Set((productIds || []).map((x) => Number(x)).filter(Boolean))
   );
   if (!ids.length) return {};
 
-  // Traemos stock por sucursal SOLO de sucursales activas.
-  // Nota: NO filtramos por branch_id acá, porque queremos "todas las sucursales"
-  // para que el checkout pueda validar pickup antes de pagar.
   const [rows] = await sequelize.query(
     `
     SELECT
@@ -75,7 +71,6 @@ async function getStockByBranchMap(productIds = []) {
     map[pid].push({ branch_id: bid, qty });
   }
 
-  // orden estable
   for (const pid of Object.keys(map)) {
     map[pid].sort((a, b) => a.branch_id - b.branch_id);
   }
@@ -254,9 +249,7 @@ module.exports = {
     const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);
 
-    // ============================
-    // ✅ NUEVO: inyectar stock_by_branch
-    // ============================
+    // ✅ NUEVO: stock_by_branch en catálogo
     const productIds = items
       .map((it) => Number(it.product_id || it.id || 0))
       .filter(Boolean);
@@ -383,13 +376,64 @@ module.exports = {
       item.image_url = item.image_urls[0];
     }
 
-    // ============================
     // ✅ NUEVO: stock_by_branch en producto individual
-    // ============================
     const stockMap = await getStockByBranchMap([pid]);
     item.stock_by_branch = stockMap[pid] || [];
 
     return item;
+  },
+
+  // =====================================================
+  // ✅ NUEVO: MEDIA PÚBLICA PARA CARDS (SIN branch_id)
+  // GET /public/products/:id/media
+  // Devuelve: { product_id, image_url, images[], image_urls[] }
+  // =====================================================
+  async getProductMedia({ product_id }) {
+    const pid = toInt(product_id, 0);
+    if (!pid) return null;
+
+    // Validamos existencia básica (no requiere branch)
+    const [pRows] = await sequelize.query(
+      `
+      SELECT id
+      FROM products
+      WHERE id = :product_id
+        AND is_active = 1
+      LIMIT 1
+      `,
+      { replacements: { product_id: pid } }
+    );
+
+    const exists = pRows?.[0] || null;
+    if (!exists) return null;
+
+    const [imgs] = await sequelize.query(
+      `
+      SELECT id, url, sort_order
+      FROM product_images
+      WHERE product_id = :product_id
+      ORDER BY sort_order ASC, id ASC
+      `,
+      { replacements: { product_id: pid } }
+    );
+
+    const images = (imgs || [])
+      .map((r) => ({
+        id: Number(r.id),
+        url: String(r.url || "").trim(),
+        sort_order: Number(r.sort_order || 0),
+      }))
+      .filter((x) => x.url);
+
+    const image_urls = images.map((x) => x.url);
+    const image_url = image_urls[0] || "";
+
+    return {
+      product_id: pid,
+      image_url,
+      images,
+      image_urls,
+    };
   },
 
   // =========================

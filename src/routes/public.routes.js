@@ -1,6 +1,7 @@
 // src/routes/public.routes.js
 // ✅ COPY-PASTE FINAL
 // Rutas públicas Ecommerce (taxonomía + catálogo + sugerencias + producto + branding)
+// ✅ + NUEVO: /products/:id/media (imágenes para card sin branch_id / sin auth)
 
 const express = require("express");
 const router = express.Router();
@@ -26,7 +27,10 @@ router.get("/suggestions", PublicController.listSuggestions);
 // ✅ Branding (logo + favicon + nombre tienda)
 router.get("/shop/branding", PublicController.getShopBranding);
 
-// Producto
+// Producto (detalle: requiere branch_id)
 router.get("/products/:id", PublicController.getProductById);
+
+// ✅ NUEVO: media pública para ProductCard (NO branch_id)
+router.get("/products/:id/media", PublicController.getProductMedia);
 
 module.exports = router;
