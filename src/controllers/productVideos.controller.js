@@ -285,7 +285,7 @@ async function listPublicFeed(req, res) {
 
     let limit = toInt(req.query.limit, 18);
     if (!limit || limit < 1) limit = 18;
-    if (limit > 60) limit = 60;
+    if (limit > 200) limit = 200;
 
     const where = {};
     if (hasIsActive) where.is_active = true;
