@@ -260,6 +260,11 @@ async function list(req, res) {
    ✅ FEED PUBLICO GLOBAL (mejorado)
    - devuelve videos + product mini (name/price/image/slug)
    ========================= */
+/* =========================
+   ✅ FEED PUBLICO GLOBAL (paginado)
+   GET /api/v1/public/videos/feed?limit=16&offset=0
+   Devuelve: { ok:true, data:[...], meta:{ limit, offset, returned, has_more } }
+========================= */
 async function listPublicFeed(req, res) {
   try {
     const ProductVideo = resolveProductVideoModel();
@@ -271,10 +276,10 @@ async function listPublicFeed(req, res) {
       });
     }
 
-    const Product = resolveProductModel(); // puede ser null, tenemos fallback SQL
+    const Product = resolveProductModel();
 
     const videoCols = await getColumns("product_videos");
-    const prodCols = await getColumns("products"); // si tu tabla difiere, cambia acá
+    const prodCols = await getColumns("products");
 
     const hasIsActive = videoCols.has("is_active");
     const hasSort = videoCols.has("sort_order");
@@ -283,9 +288,12 @@ async function listPublicFeed(req, res) {
     const hasKey = videoCols.has("storage_key");
     const hasUrl = videoCols.has("url");
 
-    let limit = toInt(req.query.limit, 18);
-    if (!limit || limit < 1) limit = 18;
-    if (limit > 200) limit = 200;
+    let limit = toInt(req.query.limit, 16);
+    if (!limit || limit < 1) limit = 16;
+    if (limit > 60) limit = 60; // cap server-side
+
+    let offset = toInt(req.query.offset, 0);
+    if (!offset || offset < 0) offset = 0;
 
     const where = {};
     if (hasIsActive) where.is_active = true;
@@ -295,9 +303,8 @@ async function listPublicFeed(req, res) {
     if (hasCreatedAt) order.push(["created_at", "DESC"]);
     order.push(["id", "DESC"]);
 
-    const rows = await ProductVideo.findAll({ where, order, limit });
+    const rows = await ProductVideo.findAll({ where, order, limit, offset });
 
-    // 1) normalizar y completar url/thumb
     const baseData = (rows || []).map((r) => {
       const obj = r?.toJSON ? r.toJSON() : r;
 
@@ -325,7 +332,6 @@ async function listPublicFeed(req, res) {
       };
     });
 
-    // 2) buscar productos por ids
     const ids = Array.from(
       new Set(
         baseData
@@ -338,7 +344,6 @@ async function listPublicFeed(req, res) {
 
     if (ids.length) {
       if (Product && typeof Product.findAll === "function") {
-        // Model
         const prows = await Product.findAll({ where: { id: ids } });
         for (const p of prows || []) {
           const obj = p?.toJSON ? p.toJSON() : p;
@@ -346,13 +351,11 @@ async function listPublicFeed(req, res) {
           if (pid) prodMap.set(pid, obj);
         }
       } else {
-        // Fallback SQL
         const sequelize = resolveSequelize();
         if (sequelize) {
-          const [prows] = await sequelize.query(
-            `SELECT * FROM products WHERE id IN (:ids)`,
-            { replacements: { ids } }
-          );
+          const [prows] = await sequelize.query(`SELECT * FROM products WHERE id IN (:ids)`, {
+            replacements: { ids },
+          });
           for (const p of prows || []) {
             const pid = Number(p?.id || 0);
             if (pid) prodMap.set(pid, p);
@@ -361,17 +364,25 @@ async function listPublicFeed(req, res) {
       }
     }
 
-    // 3) adjuntar mini product
     const data = baseData.map((v) => {
       const pid = Number(v?.product_id || 0);
       const p = pid ? prodMap.get(pid) : null;
-      return {
-        ...v,
-        product: p ? buildProductMini(p, prodCols) : null,
-      };
+      return { ...v, product: p ? buildProductMini(p, prodCols) : null };
     });
 
-    return res.json({ ok: true, data });
+    // ✅ has_more simple: si devolvió "limit", probablemente haya más
+    const has_more = (rows || []).length === limit;
+
+    return res.json({
+      ok: true,
+      data,
+      meta: {
+        limit,
+        offset,
+        returned: data.length,
+        has_more,
+      },
+    });
   } catch (e) {
     console.error("[productVideos.listPublicFeed] error:", e);
     return res.status(500).json({
@@ -381,6 +392,7 @@ async function listPublicFeed(req, res) {
     });
   }
 }
+
 
 async function addYoutube(req, res) {
   try {
