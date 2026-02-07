@@ -1,6 +1,7 @@
 // src/controllers/public.controller.js
 // ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms + SHOP BRANDING + PAYMENT CONFIG)
 // ✅ + NUEVO: /public/products/:id/media (imágenes para cards ML-like, SIN AUTH, SIN branch_id)
+// ✅ + FIX: pasa brands/model/sort al service
 
 const PublicService = require("../services/public.service");
 
@@ -20,6 +21,12 @@ function toBoolLike(v, d = false) {
   if (["true", "yes", "si"].includes(s)) return true;
   if (["false", "no"].includes(s)) return false;
   return d;
+}
+function toCsvList(v) {
+  return String(v ?? "")
+    .split(",")
+    .map((x) => String(x).trim())
+    .filter(Boolean);
 }
 
 module.exports = {
@@ -95,9 +102,14 @@ module.exports = {
         page: Math.max(1, toInt(req.query.page, 1)),
         limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
 
-        // ✅ NUEVO
+        // ✅ strict_search + exclude_terms
         strict_search: toBoolLike(req.query.strict_search, false),
-        exclude_terms: toStr(req.query.exclude_terms), // "cargador,cable,energia,usb"
+        exclude_terms: toStr(req.query.exclude_terms),
+
+        // ✅ FIX: filtros reales
+        brands: toCsvList(req.query.brands), // "XAEA,ONLY"
+        model: toStr(req.query.model),       // "POCKET 15W"
+        sort: toStr(req.query.sort),         // price_asc|price_desc|newest|name_asc
       });
 
       return res.json({ ok: true, ...result });
@@ -137,7 +149,6 @@ module.exports = {
     }
   },
 
-  // ✅ DETALLE PÚBLICO (requiere branch_id por precios/stock)
   async getProductById(req, res) {
     try {
       const branch_id = toInt(req.query.branch_id);
@@ -171,8 +182,6 @@ module.exports = {
     }
   },
 
-  // ✅ NUEVO: MEDIA PÚBLICA PARA CARDS (SIN branch_id, SIN AUTH)
-  // GET /api/v1/public/products/:id/media
   async getProductMedia(req, res) {
     try {
       const product_id = toInt(req.params.id);
@@ -204,7 +213,6 @@ module.exports = {
     }
   },
 
-  // ✅ GET /public/shop/branding
   async getShopBranding(req, res) {
     try {
       const item = await PublicService.getShopBranding();
@@ -219,7 +227,6 @@ module.exports = {
     }
   },
 
-  // ✅ NUEVO: GET /public/shop/payment-config
   async getPaymentConfig(req, res) {
     try {
       const item = await PublicService.getPaymentConfig();

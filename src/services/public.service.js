@@ -8,6 +8,7 @@
 // - ✅ Producto individual devuelve MÚLTIPLES IMÁGENES (product_images)
 // - ✅ NUEVO: stock_by_branch en catálogo y producto (para validar pickup antes de pagar)
 // - ✅ NUEVO: getProductMedia(product_id) SIN branch_id (para ProductCard gallery en grilla sin 401)
+// ✅ FIX: filtros catálogo (brands/model/sort)
 
 const { sequelize } = require("../models");
 
@@ -34,6 +35,14 @@ function toInt(v, d = 0) {
 function toStr(v) {
   const s = String(v ?? "").trim();
   return s.length ? s : "";
+}
+
+function csvList(v) {
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  return String(v ?? "")
+    .split(",")
+    .map((x) => String(x).trim())
+    .filter(Boolean);
 }
 
 // =========================
@@ -79,9 +88,6 @@ async function getStockByBranchMap(productIds = []) {
 }
 
 module.exports = {
-  // =========================
-  // Categories (SOLO PADRES)
-  // =========================
   async listCategories() {
     const [rows] = await sequelize.query(`
       SELECT id, name, parent_id
@@ -93,9 +99,6 @@ module.exports = {
     return rows || [];
   },
 
-  // =========================
-  // Subcategories REALES
-  // =========================
   async listSubcategories({ category_id }) {
     const cid = toInt(category_id, 0);
     if (!cid) return [];
@@ -113,9 +116,6 @@ module.exports = {
     return rows || [];
   },
 
-  // =========================
-  // Branches públicas
-  // =========================
   async listBranches() {
     const [rows] = await sequelize.query(`
       SELECT id, name, code, address, city
@@ -140,6 +140,11 @@ module.exports = {
     limit,
     strict_search,
     exclude_terms,
+
+    // ✅ FIX (nuevos)
+    brands,
+    model,
+    sort,
   }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
 
@@ -180,6 +185,25 @@ module.exports = {
 
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+    }
+
+    // ✅ FIX: filtro por marcas (case-insensitive)
+    const brandArr = csvList(brands).map((s) => s.toLowerCase());
+    if (brandArr.length) {
+      const keys = [];
+      for (let i = 0; i < brandArr.length; i++) {
+        const k = `b${i}`;
+        repl[k] = brandArr[i];
+        keys.push(`:${k}`);
+      }
+      where.push(`LOWER(COALESCE(vc.brand,'')) IN (${keys.join(",")})`);
+    }
+
+    // ✅ FIX: filtro por modelo exacto (case-insensitive)
+    const m = toStr(model).toLowerCase();
+    if (m) {
+      repl.model = m;
+      where.push(`LOWER(COALESCE(vc.model,'')) = :model`);
     }
 
     const ex = toStr(exclude_terms)
@@ -226,6 +250,14 @@ module.exports = {
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
 
+    // ✅ FIX: sort
+    const s = toStr(sort);
+    let orderSql = "ORDER BY vc.product_id DESC";
+    if (s === "price_asc") orderSql = "ORDER BY COALESCE(vc.price,0) ASC, vc.product_id DESC";
+    else if (s === "price_desc") orderSql = "ORDER BY COALESCE(vc.price,0) DESC, vc.product_id DESC";
+    else if (s === "name_asc") orderSql = "ORDER BY COALESCE(vc.name,'') ASC, vc.product_id DESC";
+    else if (s === "newest") orderSql = "ORDER BY vc.product_id DESC";
+
     const [[countRow]] = await sequelize.query(
       `
       SELECT COUNT(*) AS total
@@ -240,7 +272,7 @@ module.exports = {
       SELECT vc.*
       FROM v_public_catalog vc
       ${whereSql}
-      ORDER BY vc.product_id DESC
+      ${orderSql}
       LIMIT :limit OFFSET :offset
       `,
       { replacements: repl }
@@ -249,7 +281,6 @@ module.exports = {
     const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);
 
-    // ✅ NUEVO: stock_by_branch en catálogo
     const productIds = items
       .map((it) => Number(it.product_id || it.id || 0))
       .filter(Boolean);
@@ -376,23 +407,16 @@ module.exports = {
       item.image_url = item.image_urls[0];
     }
 
-    // ✅ NUEVO: stock_by_branch en producto individual
     const stockMap = await getStockByBranchMap([pid]);
     item.stock_by_branch = stockMap[pid] || [];
 
     return item;
   },
 
-  // =====================================================
-  // ✅ NUEVO: MEDIA PÚBLICA PARA CARDS (SIN branch_id)
-  // GET /public/products/:id/media
-  // Devuelve: { product_id, image_url, images[], image_urls[] }
-  // =====================================================
   async getProductMedia({ product_id }) {
     const pid = toInt(product_id, 0);
     if (!pid) return null;
 
-    // Validamos existencia básica (no requiere branch)
     const [pRows] = await sequelize.query(
       `
       SELECT id
@@ -436,9 +460,6 @@ module.exports = {
     };
   },
 
-  // =========================
-  // Branding público
-  // =========================
   async getShopBranding() {
     const [rows] = await sequelize.query(`
       SELECT id, name, logo_url, favicon_url, updated_at
@@ -468,9 +489,6 @@ module.exports = {
     };
   },
 
-  // =========================
-  // Config pagos
-  // =========================
   async getPaymentConfig() {
     try {
       const [rows] = await sequelize.query(`
