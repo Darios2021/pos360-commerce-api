@@ -30,11 +30,13 @@ function mustEnv(name) {
   if (!v) throw new Error(`Missing env ${name}`);
   return v;
 }
+
 function envBool(name, fallback = false) {
   const v = process.env[name];
   if (v === undefined || v === null || v === "") return fallback;
   return String(v).toLowerCase() === "true" || String(v) === "1";
 }
+
 function envInt(name, fallback) {
   const v = process.env[name];
   const n = parseInt(String(v ?? ""), 10);
@@ -59,7 +61,7 @@ const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media").trim
 //
 // - WEBP_MAX_SIDE: recomendado 2560 (o 2400). Antes era 1600.
 // - WEBP_QUALITY:  94 (antes 82).
-// - chromaSubsampling 4:4:4 + smartSubsample: mejora MUCHO texto/edges.
+// - chromaSubsampling 4:4:4 + smartSubsample + nearLossless: mejora MUCHO texto/edges.
 const WEBP_MAX_SIDE = envInt("MEDIA_WEBP_MAX_SIDE", 2560);
 const WEBP_QUALITY = envInt("MEDIA_WEBP_QUALITY", 94);
 
@@ -99,13 +101,13 @@ function normalizeKeyFromRaw(raw) {
   if (/^https?:\/\//i.test(s)) {
     const u = new URL(s);
     let key = u.pathname.replace(/^\/+/, "");
-    if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice((`${BUCKET}/`).length);
+    if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice(`${BUCKET}/`.length);
     return key;
   }
 
   // key o "bucket/key"
   let key = s.replace(/^\/+/, "");
-  if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice((`${BUCKET}/`).length);
+  if (BUCKET && key.startsWith(`${BUCKET}/`)) key = key.slice(`${BUCKET}/`.length);
   return key;
 }
 
@@ -169,7 +171,7 @@ async function mapUsedInfoByFilename() {
     LEFT JOIN categories c ON c.id = p.category_id
     LEFT JOIN subcategories sc ON sc.id = p.subcategory_id
     GROUP BY filename
-  `,
+    `,
     { type: Sequelize.QueryTypes.SELECT }
   );
 
@@ -398,7 +400,6 @@ async function buildWebp(buffer) {
   const w = toInt(meta.width, 0);
   const h = toInt(meta.height, 0);
 
-  // ✅ Antes: 1600. Para slider/hero desktop es poco y se termina estirando.
   const maxSide = WEBP_MAX_SIDE;
 
   let pipe = img.clone();
@@ -414,10 +415,11 @@ async function buildWebp(buffer) {
 
   return pipe
     .webp({
-      quality: WEBP_QUALITY,
-      effort: 5,
-      chromaSubsampling: "4:4:4",
+      quality: WEBP_QUALITY, // subimos por env
+      effort: 6, // ✅ más compresión “lenta” pero mejor
+      chromaSubsampling: "4:4:4", // ✅ clave para texto
       smartSubsample: true,
+      nearLossless: true, // ✅ mejora edges/lettering
     })
     .toBuffer();
 }
