@@ -35,6 +35,11 @@ function envBool(name, fallback = false) {
   if (v === undefined || v === null || v === "") return fallback;
   return String(v).toLowerCase() === "true" || String(v) === "1";
 }
+function envInt(name, fallback) {
+  const v = process.env[name];
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 const BUCKET = process.env.S3_BUCKET || process.env.S3_BUCKET_PUBLIC || process.env.S3_BUCKET_NAME;
 if (!BUCKET) console.warn("⚠️ mediaImages.controller: Falta S3_BUCKET (list/upload/delete dependen de esto).");
@@ -48,6 +53,15 @@ const PREFIXES = String(process.env.S3_MEDIA_PREFIXES || "products,media")
   .filter(Boolean);
 
 const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media").trim().replace(/^\/+|\/+$/g, "");
+
+// ====== ✅ IMAGEN: tuning para HERO / UI ======
+// Para evitar pérdida de calidad en banners/slider desktop:
+//
+// - WEBP_MAX_SIDE: recomendado 2560 (o 2400). Antes era 1600.
+// - WEBP_QUALITY:  94 (antes 82).
+// - chromaSubsampling 4:4:4 + smartSubsample: mejora MUCHO texto/edges.
+const WEBP_MAX_SIDE = envInt("MEDIA_WEBP_MAX_SIDE", 2560);
+const WEBP_QUALITY = envInt("MEDIA_WEBP_QUALITY", 94);
 
 // ====== S3 CLIENT ======
 function s3Client() {
@@ -243,7 +257,6 @@ async function resolveKeyForOverwrite(rawId) {
   }
 
   // 2) Si viene "stem" sin extensión -> probar variantes
-  // ej: media/abc   -> media/abc.webp / media/abc_og.jpg / media/abc_sq.jpg
   const looksLikeStem =
     maybeKey &&
     !/\.[a-z0-9]+$/i.test(maybeKey) &&
@@ -313,8 +326,9 @@ async function resolveKeyForOverwrite(rawId) {
 
 // ====== IMAGE PIPELINE ======
 async function decodeImage(buffer) {
-  // rotate() respeta EXIF orientation -> previene previews “girados”
-  return sharp(buffer, { failOn: "none", animated: false }).rotate();
+  // ✅ rotate() respeta EXIF orientation -> previene previews “girados”
+  // ✅ failOnError=false evita que sharp reviente con archivos raros (y vos ya validás tamaño)
+  return sharp(buffer, { failOnError: false, animated: false }).rotate();
 }
 
 function ensureMinimum(meta) {
@@ -322,9 +336,7 @@ function ensureMinimum(meta) {
   const h = toInt(meta?.height, 0);
 
   if (w < 300 || h < 200) {
-    const err = new Error(
-      `Imagen demasiado chica (${w}x${h}). Mínimo recomendado: ancho ≥ 300px y alto ≥ 200px.`
-    );
+    const err = new Error(`Imagen demasiado chica (${w}x${h}). Mínimo recomendado: ancho ≥ 300px y alto ≥ 200px.`);
     err.status = 400;
     err.friendlyMessage = err.message;
     throw err;
@@ -386,14 +398,28 @@ async function buildWebp(buffer) {
   const w = toInt(meta.width, 0);
   const h = toInt(meta.height, 0);
 
-  const maxSide = 1600;
+  // ✅ Antes: 1600. Para slider/hero desktop es poco y se termina estirando.
+  const maxSide = WEBP_MAX_SIDE;
+
   let pipe = img.clone();
 
   if (w > maxSide || h > maxSide) {
-    pipe = pipe.resize({ width: maxSide, height: maxSide, fit: "inside", withoutEnlargement: true });
+    pipe = pipe.resize({
+      width: maxSide,
+      height: maxSide,
+      fit: "inside",
+      withoutEnlargement: true,
+    });
   }
 
-  return pipe.webp({ quality: 82, effort: 5 }).toBuffer();
+  return pipe
+    .webp({
+      quality: WEBP_QUALITY,
+      effort: 5,
+      chromaSubsampling: "4:4:4",
+      smartSubsample: true,
+    })
+    .toBuffer();
 }
 
 async function generateVariants(fileBuffer) {
@@ -655,10 +681,7 @@ exports.removeById = async (req, res) => {
     const baseWebpFilename = `${base}.webp`;
 
     const used = await ProductImage.count({
-      where: sequelize.where(
-        sequelize.fn("SUBSTRING_INDEX", sequelize.col("url"), "/", -1),
-        baseWebpFilename
-      ),
+      where: sequelize.where(sequelize.fn("SUBSTRING_INDEX", sequelize.col("url"), "/", -1), baseWebpFilename),
     });
 
     if (used > 0) {

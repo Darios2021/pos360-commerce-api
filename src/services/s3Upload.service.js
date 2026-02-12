@@ -10,9 +10,16 @@ const { fileTypeFromBuffer } = require("file-type");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
 const { s3, s3Config } = require("../config/s3");
 
-const IMG_MAX_UPLOAD_BYTES = Number(process.env.IMG_MAX_UPLOAD_BYTES || 6 * 1024 * 1024);
-const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 75);
-const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 1200);
+function toInt(v, d) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+
+const IMG_MAX_UPLOAD_BYTES = toInt(process.env.IMG_MAX_UPLOAD_BYTES, 6 * 1024 * 1024);
+
+// ✅ Defaults pro (si no están en env)
+const IMG_WEBP_QUALITY = toInt(process.env.IMG_WEBP_QUALITY, 94);
+const IMG_MAX_WIDTH = toInt(process.env.IMG_MAX_WIDTH, 2560);
 
 // ✅ Permitimos entrada JPG/PNG/WebP pero SIEMPRE guardamos WebP en uploadImageAsWebp()
 const ALLOWED_INPUT_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -58,13 +65,7 @@ function publicUrlFromKey(key) {
 }
 
 /**
- * ✅ Subida genérica (se mantiene, por compatibilidad)
- * @param {Object} args
- * @param {string} args.keyPrefix e.g. "pos360/shop"
- * @param {Buffer} args.buffer
- * @param {string} args.mimeType
- * @param {string} args.filename
- * @param {string} [args.cacheControl]
+ * ✅ Subida genérica (compatibilidad)
  */
 async function uploadBuffer({ keyPrefix, buffer, mimeType, filename, cacheControl }) {
   if (!buffer || !Buffer.isBuffer(buffer)) throw new Error("BUFFER_REQUIRED");
@@ -87,13 +88,8 @@ async function uploadBuffer({ keyPrefix, buffer, mimeType, filename, cacheContro
 }
 
 /**
- * ✅ PRO: valida tipo REAL (magic bytes) + limita tamaño + convierte a WebP + sube.
+ * ✅ PRO: valida tipo REAL + limita tamaño + convierte a WebP + sube.
  * SIEMPRE retorna .webp
- *
- * @param {Object} args
- * @param {string} args.keyPrefix e.g. "products" o "pos360/shop/products"
- * @param {Buffer} args.buffer
- * @param {string} [args.filename]
  */
 async function uploadImageAsWebp({ keyPrefix, buffer, filename }) {
   if (!buffer || !Buffer.isBuffer(buffer)) throw new Error("BUFFER_REQUIRED");
@@ -113,10 +109,19 @@ async function uploadImageAsWebp({ keyPrefix, buffer, filename }) {
     throw err;
   }
 
-  const webpBuffer = await sharp(buffer)
+  // ✅ claves para NO perder calidad en texto/bordes:
+  // - 2560px (hero/desktop) en vez de 1200
+  // - quality alto (94)
+  // - chromaSubsampling 4:4:4 + smartSubsample
+  const webpBuffer = await sharp(buffer, { failOnError: false })
     .rotate()
     .resize({ width: IMG_MAX_WIDTH, withoutEnlargement: true })
-    .webp({ quality: IMG_WEBP_QUALITY })
+    .webp({
+      quality: IMG_WEBP_QUALITY,
+      effort: 5,
+      chromaSubsampling: "4:4:4",
+      smartSubsample: true,
+    })
     .toBuffer();
 
   const bucket = s3Config.bucket;
@@ -140,22 +145,17 @@ async function uploadImageAsWebp({ keyPrefix, buffer, filename }) {
     contentType: "image/webp",
     originalFilename: filename || null,
     detectedMime: realMime || null,
+    maxWidth: IMG_MAX_WIDTH,
+    quality: IMG_WEBP_QUALITY,
   };
 }
 
 /**
- * ✅ NUEVO: OG default 1200x630 (JPG) con key ESTABLE: <prefix>/og-default.jpg
- * - Entrada: cualquier imagen (png/jpg/webp)
- * - Salida: JPG 1200x630 (fondo oscuro + logo centrado)
- *
- * @param {Object} args
- * @param {string} args.keyPrefix  e.g. "pos360/shop"
- * @param {Buffer} args.buffer
+ * ✅ OG default 1200x630 (JPG) con key ESTABLE: <prefix>/og-default.jpg
  */
 async function uploadOgDefaultJpg1200x630({ keyPrefix, buffer }) {
   if (!buffer || !Buffer.isBuffer(buffer)) throw new Error("BUFFER_REQUIRED");
 
-  // Validación por magic bytes
   const ft = await fileTypeFromBuffer(buffer);
   const realMime = ft?.mime || "";
   if (!ALLOWED_INPUT_MIME.has(realMime)) {
@@ -167,7 +167,7 @@ async function uploadOgDefaultJpg1200x630({ keyPrefix, buffer }) {
   const W = 1200;
   const H = 630;
 
-  const logo = await sharp(buffer)
+  const logo = await sharp(buffer, { failOnError: false })
     .rotate()
     .resize(520, 520, { fit: "inside", withoutEnlargement: true })
     .png()
@@ -191,7 +191,7 @@ async function uploadOgDefaultJpg1200x630({ keyPrefix, buffer }) {
       Key: key,
       Body: ogJpg,
       ContentType: "image/jpeg",
-      CacheControl: "public, max-age=3600", // OG puede cambiar; no conviene immutable
+      CacheControl: "public, max-age=3600",
       ACL: "public-read",
     })
   );
@@ -208,5 +208,5 @@ async function uploadOgDefaultJpg1200x630({ keyPrefix, buffer }) {
 module.exports = {
   uploadBuffer,
   uploadImageAsWebp,
-  uploadOgDefaultJpg1200x630, // ✅ nuevo
+  uploadOgDefaultJpg1200x630,
 };

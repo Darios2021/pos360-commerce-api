@@ -1,3 +1,12 @@
+// src/controllers/productImages.controller.js
+// ✅ COPY-PASTE FINAL COMPLETO
+//
+// FIX CALIDAD (HERO / SLIDER / DESKTOP):
+// - IMG_MAX_WIDTH default 2560 (antes 1200)
+// - IMG_WEBP_QUALITY default 94 (antes 75)
+// - WebP 4:4:4 + smartSubsample (mejora texto/bordes)
+// - failOnError:false para evitar crashes con imgs raras
+
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
 const sharp = require("sharp");
@@ -64,8 +73,10 @@ function keyFromPublicUrl(url) {
    Normalización imágenes
    ===================== */
 const IMG_MAX_UPLOAD_BYTES = Number(process.env.IMG_MAX_UPLOAD_BYTES || 6 * 1024 * 1024);
-const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 1200);
-const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 75);
+
+// ✅ Defaults PRO (alineado a mediaImages.controller.js)
+const IMG_MAX_WIDTH = Number(process.env.IMG_MAX_WIDTH || 2560);
+const IMG_WEBP_QUALITY = Number(process.env.IMG_WEBP_QUALITY || 94);
 
 const ALLOWED_FORMATS = new Set(["jpeg", "png", "webp"]);
 
@@ -78,7 +89,7 @@ function httpError(statusCode, message) {
 async function detectFormatOrThrow(buffer) {
   let meta;
   try {
-    meta = await sharp(buffer).metadata();
+    meta = await sharp(buffer, { failOnError: false }).metadata();
   } catch {
     throw httpError(415, "INVALID_IMAGE_FILE");
   }
@@ -90,14 +101,19 @@ async function detectFormatOrThrow(buffer) {
 }
 
 async function normalizeToWebp(buffer) {
-  return sharp(buffer)
+  return sharp(buffer, { failOnError: false })
     .rotate()
     .resize({
       width: IMG_MAX_WIDTH,
       withoutEnlargement: true,
       fit: "inside",
     })
-    .webp({ quality: IMG_WEBP_QUALITY })
+    .webp({
+      quality: IMG_WEBP_QUALITY,
+      effort: 5,
+      chromaSubsampling: "4:4:4",
+      smartSubsample: true,
+    })
     .toBuffer();
 }
 
@@ -117,9 +133,7 @@ async function upload(req, res) {
 
     let files = [];
     if (req.files) {
-      files = Array.isArray(req.files)
-        ? req.files
-        : Object.values(req.files).flat();
+      files = Array.isArray(req.files) ? req.files : Object.values(req.files).flat();
     } else if (req.file) {
       files = [req.file];
     }
@@ -132,7 +146,6 @@ async function upload(req, res) {
       });
     }
 
-    // 🔍 LOG para detectar duplicados desde multer / front
     console.log("📸 [productImages.upload]", {
       productId,
       files: files.map((f) => ({
@@ -175,9 +188,7 @@ async function upload(req, res) {
       await detectFormatOrThrow(file.buffer);
       const webpBuffer = await normalizeToWebp(file.buffer);
 
-      const key = `products/${productId}/${Date.now()}-${crypto
-        .randomBytes(6)
-        .toString("hex")}.webp`;
+      const key = `products/${productId}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}.webp`;
 
       await s3
         .putObject({
@@ -203,18 +214,15 @@ async function upload(req, res) {
       ok: true,
       uploaded: results.length,
       items: results,
+      // debug útil
+      webp: { maxWidth: IMG_MAX_WIDTH, quality: IMG_WEBP_QUALITY },
     });
   } catch (e) {
     console.error("❌ [productImages.upload]", e);
     const status = e.statusCode || 500;
     return res.status(status).json({
       ok: false,
-      code:
-        status === 415
-          ? "INVALID_IMAGE"
-          : status === 413
-          ? "IMG_TOO_LARGE"
-          : "UPLOAD_ERROR",
+      code: status === 415 ? "INVALID_IMAGE" : status === 413 ? "IMG_TOO_LARGE" : "UPLOAD_ERROR",
       message: e.message,
     });
   }
