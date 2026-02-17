@@ -12,9 +12,12 @@
 //    - PUBLIC: POST /api/v1/public/auth/google
 //    - PUBLIC: GET  /api/v1/public/auth/me
 //    - PUBLIC: POST /api/v1/public/auth/logout
-// ✅ NUEVO: MY ACCOUNT (historial)
-//    - PUBLIC: GET  /api/v1/public/my/orders
-//    - PUBLIC: GET  /api/v1/public/my/orders/:id
+// ✅ NUEVO: MY ACCOUNT (Mis compras + Favoritos)
+//    - PUBLIC: GET    /api/v1/public/account/orders
+//    - PUBLIC: GET    /api/v1/public/account/orders/:id
+//    - PUBLIC: GET    /api/v1/public/account/favorites
+//    - PUBLIC: POST   /api/v1/public/account/favorites
+//    - PUBLIC: DELETE /api/v1/public/account/favorites/:product_id
 // ✅ NUEVO: THEME
 //    - PUBLIC: GET  /api/v1/public/theme
 //    - ADMIN:  GET  /api/v1/admin/shop/theme
@@ -191,8 +194,10 @@ const publicShopConfigRoutes = loadRoute("./public.shopConfig.routes", { optiona
 // ✅ SHOP AUTH (Google + sesiones)
 const publicShopAuthRoutes = loadRoute("./public.shopAuth.routes", { optional: false });
 
-// ✅ MY ACCOUNT (historial) (si todavía no existe, ponelo optional:true)
-const publicMyAccountRoutes = loadRoute("./public.myAccount.routes", { optional: true });
+// ✅ MY ACCOUNT (Mis compras + Favoritos)
+// Archivo recomendado: src/routes/public.account.routes.js
+// Si todavía no existe, lo dejamos optional:true para no romper
+const publicAccountRoutes = loadRoute("./public.account.routes", { optional: true });
 
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = loadRoute("./publicProductVideos.routes", { optional: false });
@@ -264,7 +269,10 @@ safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
 safeUse("/public", publicShopAuthRoutes);
-if (publicMyAccountRoutes) safeUse("/public", publicMyAccountRoutes);
+
+// ✅ MY ACCOUNT
+// Monta /api/v1/public/account/* (orders + favorites)
+if (publicAccountRoutes) safeUse("/public/account", publicAccountRoutes);
 
 // Videos públicos por producto
 safeUse("/public", publicProductVideosRoutes);
@@ -272,7 +280,7 @@ safeUse("/public", publicProductVideosRoutes);
 // Videos feed global para Home
 if (publicVideosFeedRoutes) safeUse("/public", publicVideosFeedRoutes);
 
-// Compat alias
+// Compat alias opcional
 safeUse("/", publicProductVideosRoutes);
 
 // Theme
