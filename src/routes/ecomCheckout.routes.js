@@ -9,6 +9,10 @@
 // ✅ IMPORTANTE:
 // - El webhook de MercadoPago se monta SOLO en ecomPayments.routes.js
 //   POST /api/v1/ecom/webhooks/mercadopago
+//
+// ✅ NUEVO (SIN ROMPER LO QUE YA FUNCIONA):
+// - Si existe cookie de sesión del shop, hidrata req.customer ANTES del checkout
+//   (NO exige login; si no hay sesión, sigue igual)
 
 const express = require("express");
 const router = express.Router();
@@ -44,6 +48,20 @@ function mustFn(fn, name) {
 }
 
 // =========================
+// (Opcional) Hydrate shop customer (NO 401)
+// =========================
+let hydrateShopCustomer = (req, res, next) => next();
+
+try {
+  const authMod = require("../middlewares/shopCustomerAuth.middleware");
+  const resolved = resolveFn(authMod, ["hydrateShopCustomer", "hydrate", "optionalAuth", "middleware"]);
+  if (typeof resolved === "function") hydrateShopCustomer = resolved;
+} catch (e) {
+  // opcional: si no existe, no rompe
+  // console.log("ℹ️ [ecomCheckout.routes] hydrateShopCustomer no disponible (ok).");
+}
+
+// =========================
 // Controller checkout (robusto)
 // =========================
 const checkoutMod = require("../controllers/ecomCheckout.controller");
@@ -59,6 +77,6 @@ router.get("/health", (req, res) => {
 // =========================
 // Checkout
 // =========================
-router.post("/checkout", express.json({ limit: "2mb" }), checkout);
+router.post("/checkout", hydrateShopCustomer, express.json({ limit: "2mb" }), checkout);
 
 module.exports = router;

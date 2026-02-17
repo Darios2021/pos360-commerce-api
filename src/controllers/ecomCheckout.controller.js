@@ -8,9 +8,13 @@
 // - ✅ Lee settings desde shop_settings/ecom_settings/settings soportando value_json ✅
 // - ✅ En TEST usa sandbox_init_point
 // - ✅ En TEST intenta excluir account_money (saldo). ✅
-//    ⚠️ Si MP rechaza eso, NO hacemos fallback silencioso (para no crear preferencia “mala”).
 // - ✅ notification_url usa MP_NOTIFICATION_URL si existe
 // - ✅ Mantiene DB-first y FIX insertId con LAST_INSERT_ID()
+//
+// ✅ FIX CLAVE (SIN ROMPER):
+// - Si hay sesión de shop (req.customer.id), el order.customer_id = req.customer.id
+//   (ya no se te “van” las compras al email hardcodeado del body).
+// - Si NO hay sesión, fallback al comportamiento viejo: upsert por buyer_email.
 
 /* global fetch */
 
@@ -58,8 +62,6 @@ async function getLastInsertId(transaction) {
 
 /* ============================================================
    SETTINGS (DB) — best effort
-   Lee payments desde shop_settings/ecom_settings/settings
-   y soporta value_json (tu caso real)
 ============================================================ */
 async function tableExists(tableName, transaction) {
   const [rows] = await sequelize.query(
@@ -90,7 +92,6 @@ async function loadPaymentsSetting(transaction) {
 
   const keyCol = cols.has("key") ? "key" : cols.has("name") ? "name" : cols.has("code") ? "code" : null;
 
-  // ✅ soporta value_json primero (tu caso)
   const valCol = cols.has("value_json")
     ? "value_json"
     : cols.has("value")
@@ -111,7 +112,6 @@ async function loadPaymentsSetting(transaction) {
   const raw = rows?.[0]?.v ?? null;
   if (!raw) return null;
 
-  // value_json puede venir como objeto o string JSON
   if (typeof raw === "object") return raw;
 
   try {
@@ -135,12 +135,10 @@ function pickEnvToken(mode) {
   if (mode === "test") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_TEST);
   if (mode === "prod") return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN_PROD);
 
-  // legacy fallback (si alguien aún usa MERCADOPAGO_ACCESS_TOKEN único)
   return toStr(process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN);
 }
 
 async function resolveMpRuntimeConfig(transaction) {
-  // 1) DB payments.mp_mode (si existe)
   let dbMode = "";
   try {
     const payments = await loadPaymentsSetting(transaction);
@@ -149,7 +147,6 @@ async function resolveMpRuntimeConfig(transaction) {
     // ignore
   }
 
-  // 2) env MP_MODE (fallback)
   const envMode = normalizeMpMode(process.env.MP_MODE);
 
   const mode = dbMode || envMode || "prod";
@@ -165,14 +162,11 @@ async function resolveMpRuntimeConfig(transaction) {
     toStr(process.env.MP_NOTIFICATION_URL) ||
     (publicBaseUrl ? `${String(publicBaseUrl).replace(/\/$/, "")}/api/v1/ecom/webhooks/mercadopago` : "");
 
-
   return { mode, accessToken, publicBaseUrl, notificationUrl };
 }
 
 /* ============================================================
    MERCADOPAGO: Preference (sin SDK)
-   ✅ En TEST: intentamos excluir account_money.
-   ✅ Si MP rechaza eso: NO fallback silencioso (para no crear preferencia mal).
 ============================================================ */
 function cleanPaymentMethods(pm) {
   if (!pm || typeof pm !== "object") return undefined;
@@ -194,6 +188,7 @@ function cleanPaymentMethods(pm) {
 
   return hasAny ? out : undefined;
 }
+
 async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl, mode, order, buyer, items }) {
   if (!accessToken) throw new Error("MP_ACCESS_TOKEN_MISSING");
 
@@ -245,7 +240,11 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
 
     const text = await r.text();
     let data = {};
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
 
     if (!r.ok) {
       const msg = data?.message || data?.error || `MP preference error HTTP ${r.status}`;
@@ -258,13 +257,7 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     return data;
   }
 
-  // ✅ IMPORTANTE:
-  // Hoy MP te devuelve: "account_money cannot be excluded"
-  // Entonces: en TEST intentamos excluir SOLO si querés, pero si falla -> reintento SIN payment_methods.
-  // Si querés ir directo al grano: podés comentar el bloque del intento 1 y listo.
-
   if (mode === "test") {
-    // 1) intento con exclude (opcional)
     const payload1 = {
       ...basePayload,
       payment_methods: {
@@ -281,7 +274,6 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
         raw: data1,
       };
     } catch (e) {
-      // 2) fallback SIEMPRE en TEST: reintentar sin payment_methods
       console.warn("⚠️ MP TEST: preference con exclude falló, reintentando SIN excluir...", {
         mp_message: e?.message,
         http_status: e?.http_status,
@@ -298,7 +290,6 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     }
   }
 
-  // PROD: directo
   const data = await mpCreatePreference({ ...basePayload });
   return {
     id: data.id || null,
@@ -307,8 +298,6 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     raw: data,
   };
 }
-
-
 
 /* ============================================================
    Normalizadores (compat front)
@@ -365,6 +354,9 @@ function normalizePayment(body) {
 async function checkout(req, res) {
   const body = req.body || {};
   const request_id = crypto.randomBytes(8).toString("hex");
+
+  // ✅ FIX CLAVE: si hay sesión de shop, usala como fuente de verdad
+  const sessionCustomerId = toInt(req?.customer?.id, 0) || null;
 
   const branch_id_input = toInt(body.branch_id, 0);
   const fulfillment_type = normalizeFulfillmentType(body);
@@ -471,60 +463,63 @@ async function checkout(req, res) {
   // ===== Transacción =====
   try {
     const result = await sequelize.transaction(async (t) => {
-      // ---- (A) Upsert customer (best-effort según columnas reales) ----
-      let customer_id = null;
+      // ---- (A) Resolver customer_id (FIX: sesión > email) ----
+      let customer_id = sessionCustomerId;
 
-      const ccols = await getColumns("ecom_customers", t);
+      // ✅ Si NO hay sesión, fallback al comportamiento viejo: upsert por email
+      if (!customer_id) {
+        const ccols = await getColumns("ecom_customers", t);
 
-      if (ccols.has("email")) {
-        const [crows] = await sequelize.query(
-          `SELECT id FROM ecom_customers WHERE LOWER(email) = :email LIMIT 1`,
-          { replacements: { email: buyer_email }, transaction: t }
-        );
-        customer_id = toInt(crows?.[0]?.id, 0) || null;
+        if (ccols.has("email")) {
+          const [crows] = await sequelize.query(
+            `SELECT id FROM ecom_customers WHERE LOWER(email) = :email LIMIT 1`,
+            { replacements: { email: buyer_email }, transaction: t }
+          );
+          customer_id = toInt(crows?.[0]?.id, 0) || null;
 
-        const canUpdate =
-          ccols.has("first_name") || ccols.has("last_name") || ccols.has("phone") || ccols.has("doc_number");
+          const canUpdate =
+            ccols.has("first_name") || ccols.has("last_name") || ccols.has("phone") || ccols.has("doc_number");
 
-        if (customer_id && canUpdate) {
-          const upd = {};
-          if (ccols.has("first_name")) upd.first_name = buyer_name;
-          if (ccols.has("last_name")) upd.last_name = null;
-          if (ccols.has("phone")) upd.phone = buyer_phone || null;
-          if (ccols.has("doc_number")) upd.doc_number = buyer_doc || null;
-          if (ccols.has("updated_at")) upd.updated_at = new Date();
+          if (customer_id && canUpdate) {
+            const upd = {};
+            if (ccols.has("first_name")) upd.first_name = buyer_name;
+            if (ccols.has("last_name")) upd.last_name = null;
+            if (ccols.has("phone")) upd.phone = buyer_phone || null;
+            if (ccols.has("doc_number")) upd.doc_number = buyer_doc || null;
+            if (ccols.has("updated_at")) upd.updated_at = new Date();
 
-          const sets = Object.keys(upd)
-            .map((k) => `${k} = :${k}`)
-            .join(", ");
+            const sets = Object.keys(upd)
+              .map((k) => `${k} = :${k}`)
+              .join(", ");
 
-          if (sets) {
-            await sequelize.query(`UPDATE ecom_customers SET ${sets} WHERE id = :id`, {
-              replacements: { id: customer_id, ...upd },
+            if (sets) {
+              await sequelize.query(`UPDATE ecom_customers SET ${sets} WHERE id = :id`, {
+                replacements: { id: customer_id, ...upd },
+                transaction: t,
+              });
+            }
+          }
+
+          if (!customer_id) {
+            const ins = { email: buyer_email };
+            if (ccols.has("first_name")) ins.first_name = buyer_name;
+            if (ccols.has("last_name")) ins.last_name = null;
+            if (ccols.has("phone")) ins.phone = buyer_phone || null;
+            if (ccols.has("doc_number")) ins.doc_number = buyer_doc || null;
+            if (ccols.has("created_at")) ins.created_at = new Date();
+            if (ccols.has("updated_at")) ins.updated_at = new Date();
+
+            const keys = Object.keys(ins);
+            const colsList = keys.join(", ");
+            const vals = keys.map((k) => `:${k}`).join(", ");
+
+            const [cres] = await sequelize.query(`INSERT INTO ecom_customers (${colsList}) VALUES (${vals})`, {
+              replacements: ins,
               transaction: t,
             });
+
+            customer_id = toInt(cres?.insertId, 0) || (await getLastInsertId(t)) || null;
           }
-        }
-
-        if (!customer_id) {
-          const ins = { email: buyer_email };
-          if (ccols.has("first_name")) ins.first_name = buyer_name;
-          if (ccols.has("last_name")) ins.last_name = null;
-          if (ccols.has("phone")) ins.phone = buyer_phone || null;
-          if (ccols.has("doc_number")) ins.doc_number = buyer_doc || null;
-          if (ccols.has("created_at")) ins.created_at = new Date();
-          if (ccols.has("updated_at")) ins.updated_at = new Date();
-
-          const keys = Object.keys(ins);
-          const colsList = keys.join(", ");
-          const vals = keys.map((k) => `:${k}`).join(", ");
-
-          const [cres] = await sequelize.query(`INSERT INTO ecom_customers (${colsList}) VALUES (${vals})`, {
-            replacements: ins,
-            transaction: t,
-          });
-
-          customer_id = toInt(cres?.insertId, 0) || (await getLastInsertId(t)) || null;
         }
       }
 
@@ -670,6 +665,9 @@ async function checkout(req, res) {
           buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone, doc_number: buyer_doc || null },
           fulfillment_type,
           pickup_branch_id: pickup_branch_id || null,
+          // ✅ útil para debug: qué customer quedó asignado
+          session_customer_id: sessionCustomerId || null,
+          customer_id: customer_id || null,
         };
 
         const [pres] = await sequelize.query(
@@ -749,7 +747,6 @@ async function checkout(req, res) {
           items: orderItems,
         });
       } catch (e) {
-        // ✅ Si falla crear preferencia, devolvemos error con detalle útil
         return {
           error: {
             status: 400,
@@ -766,7 +763,6 @@ async function checkout(req, res) {
         };
       }
 
-      // ✅ En TEST usamos sandbox_init_point
       const redirect_url = mpCfg.mode === "test" ? mp.sandbox_init_point || mp.init_point || null : mp.init_point || null;
 
       const mpPayload = {
@@ -777,6 +773,9 @@ async function checkout(req, res) {
         buyer: { name: buyer_name, email: buyer_email, phone: buyer_phone, doc_number: buyer_doc || null },
         fulfillment_type,
         pickup_branch_id: pickup_branch_id || null,
+        // ✅ útil para debug: qué customer quedó asignado
+        session_customer_id: sessionCustomerId || null,
+        customer_id: customer_id || null,
       };
 
       const [pres2] = await sequelize.query(
