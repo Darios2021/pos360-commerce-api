@@ -1,5 +1,5 @@
-// src/app.js
 // ✅ COPY-PASTE FINAL COMPLETO
+// src/app.js
 //
 // - ✅ Mantiene: module.exports = { createApp }
 // - ✅ API en /api/v1
@@ -9,9 +9,11 @@
 // - ✅ FIX: desactiva ETag global + no-store para /api
 // - ✅ /favicon.ico dinámico (branding)
 // - ✅ No interfiere assets (/assets/*) del shop
+// - ✅ NUEVO: cookies httpOnly para Shop Auth (Google) con cookie-parser + trust proxy
 
 const express = require("express");
 const cors = require("cors");
+const cookieParser = require("cookie-parser"); // ✅ NUEVO
 const path = require("path");
 const fs = require("fs");
 
@@ -89,6 +91,11 @@ function createApp() {
   app.set("etag", false);
 
   // =====================
+  // ✅ NUEVO: trust proxy (CapRover / reverse proxy) -> cookies secure + ip real
+  // =====================
+  app.set("trust proxy", 1);
+
+  // =====================
   // CORS
   // =====================
   const allowedOriginsRaw = (process.env.CORS_ORIGINS || "")
@@ -136,6 +143,9 @@ function createApp() {
   // =====================
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+  // ✅ NUEVO: cookies (para sesiones SHOP httpOnly)
+  app.use(cookieParser());
 
   // =====================
   // ✅ Headers globales + Anti-cache para API

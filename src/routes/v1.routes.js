@@ -1,10 +1,16 @@
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/routes/v1.routes.js
-// ✅ COPY-PASTE FINAL COMPLETO (ANTI-CRASH + alineado a tu esquema actual)
+//
+// ✅ ANTI-CRASH + alineado a tu esquema actual
 // ✅ FIX: no rompe si NO existe publicLinks.routes / admin.shopLinks.routes
 // ✅ FIX: carga publicInstagram.routes (si existe)
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
 // ✅ NUEVO: monta /admin/shop/branches (opcional)
+// ✅ NUEVO: SHOP AUTH (Google + sesiones)
+//    - PUBLIC: POST /api/v1/public/auth/google
+//    - PUBLIC: GET  /api/v1/public/auth/me
+//    - PUBLIC: POST /api/v1/public/auth/logout
 // ✅ NUEVO: THEME
 //    - PUBLIC: GET  /api/v1/public/theme
 //    - ADMIN:  GET  /api/v1/admin/shop/theme
@@ -120,6 +126,9 @@ const authRoutes = require("./auth.routes");
 
 const publicEcomRoutes = require("./public.routes");
 const publicShopConfigRoutes = require("./public.shopConfig.routes");
+
+// ✅ SHOP AUTH (Google + sesiones)
+const publicShopAuthRoutes = require("./public.shopAuth.routes");
 
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = require("./publicProductVideos.routes");
@@ -251,6 +260,9 @@ safeUse("/auth", authRoutes);
 
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
+
+// ✅ SHOP AUTH (Google + sesiones)
+safeUse("/public", publicShopAuthRoutes);
 
 // ✅ Videos públicos por producto (GET /api/v1/public/products/:id/videos)
 safeUse("/public", publicProductVideosRoutes);

@@ -1,4 +1,6 @@
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/server.js
+
 require("dotenv").config();
 
 const { createApp } = require("./app");
