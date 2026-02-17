@@ -8,10 +8,8 @@
 // - POST   /favorites { product_id }
 // - DELETE /favorites/:product_id
 //
-// ✅ TU SCHEMA:
-// - product_images NO tiene "position" -> usamos MIN(id) y ORDER BY id
-// ✅ BLINDADO:
-// - try/catch en TODOS los handlers (evita crash / 502 por promise rejection)
+// ✅ product_images: usa sort_order (NO position)
+// ✅ try/catch en todo (evita 502 por crash)
 
 const db = require("../models");
 const sequelize = db.sequelize;
@@ -44,42 +42,31 @@ exports.getMyOrders = async (req, res) => {
         o.paid_at,
         o.cancelled_at,
 
-        COALESCE(cnt.items_count, 0) AS items_count,
+        (SELECT COUNT(*)
+         FROM ecom_order_items oi
+         WHERE oi.order_id = o.id) AS items_count,
 
-        fp.product_id AS first_product_id,
-        p.name AS first_product_name,
-        pi.url AS first_product_image_url
+        (SELECT oi.product_id
+         FROM ecom_order_items oi
+         WHERE oi.order_id = o.id
+         ORDER BY oi.id ASC
+         LIMIT 1) AS first_product_id,
+
+        (SELECT p.name
+         FROM ecom_order_items oi
+         JOIN products p ON p.id = oi.product_id
+         WHERE oi.order_id = o.id
+         ORDER BY oi.id ASC
+         LIMIT 1) AS first_product_name,
+
+        (SELECT pi.url
+         FROM ecom_order_items oi
+         JOIN product_images pi ON pi.product_id = oi.product_id
+         WHERE oi.order_id = o.id
+         ORDER BY pi.sort_order ASC, pi.id ASC
+         LIMIT 1) AS first_product_image_url
 
       FROM ecom_orders o
-
-      LEFT JOIN (
-        SELECT order_id, COUNT(*) AS items_count
-        FROM ecom_order_items
-        GROUP BY order_id
-      ) cnt ON cnt.order_id = o.id
-
-      -- primer item por order (min oi.id)
-      LEFT JOIN (
-        SELECT oi.order_id, oi.product_id
-        FROM ecom_order_items oi
-        JOIN (
-          SELECT order_id, MIN(id) AS min_id
-          FROM ecom_order_items
-          GROUP BY order_id
-        ) x ON x.order_id = oi.order_id AND x.min_id = oi.id
-      ) fp ON fp.order_id = o.id
-
-      LEFT JOIN products p ON p.id = fp.product_id
-
-      -- primera imagen por product (min product_images.id) (NO hay position)
-      LEFT JOIN (
-        SELECT product_id, MIN(id) AS min_image_id
-        FROM product_images
-        GROUP BY product_id
-      ) pim ON pim.product_id = fp.product_id
-
-      LEFT JOIN product_images pi ON pi.id = pim.min_image_id
-
       WHERE o.customer_id = :customerId
       ORDER BY o.created_at DESC
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
@@ -87,8 +74,8 @@ exports.getMyOrders = async (req, res) => {
 
     const countSql = `
       SELECT COUNT(*) AS total
-      FROM ecom_orders
-      WHERE customer_id = :customerId
+      FROM ecom_orders o
+      WHERE o.customer_id = :customerId
     `;
 
     const [items] = await sequelize.query(sql, { replacements: { customerId } });
@@ -97,7 +84,7 @@ exports.getMyOrders = async (req, res) => {
     const total = Number(countRows?.[0]?.total || 0);
     return res.json({ items, total, limit, offset });
   } catch (e) {
-    console.error("getMyOrders:", e?.message || e);
+    console.error("getMyOrders:", e);
     return res.status(500).json({ message: e?.message || "Error cargando compras" });
   }
 };
@@ -127,7 +114,7 @@ exports.getMyOrderDetail = async (req, res) => {
         (SELECT pi.url
          FROM product_images pi
          WHERE pi.product_id = oi.product_id
-         ORDER BY pi.id ASC
+         ORDER BY pi.sort_order ASC, pi.id ASC
          LIMIT 1) AS image_url
       FROM ecom_order_items oi
       JOIN products p ON p.id = oi.product_id
@@ -142,7 +129,7 @@ exports.getMyOrderDetail = async (req, res) => {
     const [items] = await sequelize.query(itemsSql, { replacements: { orderId } });
     return res.json({ order, items });
   } catch (e) {
-    console.error("getMyOrderDetail:", e?.message || e);
+    console.error("getMyOrderDetail:", e);
     return res.status(500).json({ message: e?.message || "Error cargando detalle" });
   }
 };
@@ -151,7 +138,6 @@ exports.getMyFavorites = async (req, res) => {
   try {
     const customerId = req.customer.id;
 
-    // ⚠️ si products NO tiene price, sacalo y listo
     const sql = `
       SELECT
         f.id,
@@ -162,7 +148,7 @@ exports.getMyFavorites = async (req, res) => {
         (SELECT pi.url
          FROM product_images pi
          WHERE pi.product_id = p.id
-         ORDER BY pi.id ASC
+         ORDER BY pi.sort_order ASC, pi.id ASC
          LIMIT 1) AS image_url
       FROM ecom_favorites f
       JOIN products p ON p.id = f.product_id
@@ -173,7 +159,7 @@ exports.getMyFavorites = async (req, res) => {
     const [items] = await sequelize.query(sql, { replacements: { customerId } });
     return res.json({ items });
   } catch (e) {
-    console.error("getMyFavorites:", e?.message || e);
+    console.error("getMyFavorites:", e);
     return res.status(500).json({ message: e?.message || "Error cargando favoritos" });
   }
 };
@@ -193,7 +179,7 @@ exports.addFavorite = async (req, res) => {
     await sequelize.query(sql, { replacements: { customerId, productId } });
     return res.json({ ok: true });
   } catch (e) {
-    console.error("addFavorite:", e?.message || e);
+    console.error("addFavorite:", e);
     return res.status(500).json({ message: e?.message || "Error guardando favorito" });
   }
 };
@@ -213,7 +199,7 @@ exports.removeFavorite = async (req, res) => {
     await sequelize.query(sql, { replacements: { customerId, productId } });
     return res.json({ ok: true });
   } catch (e) {
-    console.error("removeFavorite:", e?.message || e);
+    console.error("removeFavorite:", e);
     return res.status(500).json({ message: e?.message || "Error eliminando favorito" });
   }
 };
