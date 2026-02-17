@@ -11,7 +11,7 @@
 const express = require("express");
 const router = express.Router();
 
-const { requireShopCustomer } = require("../middlewares/requireShopCustomer.middleware");
+const { requireShopCustomer } = require("../middlewares/shopCustomerAuth.middleware");
 const c = require("../controllers/public.account.controller");
 
 // Orders
