@@ -32,7 +32,6 @@ const { requireAuth } = require("../middlewares/auth");
 // Helpers: Router-like + resolve exports
 // =========================
 function isRouterLike(mw) {
-  // Express Router suele ser function, pero algunos bundlers/devs exportan objeto con handle/stack
   if (!mw) return false;
   if (typeof mw === "function") return true;
   if (typeof mw === "object" && typeof mw.handle === "function" && Array.isArray(mw.stack)) return true;
@@ -63,6 +62,47 @@ function resolveFn(mod, candidates = []) {
   return null;
 }
 
+/**
+ * ✅ Loader fuerte: si un routes file exporta mal ({}), te dice exactamente cuál.
+ * - optional: si true, no rompe; solo loggea.
+ */
+function loadRoute(modulePath, { optional = false, candidates = ["middleware", "handler", "router", "default"] } = {}) {
+  let mod = null;
+
+  try {
+    mod = require(modulePath);
+  } catch (e) {
+    if (optional) {
+      // eslint-disable-next-line no-console
+      console.log(`⚠️ [v1.routes] opcional NO existe o falló require: ${modulePath}`);
+      return null;
+    }
+    // eslint-disable-next-line no-console
+    console.error(`❌ [v1.routes] REQUIRE FALLÓ: ${modulePath}`);
+    throw e;
+  }
+
+  const resolved = resolveFn(mod, candidates);
+
+  if (!resolved || !isRouterLike(resolved)) {
+    const keys = mod && typeof mod === "object" ? Object.keys(mod) : null;
+
+    // eslint-disable-next-line no-console
+    console.error("❌ [v1.routes] EXPORT INVÁLIDO en:", modulePath);
+    // eslint-disable-next-line no-console
+    console.error("   typeof:", typeof mod);
+    // eslint-disable-next-line no-console
+    console.error("   keys:", keys);
+    // eslint-disable-next-line no-console
+    console.error("   TIP: en ese archivo, al final poné: module.exports = router");
+
+    if (optional) return null;
+    throw new Error(`INVALID_ROUTE_EXPORT:${modulePath}`);
+  }
+
+  return resolved;
+}
+
 function safeUse(path, ...mws) {
   const final = [];
 
@@ -73,7 +113,7 @@ function safeUse(path, ...mws) {
       continue;
     }
 
-    const unwrapped = resolveFn(mw, ["middleware", "handler", "router"]);
+    const unwrapped = resolveFn(mw, ["middleware", "handler", "router", "default"]);
     if (isRouterLike(unwrapped)) {
       final.push(unwrapped);
       continue;
@@ -124,7 +164,7 @@ router.get("/_whoami", requireAuth, (req, res) => {
 // Middlewares “resueltos” (blindado)
 // =========================
 const branchContextMod = require("../middlewares/branchContext.middleware");
-const branchContext = resolveFn(branchContextMod, ["branchContext"]);
+const branchContext = resolveFn(branchContextMod, ["branchContext", "middleware", "handler", "default"]);
 if (!branchContext) {
   // eslint-disable-next-line no-console
   console.error("❌ branchContext NO resolvió a function/router. keys:", Object.keys(branchContextMod || {}));
@@ -132,7 +172,7 @@ if (!branchContext) {
 }
 
 const rbacMod = require("../middlewares/rbac.middleware");
-const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
+const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext", "middleware", "handler", "default"]);
 if (!attachAccessContext) {
   // eslint-disable-next-line no-console
   console.error("❌ attachAccessContext NO resolvió a function/router. keys:", Object.keys(rbacMod || {}));
@@ -142,133 +182,77 @@ if (!attachAccessContext) {
 // =========================
 // Public
 // =========================
-const healthRoutes = require("./health.routes");
-const authRoutes = require("./auth.routes");
+const healthRoutes = loadRoute("./health.routes", { optional: false });
+const authRoutes = loadRoute("./auth.routes", { optional: false });
 
-const publicEcomRoutes = require("./public.routes");
-const publicShopConfigRoutes = require("./public.shopConfig.routes");
+const publicEcomRoutes = loadRoute("./public.routes", { optional: false });
+const publicShopConfigRoutes = loadRoute("./public.shopConfig.routes", { optional: false });
 
 // ✅ SHOP AUTH (Google + sesiones)
-const publicShopAuthRoutes = require("./public.shopAuth.routes");
+const publicShopAuthRoutes = loadRoute("./public.shopAuth.routes", { optional: false });
 
-// ✅ MY ACCOUNT (historial)
-const publicMyAccountRoutes = require("./public.myAccount.routes");
+// ✅ MY ACCOUNT (historial) (si todavía no existe, ponelo optional:true)
+const publicMyAccountRoutes = loadRoute("./public.myAccount.routes", { optional: true });
 
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
-const publicProductVideosRoutes = require("./publicProductVideos.routes");
+const publicProductVideosRoutes = loadRoute("./publicProductVideos.routes", { optional: false });
 
 // ✅ videos feed global (GET /public/videos/feed)
-let publicVideosFeedRoutes = null;
-try {
-  publicVideosFeedRoutes = require("./publicVideosFeed.routes");
-} catch (e) {
-  publicVideosFeedRoutes = null;
-}
+const publicVideosFeedRoutes = loadRoute("./publicVideosFeed.routes", { optional: true });
 
 // ✅ THEME (public)
-let publicThemeRoutes = null;
-try {
-  publicThemeRoutes = require("./publicTheme.routes");
-} catch (e) {
-  publicThemeRoutes = null;
-}
+const publicThemeRoutes = loadRoute("./publicTheme.routes", { optional: true });
 
 // Ecommerce público
-const ecomCheckoutRoutes = require("./ecomCheckout.routes");
-const ecomPaymentsRoutes = require("./ecomPayments.routes");
+const ecomCheckoutRoutes = loadRoute("./ecomCheckout.routes", { optional: false });
+const ecomPaymentsRoutes = loadRoute("./ecomPayments.routes", { optional: false });
 
 // ✅ métodos de pago públicos (opcional)
-let publicPaymentMethodsRoutes = null;
-try {
-  publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
-} catch (e) {
-  // eslint-disable-next-line no-console
-  console.log("⚠️ publicPaymentMethodsRoutes no cargado (no existe todavía)");
-  publicPaymentMethodsRoutes = null;
-}
+const publicPaymentMethodsRoutes = loadRoute("./publicPaymentMethods.routes", { optional: true });
 
 // Links públicos (opcional)
-let publicLinksRoutes = null;
-try {
-  publicLinksRoutes = require("./publicLinks.routes");
-} catch (e) {
-  // eslint-disable-next-line no-console
-  console.log("⚠️ publicLinksRoutes no cargado (no existe todavía)");
-  publicLinksRoutes = null;
-}
+const publicLinksRoutes = loadRoute("./publicLinks.routes", { optional: true });
 
 // Instagram Graph (opcional)
-let publicInstagramRoutes = null;
-try {
-  publicInstagramRoutes = require("./publicInstagram.routes");
-} catch (e) {
-  publicInstagramRoutes = null;
-}
+const publicInstagramRoutes = loadRoute("./publicInstagram.routes", { optional: true });
 
 // =========================
 // Protected (operación)
 // =========================
-const productsRoutes = require("./products.routes");
-const categoriesRoutes = require("./categories.routes");
-const subcategoriesRoutes = require("./subcategories.routes");
-const branchesRoutes = require("./branches.routes");
-const warehousesRoutes = require("./warehouses.routes");
-const stockRoutes = require("./stock.routes");
-const dashboardRoutes = require("./dashboard.routes");
-const posRoutes = require("./pos.routes");
-const meRoutes = require("./me.routes");
+const productsRoutes = loadRoute("./products.routes", { optional: false });
+const categoriesRoutes = loadRoute("./categories.routes", { optional: false });
+const subcategoriesRoutes = loadRoute("./subcategories.routes", { optional: false });
+const branchesRoutes = loadRoute("./branches.routes", { optional: false });
+const warehousesRoutes = loadRoute("./warehouses.routes", { optional: false });
+const stockRoutes = loadRoute("./stock.routes", { optional: false });
+const dashboardRoutes = loadRoute("./dashboard.routes", { optional: false });
+const posRoutes = loadRoute("./pos.routes", { optional: false });
+const meRoutes = loadRoute("./me.routes", { optional: false });
 
 // =========================
 // Admin
 // =========================
-const adminUsersRoutes = require("./adminUsers.routes");
-const adminShopBrandingRoutes = require("./admin.shopBranding.routes");
-const adminShopOrdersRoutes = require("./admin.shopOrders.routes");
-const adminShopSettingsRoutes = require("./admin.shopSettings.routes");
-const adminShopPaymentsRoutes = require("./admin.shopPayments.routes");
+const adminUsersRoutes = loadRoute("./adminUsers.routes", { optional: false });
+const adminShopBrandingRoutes = loadRoute("./admin.shopBranding.routes", { optional: false });
+const adminShopOrdersRoutes = loadRoute("./admin.shopOrders.routes", { optional: false });
+const adminShopSettingsRoutes = loadRoute("./admin.shopSettings.routes", { optional: false });
+const adminShopPaymentsRoutes = loadRoute("./admin.shopPayments.routes", { optional: false });
 
 // ✅ THEME (admin)
-let adminShopThemeRoutes = null;
-try {
-  adminShopThemeRoutes = require("./admin.shopTheme.routes");
-} catch (e) {
-  adminShopThemeRoutes = null;
-}
+const adminShopThemeRoutes = loadRoute("./admin.shopTheme.routes", { optional: true });
 
 // ✅ admin videos
-const productVideosRoutes = require("./productVideos.routes");
+const productVideosRoutes = loadRoute("./productVideos.routes", { optional: false });
 
 // ✅ /admin/shop/branches (opcional)
-let adminShopBranchesRoutes = null;
-try {
-  adminShopBranchesRoutes = require("./admin.shopBranches.routes");
-} catch (e) {
-  // eslint-disable-next-line no-console
-  console.log("⚠️ adminShopBranchesRoutes no cargado (no existe todavía)");
-  adminShopBranchesRoutes = null;
-}
+const adminShopBranchesRoutes = loadRoute("./admin.shopBranches.routes", { optional: true });
 
 // Admin links (opcional)
-let adminShopLinksRoutes = null;
-try {
-  adminShopLinksRoutes = require("./admin.shopLinks.routes");
-} catch (e) {
-  // eslint-disable-next-line no-console
-  console.log("⚠️ adminShopLinksRoutes no cargado (no existe todavía)");
-  adminShopLinksRoutes = null;
-}
+const adminShopLinksRoutes = loadRoute("./admin.shopLinks.routes", { optional: true });
 
 // Admin media (fallback por nombre)
-let adminMediaRoutes = null;
-try {
-  adminMediaRoutes = require("./adminMedia.routes");
-} catch (e1) {
-  try {
-    adminMediaRoutes = require("./admin.media.routes");
-  } catch (e2) {
-    adminMediaRoutes = null;
-  }
-}
+const adminMediaRoutes =
+  loadRoute("./adminMedia.routes", { optional: true }) || loadRoute("./admin.media.routes", { optional: true });
 
 // =========================
 // Mount: Public
@@ -280,7 +264,7 @@ safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
 safeUse("/public", publicShopAuthRoutes);
-safeUse("/public", publicMyAccountRoutes);
+if (publicMyAccountRoutes) safeUse("/public", publicMyAccountRoutes);
 
 // Videos públicos por producto
 safeUse("/public", publicProductVideosRoutes);
