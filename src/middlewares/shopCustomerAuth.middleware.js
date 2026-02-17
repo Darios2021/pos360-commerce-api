@@ -3,33 +3,22 @@
 //
 // Objetivo:
 // - Exigir customer logueado para endpoints /public/account/*
-// - Reusar lo que ya tengas en /public/auth/me (cookie httpOnly)
+// - Reusar exactamente el mismo resolver que ya usás en /public/auth/me
 //
-// Cómo funciona:
-// - Si ya existe req.customer (porque algún middleware anterior lo setea), lo usa.
-// - Si no, intenta llamar a un hook `resolveCustomerFromRequest(req)` que vos tenés que conectar
-//   a tu implementación real de sesión/cookie (la misma que usa /public/auth/me).
+// Resultado:
+// - Si hay cookie válida -> req.customer seteado y next()
+// - Si no -> 401 { message: "No autenticado" }
 
-const { sequelize } = require("../config/sequelize"); // ajustá si tu export difiere
-
-async function resolveCustomerFromRequest(req) {
-  // ✅ TODO: conectá tu implementación real
-  // Buscá en tu backend dónde resolvés el customer en /public/auth/me y pegalo acá.
-  //
-  // Ejemplos típicos:
-  // - leer cookie "shop_session" y buscar en ecom_customer_sessions
-  // - validar JWT/cookie y cargar ecom_customers
-  //
-  // Si querés, pegá el código de tu endpoint /public/auth/me y te lo adapto exacto.
-
-  return null;
-}
+const { getShopCustomerFromRequest } = require("../services/shopSession.service");
 
 module.exports.requireShopCustomer = async (req, res, next) => {
   try {
+    // Si ya viene seteado por otro middleware, ok
     if (req.customer && req.customer.id) return next();
 
-    const customer = await resolveCustomerFromRequest(req);
+    // ✅ Reuso directo del resolver real
+    const customer = await getShopCustomerFromRequest(req);
+
     if (customer && customer.id) {
       req.customer = customer;
       return next();
