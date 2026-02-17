@@ -2,6 +2,7 @@
 // src/routes/v1.routes.js
 //
 // ✅ ANTI-CRASH + alineado a tu esquema actual
+// ✅ FIX: soporta routers exportados como function O como "router-like object" (handle/stack)
 // ✅ FIX: no rompe si NO existe publicLinks.routes / admin.shopLinks.routes
 // ✅ FIX: carga publicInstagram.routes (si existe)
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
@@ -20,7 +21,7 @@
 //             PUT  /api/v1/admin/shop/theme
 // ✅ VIDEOS (FINAL):
 //    - PUBLIC:  GET /public/products/:id/videos     (sin auth)
-//    - PUBLIC:  GET /public/videos/feed             (sin auth) ✅ NUEVO (HOME FEED)
+//    - PUBLIC:  GET /public/videos/feed             (sin auth)
 //    - ADMIN:   GET/POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
 // ✅ OPCIONAL (compat): GET /products/:id/videos (sin auth) como ALIAS al public
 
@@ -28,20 +29,36 @@ const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
 
 // =========================
-// Helpers: resolve function exports (default/named/module.exports)
+// Helpers: Router-like + resolve exports
 // =========================
+function isRouterLike(mw) {
+  // Express Router suele ser function, pero algunos bundlers/devs exportan objeto con handle/stack
+  if (!mw) return false;
+  if (typeof mw === "function") return true;
+  if (typeof mw === "object" && typeof mw.handle === "function" && Array.isArray(mw.stack)) return true;
+  return false;
+}
+
 function resolveFn(mod, candidates = []) {
   if (typeof mod === "function") return mod;
   if (!mod || typeof mod !== "object") return null;
 
-  if (typeof mod.default === "function") return mod.default;
+  // Router-like object directo
+  if (isRouterLike(mod)) return mod;
 
+  // ESM default
+  if (mod.default && (typeof mod.default === "function" || isRouterLike(mod.default))) return mod.default;
+
+  // named candidates
   for (const k of candidates) {
-    if (typeof mod[k] === "function") return mod[k];
+    const v = mod[k];
+    if (typeof v === "function" || isRouterLike(v)) return v;
   }
 
-  const fnKeys = Object.keys(mod).filter((k) => typeof mod[k] === "function");
-  if (fnKeys.length === 1) return mod[fnKeys[0]];
+  // único export function/router-like
+  const keys = Object.keys(mod);
+  const usable = keys.filter((k) => typeof mod[k] === "function" || isRouterLike(mod[k]));
+  if (usable.length === 1) return mod[usable[0]];
 
   return null;
 }
@@ -50,13 +67,14 @@ function safeUse(path, ...mws) {
   const final = [];
 
   for (const mw of mws) {
-    if (typeof mw === "function") {
+    // ✅ Acepta function o router-like object
+    if (isRouterLike(mw)) {
       final.push(mw);
       continue;
     }
 
-    const unwrapped = resolveFn(mw, ["middleware", "handler"]);
-    if (typeof unwrapped === "function") {
+    const unwrapped = resolveFn(mw, ["middleware", "handler", "router"]);
+    if (isRouterLike(unwrapped)) {
       final.push(unwrapped);
       continue;
     }
@@ -109,7 +127,7 @@ const branchContextMod = require("../middlewares/branchContext.middleware");
 const branchContext = resolveFn(branchContextMod, ["branchContext"]);
 if (!branchContext) {
   // eslint-disable-next-line no-console
-  console.error("❌ branchContext NO resolvió a function. keys:", Object.keys(branchContextMod || {}));
+  console.error("❌ branchContext NO resolvió a function/router. keys:", Object.keys(branchContextMod || {}));
   throw new Error("BRANCH_CONTEXT_INVALID_EXPORT");
 }
 
@@ -117,7 +135,7 @@ const rbacMod = require("../middlewares/rbac.middleware");
 const attachAccessContext = resolveFn(rbacMod, ["attachAccessContext"]);
 if (!attachAccessContext) {
   // eslint-disable-next-line no-console
-  console.error("❌ attachAccessContext NO resolvió a function. keys:", Object.keys(rbacMod || {}));
+  console.error("❌ attachAccessContext NO resolvió a function/router. keys:", Object.keys(rbacMod || {}));
   throw new Error("RBAC_INVALID_EXPORT");
 }
 
@@ -139,7 +157,7 @@ const publicMyAccountRoutes = require("./public.myAccount.routes");
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = require("./publicProductVideos.routes");
 
-// ✅ videos feed global (GET /public/videos/feed) ✅ NUEVO
+// ✅ videos feed global (GET /public/videos/feed)
 let publicVideosFeedRoutes = null;
 try {
   publicVideosFeedRoutes = require("./publicVideosFeed.routes");
@@ -165,9 +183,7 @@ try {
   publicPaymentMethodsRoutes = require("./publicPaymentMethods.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ publicPaymentMethodsRoutes no cargado (routes/publicPaymentMethods.routes.js no existe todavía)"
-  );
+  console.log("⚠️ publicPaymentMethodsRoutes no cargado (no existe todavía)");
   publicPaymentMethodsRoutes = null;
 }
 
@@ -177,7 +193,7 @@ try {
   publicLinksRoutes = require("./publicLinks.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log("⚠️ publicLinksRoutes no cargado (routes/publicLinks.routes.js no existe todavía)");
+  console.log("⚠️ publicLinksRoutes no cargado (no existe todavía)");
   publicLinksRoutes = null;
 }
 
@@ -193,14 +209,12 @@ try {
 // Protected (operación)
 // =========================
 const productsRoutes = require("./products.routes");
-
 const categoriesRoutes = require("./categories.routes");
 const subcategoriesRoutes = require("./subcategories.routes");
 const branchesRoutes = require("./branches.routes");
 const warehousesRoutes = require("./warehouses.routes");
 const stockRoutes = require("./stock.routes");
 const dashboardRoutes = require("./dashboard.routes");
-
 const posRoutes = require("./pos.routes");
 const meRoutes = require("./me.routes");
 
@@ -221,7 +235,7 @@ try {
   adminShopThemeRoutes = null;
 }
 
-// ✅ admin videos (GET/POST/UPLOAD/DELETE)
+// ✅ admin videos
 const productVideosRoutes = require("./productVideos.routes");
 
 // ✅ /admin/shop/branches (opcional)
@@ -230,9 +244,7 @@ try {
   adminShopBranchesRoutes = require("./admin.shopBranches.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log(
-    "⚠️ adminShopBranchesRoutes no cargado (routes/admin.shopBranches.routes.js no existe todavía)"
-  );
+  console.log("⚠️ adminShopBranchesRoutes no cargado (no existe todavía)");
   adminShopBranchesRoutes = null;
 }
 
@@ -242,7 +254,7 @@ try {
   adminShopLinksRoutes = require("./admin.shopLinks.routes");
 } catch (e) {
   // eslint-disable-next-line no-console
-  console.log("⚠️ adminShopLinksRoutes no cargado (routes/admin.shopLinks.routes.js no existe todavía)");
+  console.log("⚠️ adminShopLinksRoutes no cargado (no existe todavía)");
   adminShopLinksRoutes = null;
 }
 
@@ -267,29 +279,26 @@ safeUse("/auth", authRoutes);
 safeUse("/public", publicEcomRoutes);
 safeUse("/public", publicShopConfigRoutes);
 
-// ✅ SHOP AUTH (Google + sesiones)
 safeUse("/public", publicShopAuthRoutes);
-
-// ✅ MY ACCOUNT (historial)
 safeUse("/public", publicMyAccountRoutes);
 
-// ✅ Videos públicos por producto (GET /api/v1/public/products/:id/videos)
+// Videos públicos por producto
 safeUse("/public", publicProductVideosRoutes);
 
-// ✅ Videos feed global para Home (GET /api/v1/public/videos/feed)
+// Videos feed global para Home
 if (publicVideosFeedRoutes) safeUse("/public", publicVideosFeedRoutes);
 
-// ✅ OPCIONAL (compat): GET /api/v1/products/:id/videos (alias al public)
+// Compat alias
 safeUse("/", publicProductVideosRoutes);
 
-// ✅ THEME (si existe routes file)
+// Theme
 if (publicThemeRoutes) safeUse("/public", publicThemeRoutes);
 
 if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
 
-// ✅ Ecommerce
+// Ecommerce
 safeUse("/ecom", ecomCheckoutRoutes);
 safeUse("/ecom", ecomPaymentsRoutes);
 
@@ -318,7 +327,6 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
 
-// ✅ THEME admin (si existe routes file)
 if (adminShopThemeRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopThemeRoutes);
 }
@@ -331,7 +339,7 @@ if (adminShopLinksRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
 }
 
-// ✅ ADMIN videos: /api/v1/admin/products/:id/videos
+// Admin videos: /api/v1/admin/products/:id/videos
 safeUse("/admin/products", requireAuth, attachAccessContext, branchContext, productVideosRoutes);
 
 // Admin media
