@@ -11,6 +11,9 @@
 //    - PUBLIC: POST /api/v1/public/auth/google
 //    - PUBLIC: GET  /api/v1/public/auth/me
 //    - PUBLIC: POST /api/v1/public/auth/logout
+// ✅ NUEVO: MY ACCOUNT (historial)
+//    - PUBLIC: GET  /api/v1/public/my/orders
+//    - PUBLIC: GET  /api/v1/public/my/orders/:id
 // ✅ NUEVO: THEME
 //    - PUBLIC: GET  /api/v1/public/theme
 //    - ADMIN:  GET  /api/v1/admin/shop/theme
@@ -129,6 +132,9 @@ const publicShopConfigRoutes = require("./public.shopConfig.routes");
 
 // ✅ SHOP AUTH (Google + sesiones)
 const publicShopAuthRoutes = require("./public.shopAuth.routes");
+
+// ✅ MY ACCOUNT (historial)
+const publicMyAccountRoutes = require("./public.myAccount.routes");
 
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = require("./publicProductVideos.routes");
@@ -263,6 +269,9 @@ safeUse("/public", publicShopConfigRoutes);
 
 // ✅ SHOP AUTH (Google + sesiones)
 safeUse("/public", publicShopAuthRoutes);
+
+// ✅ MY ACCOUNT (historial)
+safeUse("/public", publicMyAccountRoutes);
 
 // ✅ Videos públicos por producto (GET /api/v1/public/products/:id/videos)
 safeUse("/public", publicProductVideosRoutes);

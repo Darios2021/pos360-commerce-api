@@ -9,11 +9,11 @@
 // - ✅ FIX: desactiva ETag global + no-store para /api
 // - ✅ /favicon.ico dinámico (branding)
 // - ✅ No interfiere assets (/assets/*) del shop
-// - ✅ NUEVO: cookies httpOnly para Shop Auth (Google) con cookie-parser + trust proxy
+// - ✅ cookies httpOnly para Shop Auth (Google) con cookie-parser + trust proxy
 
 const express = require("express");
 const cors = require("cors");
-const cookieParser = require("cookie-parser"); // ✅ NUEVO
+const cookieParser = require("cookie-parser");
 const path = require("path");
 const fs = require("fs");
 
@@ -47,7 +47,6 @@ function resolveShopDistDir() {
   const fromEnv = safeStr(process.env.SHOP_DIST_DIR);
   if (fromEnv) return fromEnv;
 
-  // intentos razonables (ajustá si tu estructura es distinta)
   // /src/app.js  -> projectRoot/...
   const projectRoot = path.resolve(__dirname, "..");
   const try1 = path.join(projectRoot, "shop", "dist");
@@ -62,7 +61,6 @@ function resolveShopDistDir() {
 }
 
 async function getBrandingRow() {
-  // Adaptable: si tu modelo se llama distinto, lo detectamos por keys comunes
   const candidates = [
     db.ShopBranding,
     db.shop_branding,
@@ -78,21 +76,16 @@ async function getBrandingRow() {
       if (row) return row;
     }
   }
-
   return null;
 }
 
 function createApp() {
   const app = express();
 
-  // =====================
-  // ✅ FIX CLAVE: desactivar ETag (evita 304 Not Modified raros)
-  // =====================
+  // ✅ desactivar ETag global
   app.set("etag", false);
 
-  // =====================
-  // ✅ NUEVO: trust proxy (CapRover / reverse proxy) -> cookies secure + ip real
-  // =====================
+  // ✅ trust proxy (CapRover / reverse proxy)
   app.set("trust proxy", 1);
 
   // =====================
@@ -139,16 +132,14 @@ function createApp() {
   app.options("*", cors(corsOptions));
 
   // =====================
-  // Parsers
+  // Parsers + cookies
   // =====================
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-  // ✅ NUEVO: cookies (para sesiones SHOP httpOnly)
   app.use(cookieParser());
 
   // =====================
-  // ✅ Headers globales + Anti-cache para API
+  // Headers globales + Anti-cache para API
   // =====================
   app.use((req, res, next) => {
     const serviceName = process.env.SERVICE_NAME || "pos360-commerce-api";
@@ -168,7 +159,7 @@ function createApp() {
   });
 
   // =====================
-  // ✅ Request logger (DEBUG)
+  // Request logger (DEBUG)
   // =====================
   app.use((req, res, next) => {
     const started = Date.now();
@@ -188,7 +179,7 @@ function createApp() {
   });
 
   // =====================
-  // ✅ HEALTH de la API (no pisar el home del shop)
+  // HEALTH API
   // =====================
   app.get("/api", (req, res) => {
     res.json({
@@ -201,12 +192,11 @@ function createApp() {
   });
 
   // =========================================================
-  // ✅ SHOP (WordPress-like): HEAD server-side + dist estático
+  // SHOP: HEAD server-side + dist estático
   // =========================================================
-  const enableShop = envBool("ENABLE_SHOP", true); // default true (si hay dist)
+  const enableShop = envBool("ENABLE_SHOP", true);
   const shopDistDir = resolveShopDistDir();
 
-  // Base pública del dominio (para canonical/og:url y abs de assets)
   const shopPublicBase =
     safeStr(process.env.SHOP_PUBLIC_BASE_URL) ||
     safeStr(process.env.PUBLIC_BASE_URL) ||
@@ -215,17 +205,14 @@ function createApp() {
   if (enableShop && shopDistDir && fs.existsSync(path.join(shopDistDir, "index.html"))) {
     console.log("🛍️ SHOP habilitado:", shopDistDir);
 
-    // ✅ favicon.ico dinámico desde branding (como WP)
     app.get("/favicon.ico", async (req, res) => {
       try {
         const row = await getBrandingRow();
         const fav = safeStr(row?.favicon_url);
         if (!fav) return res.status(204).end();
 
-        // absoluto
         if (/^https?:\/\//i.test(fav)) return res.redirect(302, fav);
 
-        // relativo
         const base = shopPublicBase.replace(/\/+$/, "");
         const abs = `${base}${fav.startsWith("/") ? "" : "/"}${fav}`;
         return res.redirect(302, abs);
@@ -234,18 +221,16 @@ function createApp() {
       }
     });
 
-    // ✅ Inyector del <head> (OG + title + favicon) desde DB
-    // IMPORTANTE: va ANTES de express.static
+    // Inyector del <head> desde DB (antes de static)
     app.use(
       createShopHeadInjector({
         distDir: shopDistDir,
         models: db,
         publicBaseUrl: shopPublicBase,
-        cacheSeconds: 30, // cambios del admin se reflejan rápido
+        cacheSeconds: 30,
       })
     );
 
-    // ✅ assets del dist (JS/CSS/img)
     app.use(express.static(shopDistDir, { maxAge: "1h", etag: true }));
   } else {
     console.log("ℹ️ SHOP no montado (falta dist o está deshabilitado).", {
@@ -264,9 +249,6 @@ function createApp() {
     throw new Error("INVALID_V1_ROUTES_EXPORT");
   }
 
-  // ✅ Montamos v1 en DOS lugares:
-  // 1) /api/v1  -> cuando llega completo (sin strip)
-  // 2) /        -> cuando el reverse proxy (CapRover path routing) strippea /api/v1
   app.use("/api/v1", v1Routes);
   app.use("/", v1Routes);
 
