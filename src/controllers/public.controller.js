@@ -1,7 +1,10 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL (pasa strict_search + exclude_terms + SHOP BRANDING + PAYMENT CONFIG)
-// ✅ + NUEVO: /public/products/:id/media (imágenes para cards ML-like, SIN AUTH, SIN branch_id)
-// ✅ + FIX: pasa brands/model/sort al service
+// ✅ COPY-PASTE FINAL COMPLETO
+// ✅ FIX: branch_id opcional (usa default por ENV o primer branch activo)
+// - /public/catalog, /public/suggestions, /public/products/:id ya NO fallan si falta branch_id
+// - respeta branch_id si viene en query
+// - mantiene strict_search + exclude_terms + filtros brands/model/sort
+// - branding + payment config + product media sin branch_id
 
 const PublicService = require("../services/public.service");
 
@@ -27,6 +30,33 @@ function toCsvList(v) {
     .split(",")
     .map((x) => String(x).trim())
     .filter(Boolean);
+}
+
+/**
+ * ✅ resolveBranchId:
+ * - si viene ?branch_id= => lo usa
+ * - si no viene:
+ *    1) usa ENV SHOP_DEFAULT_BRANCH_ID si existe
+ *    2) si no existe, usa el primer branch activo (ORDER BY id ASC)
+ *
+ * Config:
+ *   SHOP_DEFAULT_BRANCH_ID=1  (Casa Central)
+ */
+async function resolveBranchId(req) {
+  const q = toInt(req.query.branch_id, 0);
+  if (q) return q;
+
+  const envDefault = toInt(process.env.SHOP_DEFAULT_BRANCH_ID, 0);
+  if (envDefault) return envDefault;
+
+  // fallback DB: primer branch activo
+  try {
+    const branches = await PublicService.listBranches();
+    const first = Array.isArray(branches) ? branches.find((b) => toInt(b.id, 0) > 0) : null;
+    return toInt(first?.id, 0) || 0;
+  } catch {
+    return 0;
+  }
 }
 
 module.exports = {
@@ -83,12 +113,12 @@ module.exports = {
 
   async listCatalog(req, res) {
     try {
-      const branch_id = toInt(req.query.branch_id);
+      const branch_id = await resolveBranchId(req);
       if (!branch_id) {
         return res.status(400).json({
           ok: false,
           code: "VALIDATION_ERROR",
-          message: "branch_id es obligatorio",
+          message: "No se pudo resolver branch_id (configurá SHOP_DEFAULT_BRANCH_ID o activá una sucursal)",
         });
       }
 
@@ -106,13 +136,13 @@ module.exports = {
         strict_search: toBoolLike(req.query.strict_search, false),
         exclude_terms: toStr(req.query.exclude_terms),
 
-        // ✅ FIX: filtros reales
+        // ✅ filtros reales
         brands: toCsvList(req.query.brands), // "XAEA,ONLY"
         model: toStr(req.query.model),       // "POCKET 15W"
         sort: toStr(req.query.sort),         // price_asc|price_desc|newest|name_asc
       });
 
-      return res.json({ ok: true, ...result });
+      return res.json({ ok: true, branch_id, ...result });
     } catch (err) {
       console.error("PUBLIC_CATALOG_ERROR", err);
       return res.status(500).json({
@@ -125,12 +155,12 @@ module.exports = {
 
   async listSuggestions(req, res) {
     try {
-      const branch_id = toInt(req.query.branch_id);
+      const branch_id = await resolveBranchId(req);
       if (!branch_id) {
         return res.status(400).json({
           ok: false,
           code: "VALIDATION_ERROR",
-          message: "branch_id es obligatorio",
+          message: "No se pudo resolver branch_id (configurá SHOP_DEFAULT_BRANCH_ID o activá una sucursal)",
         });
       }
 
@@ -138,7 +168,7 @@ module.exports = {
       const limit = Math.min(20, Math.max(1, toInt(req.query.limit, 8)));
 
       const items = await PublicService.listSuggestions({ branch_id, q, limit });
-      return res.json({ ok: true, items });
+      return res.json({ ok: true, branch_id, items });
     } catch (err) {
       console.error("PUBLIC_SUGGESTIONS_ERROR", err);
       return res.status(500).json({
@@ -151,14 +181,21 @@ module.exports = {
 
   async getProductById(req, res) {
     try {
-      const branch_id = toInt(req.query.branch_id);
+      const branch_id = await resolveBranchId(req);
       const product_id = toInt(req.params.id);
 
-      if (!branch_id || !product_id) {
+      if (!product_id) {
         return res.status(400).json({
           ok: false,
           code: "VALIDATION_ERROR",
-          message: "branch_id e id son obligatorios",
+          message: "id es obligatorio",
+        });
+      }
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "No se pudo resolver branch_id (configurá SHOP_DEFAULT_BRANCH_ID o activá una sucursal)",
         });
       }
 
@@ -171,7 +208,7 @@ module.exports = {
         });
       }
 
-      return res.json({ ok: true, item });
+      return res.json({ ok: true, branch_id, item });
     } catch (err) {
       console.error("PUBLIC_PRODUCT_ERROR", err);
       return res.status(500).json({
