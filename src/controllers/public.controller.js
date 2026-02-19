@@ -1,11 +1,11 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO
-// ✅ FIX: branch_id opcional (usa default por ENV o primer branch activo)
-// - /public/catalog, /public/suggestions, /public/products/:id ya NO fallan si falta branch_id
-// - respeta branch_id si viene en query
-// - mantiene strict_search + exclude_terms + filtros brands/model/sort
-// - branding + payment config + product media sin branch_id
+// ✅ COPY-PASTE FINAL COMPLETO (FIX /public/products/:id)
+// ✅ FIX: handler Express real (req,res)
+// ✅ FIX: sequelize importado
+// ✅ FIX: sin funciones inexistentes (getStockByBranchMap)
+// ✅ Usa v_public_catalog + product_images + v_stock_by_branch_product
 
+const { sequelize } = require("../models");
 const PublicService = require("../services/public.service");
 
 function toInt(v, d = 0) {
@@ -38,9 +38,6 @@ function toCsvList(v) {
  * - si no viene:
  *    1) usa ENV SHOP_DEFAULT_BRANCH_ID si existe
  *    2) si no existe, usa el primer branch activo (ORDER BY id ASC)
- *
- * Config:
- *   SHOP_DEFAULT_BRANCH_ID=1  (Casa Central)
  */
 async function resolveBranchId(req) {
   const q = toInt(req.query.branch_id, 0);
@@ -49,7 +46,6 @@ async function resolveBranchId(req) {
   const envDefault = toInt(process.env.SHOP_DEFAULT_BRANCH_ID, 0);
   if (envDefault) return envDefault;
 
-  // fallback DB: primer branch activo
   try {
     const branches = await PublicService.listBranches();
     const first = Array.isArray(branches) ? branches.find((b) => toInt(b.id, 0) > 0) : null;
@@ -57,6 +53,96 @@ async function resolveBranchId(req) {
   } catch {
     return 0;
   }
+}
+
+async function getProductInternal({ branch_id, product_id }) {
+  const bid = toInt(branch_id, 0);
+  const pid = toInt(product_id, 0);
+  if (!pid) return null;
+
+  let item = null;
+
+  // 1) buscar por branch si hay
+  if (bid) {
+    const [rows] = await sequelize.query(
+      `
+      SELECT *
+      FROM v_public_catalog
+      WHERE is_active = 1
+        AND branch_id = :branch_id
+        AND product_id = :product_id
+      LIMIT 1
+      `,
+      { replacements: { branch_id: bid, product_id: pid } }
+    );
+    item = rows?.[0] || null;
+  }
+
+  // 2) fallback: cualquier sucursal activa (prioriza 1)
+  if (!item) {
+    const [rowsAny] = await sequelize.query(
+      `
+      SELECT vc.*
+      FROM v_public_catalog vc
+      INNER JOIN branches b
+        ON b.id = vc.branch_id
+       AND b.is_active = 1
+      WHERE vc.is_active = 1
+        AND vc.product_id = :product_id
+      ORDER BY (vc.branch_id = 1) DESC, vc.branch_id ASC
+      LIMIT 1
+      `,
+      { replacements: { product_id: pid } }
+    );
+    item = rowsAny?.[0] || null;
+  }
+
+  if (!item) return null;
+
+  // ✅ imágenes múltiples
+  const [imgs] = await sequelize.query(
+    `
+    SELECT id, url, sort_order
+    FROM product_images
+    WHERE product_id = :product_id
+    ORDER BY sort_order ASC, id ASC
+    `,
+    { replacements: { product_id: pid } }
+  );
+
+  const images = (imgs || [])
+    .map((r) => ({
+      id: Number(r.id),
+      url: String(r.url || "").trim(),
+      sort_order: Number(r.sort_order || 0),
+    }))
+    .filter((x) => x.url);
+
+  item.images = images;
+  item.image_urls = images.map((x) => x.url);
+
+  if (!String(item.image_url || "").trim() && item.image_urls.length) {
+    item.image_url = item.image_urls[0];
+  }
+
+  // ✅ stock_qty de la branch elegida (si no hay branch, queda 0)
+  if (bid) {
+    const [rowsStock] = await sequelize.query(
+      `
+      SELECT qty
+      FROM v_stock_by_branch_product
+      WHERE product_id = :product_id
+        AND branch_id = :branch_id
+      LIMIT 1
+      `,
+      { replacements: { product_id: pid, branch_id: bid } }
+    );
+    item.stock_qty = Number(rowsStock?.[0]?.qty || 0);
+  } else {
+    item.stock_qty = Number(item.stock_qty || 0);
+  }
+
+  return item;
 }
 
 module.exports = {
@@ -131,15 +217,11 @@ module.exports = {
         in_stock: toBoolLike(req.query.in_stock, false),
         page: Math.max(1, toInt(req.query.page, 1)),
         limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
-
-        // ✅ strict_search + exclude_terms
         strict_search: toBoolLike(req.query.strict_search, false),
         exclude_terms: toStr(req.query.exclude_terms),
-
-        // ✅ filtros reales
-        brands: toCsvList(req.query.brands), // "XAEA,ONLY"
-        model: toStr(req.query.model),       // "POCKET 15W"
-        sort: toStr(req.query.sort),         // price_asc|price_desc|newest|name_asc
+        brands: toCsvList(req.query.brands),
+        model: toStr(req.query.model),
+        sort: toStr(req.query.sort),
       });
 
       return res.json({ ok: true, branch_id, ...result });
@@ -179,89 +261,37 @@ module.exports = {
     }
   },
 
-  // =========================
-  // Producto individual (✅ con imágenes múltiples)
-  // =========================
-  async getProductById({ branch_id, product_id }) {
-    const bid = toInt(branch_id, 0);
-    const pid = toInt(product_id, 0);
-    if (!pid) return null;
+  // ✅ ESTE ES EL ENDPOINT REAL PARA SHOP:
+  // GET /api/v1/public/products/:id?branch_id=3
+  async getProduct(req, res) {
+    try {
+      const product_id = toInt(req.params.id, 0);
+      if (!product_id) {
+        return res.status(400).json({ ok: false, code: "VALIDATION_ERROR", message: "id inválido" });
+      }
 
-    // 1) Intento principal: por sucursal (como antes)
-    let item = null;
+      const branch_id = await resolveBranchId(req);
 
-    if (bid) {
-      const [rows] = await sequelize.query(
-        `
-        SELECT *
-        FROM v_public_catalog
-        WHERE is_active = 1
-          AND branch_id = :branch_id
-          AND product_id = :product_id
-        LIMIT 1
-        `,
-        { replacements: { branch_id: bid, product_id: pid } }
-      );
+      // si existiera en service, lo usamos; sino usamos el internal
+      const item =
+        (typeof PublicService.getProductById === "function"
+          ? await PublicService.getProductById({ branch_id, product_id })
+          : await getProductInternal({ branch_id, product_id })) || null;
 
-      item = rows?.[0] || null;
+      if (!item) {
+        return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
+      }
+
+      return res.json({ ok: true, branch_id, item });
+    } catch (err) {
+      console.error("PUBLIC_PRODUCT_ERROR", err);
+      return res.status(500).json({
+        ok: false,
+        code: "PUBLIC_PRODUCT_ERROR",
+        message: err?.message || "Error trayendo producto",
+      });
     }
-
-    // 2) Fallback: si no existe en esa sucursal, buscar en cualquier sucursal activa
-    //    (prioriza Casa Central = 1, luego por menor branch_id)
-    if (!item) {
-      const [rowsAny] = await sequelize.query(
-        `
-        SELECT vc.*
-        FROM v_public_catalog vc
-        INNER JOIN branches b
-          ON b.id = vc.branch_id
-         AND b.is_active = 1
-        WHERE vc.is_active = 1
-          AND vc.product_id = :product_id
-        ORDER BY (vc.branch_id = 1) DESC, vc.branch_id ASC
-        LIMIT 1
-        `,
-        { replacements: { product_id: pid } }
-      );
-
-      item = rowsAny?.[0] || null;
-    }
-
-    if (!item) return null;
-
-    // ✅ imágenes múltiples
-    const [imgs] = await sequelize.query(
-      `
-      SELECT id, url, sort_order
-      FROM product_images
-      WHERE product_id = :product_id
-      ORDER BY sort_order ASC, id ASC
-      `,
-      { replacements: { product_id: pid } }
-    );
-
-    const images = (imgs || [])
-      .map((r) => ({
-        id: Number(r.id),
-        url: String(r.url || "").trim(),
-        sort_order: Number(r.sort_order || 0),
-      }))
-      .filter((x) => x.url);
-
-    item.images = images;
-    item.image_urls = images.map((x) => x.url);
-
-    if (!String(item.image_url || "").trim() && item.image_urls.length) {
-      item.image_url = item.image_urls[0];
-    }
-
-    // ✅ stock por sucursal (para pickup / validación)
-    const stockMap = await getStockByBranchMap([pid]);
-    item.stock_by_branch = stockMap[pid] || [];
-
-    return item;
   },
-
 
   async getProductMedia(req, res) {
     try {
