@@ -1,10 +1,11 @@
 // src/controllers/public.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FIX /public/products/:id)
+// ✅ COPY-PASTE FINAL COMPLETO (FIX STOCK EN SHOP)
 // ✅ FIX: handler Express real (req,res)
 // ✅ FIX: sequelize importado
-// ✅ FIX: sin funciones inexistentes
-// ✅ Usa v_public_catalog + product_images + v_stock_by_branch_product
-// ✅ FIX CRÍTICO: stock_qty normalizado (evita "Sin stock" si viene "1.000" string)
+// ✅ FIX CRÍTICO: si PublicService.getProductById existe pero NO trae stock_qty,
+//               lo completamos desde v_stock_by_branch_product (sucursal correcta)
+// ✅ Usa: v_public_catalog + product_images + v_stock_by_branch_product
+// ✅ Normaliza "2.000" / "1,000" / "1000" etc.
 
 const { sequelize } = require("../models");
 const PublicService = require("../services/public.service");
@@ -39,28 +40,28 @@ function toCsvList(v) {
     .filter(Boolean);
 }
 
-// ✅ FIX: parse robusto para números que vienen como "1.000" (miles) o "1,000"
+// ✅ FIX: parse robusto para números que vienen como "2.000" (miles con punto) o "2,000"
 function toQtyNumber(v) {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
 
-  const s = String(v).trim();
-  if (!s) return 0;
+  const s0 = String(v).trim();
+  if (!s0) return 0;
 
-  // "1.000" (miles con punto) => 1000
-  if (/\.\d{3}$/.test(s) && !s.includes(",")) {
-    const n = Number(s.replace(/\./g, ""));
+  // "2.000" => 2000 (miles con punto)
+  if (/\.\d{3}$/.test(s0) && !s0.includes(",")) {
+    const n = Number(s0.replace(/\./g, ""));
     return Number.isFinite(n) ? n : 0;
   }
 
-  // "1,000" (miles con coma) => 1000
-  if (/,\d{3}$/.test(s) && !s.includes(".")) {
-    const n = Number(s.replace(/,/g, ""));
+  // "2,000" => 2000 (miles con coma)
+  if (/,\d{3}$/.test(s0) && !s0.includes(".")) {
+    const n = Number(s0.replace(/,/g, ""));
     return Number.isFinite(n) ? n : 0;
   }
 
-  // fallback decimal
-  const n = Number(s.replace(",", "."));
+  // fallback decimal "2,5" => 2.5
+  const n = Number(s0.replace(",", "."));
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -85,6 +86,53 @@ async function resolveBranchId(req) {
   } catch {
     return 0;
   }
+}
+
+// =====================
+// DB helpers (enriquecimiento)
+// =====================
+async function fetchImages(product_id) {
+  const pid = toInt(product_id, 0);
+  if (!pid) return { images: [], image_urls: [] };
+
+  const [imgs] = await sequelize.query(
+    `
+    SELECT id, url, sort_order
+    FROM product_images
+    WHERE product_id = :product_id
+    ORDER BY sort_order ASC, id ASC
+    `,
+    { replacements: { product_id: pid } }
+  );
+
+  const images = (imgs || [])
+    .map((r) => ({
+      id: toInt(r.id, 0),
+      url: String(r.url || "").trim(),
+      sort_order: toInt(r.sort_order, 0),
+    }))
+    .filter((x) => x.url);
+
+  return { images, image_urls: images.map((x) => x.url) };
+}
+
+async function fetchStockQty(product_id, branch_id) {
+  const pid = toInt(product_id, 0);
+  const bid = toInt(branch_id, 0);
+  if (!pid || !bid) return 0;
+
+  const [rowsStock] = await sequelize.query(
+    `
+    SELECT qty
+    FROM v_stock_by_branch_product
+    WHERE product_id = :product_id
+      AND branch_id = :branch_id
+    LIMIT 1
+    `,
+    { replacements: { product_id: pid, branch_id: bid } }
+  );
+
+  return toQtyNumber(rowsStock?.[0]?.qty);
 }
 
 // =====================
@@ -134,52 +182,51 @@ async function getProductInternal({ branch_id, product_id }) {
 
   if (!item) return null;
 
-  // ✅ imágenes múltiples
-  const [imgs] = await sequelize.query(
-    `
-    SELECT id, url, sort_order
-    FROM product_images
-    WHERE product_id = :product_id
-    ORDER BY sort_order ASC, id ASC
-    `,
-    { replacements: { product_id: pid } }
-  );
+  // ✅ imágenes
+  const media = await fetchImages(pid);
+  item.images = media.images;
+  item.image_urls = media.image_urls;
+  if (!String(item.image_url || "").trim() && item.image_urls.length) item.image_url = item.image_urls[0];
 
-  const images = (imgs || [])
-    .map((r) => ({
-      id: toInt(r.id, 0),
-      url: String(r.url || "").trim(),
-      sort_order: toInt(r.sort_order, 0),
-    }))
-    .filter((x) => x.url);
-
-  item.images = images;
-  item.image_urls = images.map((x) => x.url);
-
-  if (!String(item.image_url || "").trim() && item.image_urls.length) {
-    item.image_url = item.image_urls[0];
-  }
-
-  // ✅ stock_qty de la branch elegida
-  if (bid) {
-    const [rowsStock] = await sequelize.query(
-      `
-      SELECT qty
-      FROM v_stock_by_branch_product
-      WHERE product_id = :product_id
-        AND branch_id = :branch_id
-      LIMIT 1
-      `,
-      { replacements: { product_id: pid, branch_id: bid } }
-    );
-
-    item.stock_qty = toQtyNumber(rowsStock?.[0]?.qty);
-  } else {
-    item.stock_qty = toQtyNumber(item.stock_qty);
-  }
-
-  // ✅ boolean coherente para front (si el front mira in_stock)
+  // ✅ stock (sucursal pedida)
+  item.stock_qty = bid ? await fetchStockQty(pid, bid) : toQtyNumber(item.stock_qty);
   item.in_stock = item.stock_qty > 0;
+
+  return item;
+}
+
+// ✅ Enriquecimiento cuando viene desde PublicService
+async function enrichItem(item, { product_id, branch_id }) {
+  const pid = toInt(product_id, 0);
+  const bid = toInt(branch_id, 0);
+  if (!item) return null;
+
+  // 1) stock_qty: si no vino o vino vacío => traerlo de la view
+  const hasStockField = item.stock_qty !== undefined && item.stock_qty !== null && String(item.stock_qty).trim() !== "";
+  const stockQty = hasStockField ? toQtyNumber(item.stock_qty) : await fetchStockQty(pid, bid);
+
+  item.stock_qty = stockQty;
+  item.in_stock = stockQty > 0;
+
+  // 2) imágenes: si no vinieron, traerlas
+  const hasImages = Array.isArray(item.images) && item.images.length;
+  const hasImageUrls = Array.isArray(item.image_urls) && item.image_urls.length;
+
+  if (!hasImages && !hasImageUrls) {
+    const media = await fetchImages(pid);
+    item.images = media.images;
+    item.image_urls = media.image_urls;
+    if (!String(item.image_url || "").trim() && item.image_urls.length) item.image_url = item.image_urls[0];
+  } else {
+    // asegurar cover
+    if (!String(item.image_url || "").trim()) {
+      const first =
+        (Array.isArray(item.images) ? item.images[0]?.url : "") ||
+        (Array.isArray(item.image_urls) ? item.image_urls[0] : "") ||
+        "";
+      if (first) item.image_url = first;
+    }
+  }
 
   return item;
 }
@@ -313,19 +360,32 @@ module.exports = {
       }
 
       const branch_id = await resolveBranchId(req);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "VALIDATION_ERROR",
+          message: "No se pudo resolver branch_id",
+        });
+      }
 
-      // Si el service tiene getProductById y devuelve item con stock_qty, lo usamos.
-      // Igual lo normalizamos al final.
-      let item =
-        typeof PublicService.getProductById === "function"
-          ? await PublicService.getProductById({ branch_id, product_id })
-          : await getProductInternal({ branch_id, product_id });
+      // 1) si hay service, lo usamos (pero lo ENRIQUECEMOS)
+      let item = null;
+
+      if (typeof PublicService.getProductById === "function") {
+        item = await PublicService.getProductById({ branch_id, product_id });
+        if (item) item = await enrichItem(item, { product_id, branch_id });
+      }
+
+      // 2) fallback robusto: DB directo
+      if (!item) {
+        item = await getProductInternal({ branch_id, product_id });
+      }
 
       if (!item) {
         return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
       }
 
-      // ✅ FIX FINAL: normalización SIEMPRE, venga del service o del internal
+      // ✅ Asegurar normalización final SIEMPRE
       item.stock_qty = toQtyNumber(item.stock_qty);
       item.in_stock = item.stock_qty > 0;
 
