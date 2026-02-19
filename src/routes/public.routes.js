@@ -3,8 +3,8 @@
 // Rutas públicas Ecommerce (taxonomía + catálogo + sugerencias + producto + branding)
 // ✅ + /products/:id/media (imágenes para card sin branch_id / sin auth)
 // ✅ FIX COMPAT:
-// - /public/products -> alias de /public/catalog (muchos front lo usan así)
-// - /public/branding -> alias de /public/shop/branding (algunos front lo usan así)
+// - /public/products -> alias de /public/catalog
+// - /public/branding -> alias de /public/shop/branding
 
 const express = require("express");
 const router = express.Router();
@@ -26,7 +26,10 @@ mustFn(PublicController.listBranches, "listBranches");
 mustFn(PublicController.listCatalog, "listCatalog");
 mustFn(PublicController.listSuggestions, "listSuggestions");
 mustFn(PublicController.getShopBranding, "getShopBranding");
-mustFn(PublicController.getProductById, "getProductById");
+
+// ✅ CAMBIO: detalle producto
+mustFn(PublicController.getProduct, "getProduct");
+
 mustFn(PublicController.getProductMedia, "getProductMedia");
 
 // Health
@@ -54,8 +57,8 @@ router.get("/shop/branding", PublicController.getShopBranding);
 // ✅ COMPAT: algunos front llaman /public/branding
 router.get("/branding", PublicController.getShopBranding);
 
-// Producto (detalle: requiere branch_id o resolveBranchId en controller)
-router.get("/products/:id", PublicController.getProductById);
+// ✅ Producto (detalle público)
+router.get("/products/:id", PublicController.getProduct);
 
 // ✅ Media pública para ProductCard (NO branch_id)
 router.get("/products/:id/media", PublicController.getProductMedia);
