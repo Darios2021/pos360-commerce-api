@@ -2,20 +2,26 @@
 // ✅ COPY-PASTE FINAL COMPLETO (FIX /public/products/:id)
 // ✅ FIX: handler Express real (req,res)
 // ✅ FIX: sequelize importado
-// ✅ FIX: sin funciones inexistentes (getStockByBranchMap)
+// ✅ FIX: sin funciones inexistentes
 // ✅ Usa v_public_catalog + product_images + v_stock_by_branch_product
+// ✅ FIX CRÍTICO: stock_qty normalizado (evita "Sin stock" si viene "1.000" string)
 
 const { sequelize } = require("../models");
 const PublicService = require("../services/public.service");
 
+// =====================
+// Helpers
+// =====================
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
+
 function toStr(v) {
   const s = String(v ?? "").trim();
   return s.length ? s : "";
 }
+
 function toBoolLike(v, d = false) {
   if (v === undefined || v === null || v === "") return d;
   if (v === true || v === 1 || v === "1") return true;
@@ -25,11 +31,37 @@ function toBoolLike(v, d = false) {
   if (["false", "no"].includes(s)) return false;
   return d;
 }
+
 function toCsvList(v) {
   return String(v ?? "")
     .split(",")
     .map((x) => String(x).trim())
     .filter(Boolean);
+}
+
+// ✅ FIX: parse robusto para números que vienen como "1.000" (miles) o "1,000"
+function toQtyNumber(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+
+  const s = String(v).trim();
+  if (!s) return 0;
+
+  // "1.000" (miles con punto) => 1000
+  if (/\.\d{3}$/.test(s) && !s.includes(",")) {
+    const n = Number(s.replace(/\./g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // "1,000" (miles con coma) => 1000
+  if (/,\d{3}$/.test(s) && !s.includes(".")) {
+    const n = Number(s.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // fallback decimal
+  const n = Number(s.replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
 }
 
 /**
@@ -55,6 +87,9 @@ async function resolveBranchId(req) {
   }
 }
 
+// =====================
+// Internal product fetch (DB direct)
+// =====================
 async function getProductInternal({ branch_id, product_id }) {
   const bid = toInt(branch_id, 0);
   const pid = toInt(product_id, 0);
@@ -112,9 +147,9 @@ async function getProductInternal({ branch_id, product_id }) {
 
   const images = (imgs || [])
     .map((r) => ({
-      id: Number(r.id),
+      id: toInt(r.id, 0),
       url: String(r.url || "").trim(),
-      sort_order: Number(r.sort_order || 0),
+      sort_order: toInt(r.sort_order, 0),
     }))
     .filter((x) => x.url);
 
@@ -125,7 +160,7 @@ async function getProductInternal({ branch_id, product_id }) {
     item.image_url = item.image_urls[0];
   }
 
-  // ✅ stock_qty de la branch elegida (si no hay branch, queda 0)
+  // ✅ stock_qty de la branch elegida
   if (bid) {
     const [rowsStock] = await sequelize.query(
       `
@@ -137,14 +172,21 @@ async function getProductInternal({ branch_id, product_id }) {
       `,
       { replacements: { product_id: pid, branch_id: bid } }
     );
-    item.stock_qty = Number(rowsStock?.[0]?.qty || 0);
+
+    item.stock_qty = toQtyNumber(rowsStock?.[0]?.qty);
   } else {
-    item.stock_qty = Number(item.stock_qty || 0);
+    item.stock_qty = toQtyNumber(item.stock_qty);
   }
+
+  // ✅ boolean coherente para front (si el front mira in_stock)
+  item.in_stock = item.stock_qty > 0;
 
   return item;
 }
 
+// =====================
+// Exports
+// =====================
 module.exports = {
   async listCategories(req, res) {
     try {
@@ -162,7 +204,7 @@ module.exports = {
 
   async listSubcategories(req, res) {
     try {
-      const category_id = toInt(req.query.category_id);
+      const category_id = toInt(req.query.category_id, 0);
       if (!category_id) {
         return res.status(400).json({
           ok: false,
@@ -211,8 +253,8 @@ module.exports = {
       const result = await PublicService.listCatalog({
         branch_id,
         search: toStr(req.query.search),
-        category_id: toInt(req.query.category_id) || null,
-        subcategory_id: toInt(req.query.subcategory_id) || null,
+        category_id: toInt(req.query.category_id, 0) || null,
+        subcategory_id: toInt(req.query.subcategory_id, 0) || null,
         include_children: toBoolLike(req.query.include_children, false),
         in_stock: toBoolLike(req.query.in_stock, false),
         page: Math.max(1, toInt(req.query.page, 1)),
@@ -261,7 +303,7 @@ module.exports = {
     }
   },
 
-  // ✅ ESTE ES EL ENDPOINT REAL PARA SHOP:
+  // ✅ ENDPOINT REAL PARA SHOP:
   // GET /api/v1/public/products/:id?branch_id=3
   async getProduct(req, res) {
     try {
@@ -272,15 +314,20 @@ module.exports = {
 
       const branch_id = await resolveBranchId(req);
 
-      // si existiera en service, lo usamos; sino usamos el internal
-      const item =
-        (typeof PublicService.getProductById === "function"
+      // Si el service tiene getProductById y devuelve item con stock_qty, lo usamos.
+      // Igual lo normalizamos al final.
+      let item =
+        typeof PublicService.getProductById === "function"
           ? await PublicService.getProductById({ branch_id, product_id })
-          : await getProductInternal({ branch_id, product_id })) || null;
+          : await getProductInternal({ branch_id, product_id });
 
       if (!item) {
         return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
       }
+
+      // ✅ FIX FINAL: normalización SIEMPRE, venga del service o del internal
+      item.stock_qty = toQtyNumber(item.stock_qty);
+      item.in_stock = item.stock_qty > 0;
 
       return res.json({ ok: true, branch_id, item });
     } catch (err) {
@@ -295,7 +342,7 @@ module.exports = {
 
   async getProductMedia(req, res) {
     try {
-      const product_id = toInt(req.params.id);
+      const product_id = toInt(req.params.id, 0);
       if (!product_id) {
         return res.status(400).json({
           ok: false,
