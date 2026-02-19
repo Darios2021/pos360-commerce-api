@@ -129,6 +129,9 @@ module.exports = {
   // =========================
   // Catálogo público
   // =========================
+  // =========================
+  // Catálogo público (FIX: no depender de v_public_catalog)
+  // =========================
   async listCatalog({
     branch_id,
     search,
@@ -141,18 +144,20 @@ module.exports = {
     strict_search,
     exclude_terms,
 
-    // ✅ FIX (nuevos)
     brands,
     model,
     sort,
   }) {
-    const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
+    const where = ["p.is_active = 1"];
 
     const lim = Math.min(100, Math.max(1, toInt(limit, 24)));
     const pg = Math.max(1, toInt(page, 1));
 
+    const bid = toInt(branch_id, 0);
+    if (!bid) return { items: [], page: pg, limit: lim, total: 0, pages: 0 };
+
     const repl = {
-      branch_id: toInt(branch_id),
+      branch_id: bid,
       limit: lim,
       offset: (pg - 1) * lim,
     };
@@ -163,7 +168,7 @@ module.exports = {
     void inc;
 
     if (sid) {
-      where.push("vc.subcategory_id = :subcategory_id");
+      where.push("p.subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
 
       if (cid) {
@@ -179,12 +184,13 @@ module.exports = {
         repl.category_id = cid;
       }
     } else if (cid) {
-      where.push("vc.category_id = :category_id");
+      where.push("p.category_id = :category_id");
       repl.category_id = cid;
     }
 
+    // ✅ stock: LEFT JOIN => si no hay fila, queda 0
     if (toBoolLike(in_stock, false)) {
-      where.push("(vc.track_stock = 0 OR vc.stock_qty > 0)");
+      where.push("(p.track_stock = 0 OR COALESCE(st.qty, 0) > 0)");
     }
 
     // ✅ FIX: filtro por marcas (case-insensitive)
@@ -196,14 +202,14 @@ module.exports = {
         repl[k] = brandArr[i];
         keys.push(`:${k}`);
       }
-      where.push(`LOWER(COALESCE(vc.brand,'')) IN (${keys.join(",")})`);
+      where.push(`LOWER(COALESCE(p.brand,'')) IN (${keys.join(",")})`);
     }
 
     // ✅ FIX: filtro por modelo exacto (case-insensitive)
     const m = toStr(model).toLowerCase();
     if (m) {
       repl.model = m;
-      where.push(`LOWER(COALESCE(vc.model,'')) = :model`);
+      where.push(`LOWER(COALESCE(p.model,'')) = :model`);
     }
 
     const ex = toStr(exclude_terms)
@@ -218,32 +224,26 @@ module.exports = {
 
       where.push(`
         NOT (
-          LOWER(COALESCE(vc.name,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.brand,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.model,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.category_name,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${key} ESCAPE '${ESC}'
+          LOWER(COALESCE(p.name,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(p.brand,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(p.model,'')) LIKE :${key} ESCAPE '${ESC}'
         )
       `);
     }
 
     const q = toStr(search).toLowerCase();
     const strict = toBoolLike(strict_search, false);
-
     if (q.length) {
       repl.q = `%${escLike(q)}%`;
-
       where.push(`
         (
-          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
-          ${strict ? "" : `OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'`}
-          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
+          LOWER(COALESCE(p.name,'')) LIKE :q ESCAPE '${ESC}'
+          ${strict ? "" : `OR LOWER(COALESCE(p.description,'')) LIKE :q ESCAPE '${ESC}'`}
+          OR LOWER(COALESCE(p.brand,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(p.model,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(p.sku,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(p.barcode,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(p.code,'')) LIKE :q ESCAPE '${ESC}'
         )
       `);
     }
@@ -252,25 +252,76 @@ module.exports = {
 
     // ✅ FIX: sort
     const s = toStr(sort);
-    let orderSql = "ORDER BY vc.product_id DESC";
-    if (s === "price_asc") orderSql = "ORDER BY COALESCE(vc.price,0) ASC, vc.product_id DESC";
-    else if (s === "price_desc") orderSql = "ORDER BY COALESCE(vc.price,0) DESC, vc.product_id DESC";
-    else if (s === "name_asc") orderSql = "ORDER BY COALESCE(vc.name,'') ASC, vc.product_id DESC";
-    else if (s === "newest") orderSql = "ORDER BY vc.product_id DESC";
+    let orderSql = "ORDER BY p.id DESC";
+    if (s === "price_asc") orderSql = "ORDER BY COALESCE(pr.price_discount, pr.price_list, 0) ASC, p.id DESC";
+    else if (s === "price_desc") orderSql = "ORDER BY COALESCE(pr.price_discount, pr.price_list, 0) DESC, p.id DESC";
+    else if (s === "name_asc") orderSql = "ORDER BY COALESCE(p.name,'') ASC, p.id DESC";
+    else if (s === "newest") orderSql = "ORDER BY p.id DESC";
 
+    // ✅ COUNT total
     const [[countRow]] = await sequelize.query(
       `
       SELECT COUNT(*) AS total
-      FROM v_public_catalog vc
+      FROM products p
+      LEFT JOIN (
+        SELECT product_id, branch_id, SUM(qty) AS qty
+        FROM stock
+        GROUP BY product_id, branch_id
+      ) st
+        ON st.product_id = p.id
+       AND st.branch_id = :branch_id
       ${whereSql}
       `,
       { replacements: repl }
     );
 
+    // ✅ Items
     const [itemsRaw] = await sequelize.query(
       `
-      SELECT vc.*
-      FROM v_public_catalog vc
+      SELECT
+        p.id AS product_id,
+        :branch_id AS branch_id,
+        p.sku,
+        p.barcode,
+        p.code,
+        p.name,
+        p.description,
+        p.brand,
+        p.model,
+        p.is_new,
+        p.is_promo,
+        p.track_stock,
+        p.is_active,
+        COALESCE(pr.price, 0) AS price,
+        COALESCE(pr.price_list, 0) AS price_list,
+        COALESCE(pr.price_discount, 0) AS price_discount,
+        COALESCE(pr.price_reseller, 0) AS price_reseller,
+        COALESCE(p.tax_rate, 21) AS tax_rate,
+        p.category_id,
+        c.name AS category_name,
+        p.subcategory_id,
+        s2.name AS subcategory_name,
+        COALESCE(pi.url, '') AS image_url,
+        COALESCE(st.qty, 0) AS stock_qty
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN subcategories s2 ON s2.id = p.subcategory_id
+      LEFT JOIN product_prices pr ON pr.product_id = p.id
+      LEFT JOIN (
+        SELECT product_id, MIN(sort_order) AS min_sort
+        FROM product_images
+        GROUP BY product_id
+      ) pim ON pim.product_id = p.id
+      LEFT JOIN product_images pi
+        ON pi.product_id = p.id
+       AND pi.sort_order = pim.min_sort
+      LEFT JOIN (
+        SELECT product_id, branch_id, SUM(qty) AS qty
+        FROM stock
+        GROUP BY product_id, branch_id
+      ) st
+        ON st.product_id = p.id
+       AND st.branch_id = :branch_id
       ${whereSql}
       ${orderSql}
       LIMIT :limit OFFSET :offset
@@ -281,14 +332,12 @@ module.exports = {
     const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);
 
-    const productIds = items
-      .map((it) => Number(it.product_id || it.id || 0))
-      .filter(Boolean);
-
+    // ✅ stock_by_branch (ya lo tenés hecho)
+    const productIds = items.map((it) => Number(it.product_id || 0)).filter(Boolean);
     if (productIds.length) {
       const stockMap = await getStockByBranchMap(productIds);
       for (const it of items) {
-        const pid = Number(it.product_id || it.id || 0);
+        const pid = Number(it.product_id || 0);
         it.stock_by_branch = stockMap[pid] || [];
       }
     } else {
@@ -303,6 +352,7 @@ module.exports = {
       pages: total ? Math.ceil(total / lim) : 0,
     };
   },
+
 
   // =========================
   // Autocompletado
