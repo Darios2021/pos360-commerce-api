@@ -6,9 +6,10 @@
 // - strict_search + exclude_terms
 // - Branding público + Config pagos
 // - ✅ Producto individual devuelve MÚLTIPLES IMÁGENES (product_images)
-// - ✅ NUEVO: stock_by_branch en catálogo y producto (para validar pickup antes de pagar)
-// - ✅ NUEVO: getProductMedia(product_id) SIN branch_id (para ProductCard gallery en grilla sin 401)
-// ✅ FIX: filtros catálogo (brands/model/sort)
+// - ✅ stock_by_branch en catálogo y producto (para validar pickup antes de pagar)
+// - ✅ getProductMedia(product_id) SIN branch_id (para ProductCard gallery en grilla sin 401)
+// - ✅ FIX: filtros catálogo (brands/model/sort)
+// - ✅ FIX CRÍTICO: NO usar tabla inexistente "stock" -> usar v_stock_by_branch_product
 
 const { sequelize } = require("../models");
 
@@ -46,26 +47,25 @@ function csvList(v) {
 }
 
 // =========================
-// ✅ NUEVO: stock_by_branch
+// ✅ stock_by_branch usando VIEW REAL
+// v_stock_by_branch_product(branch_id, product_id, qty)
 // =========================
 async function getStockByBranchMap(productIds = []) {
-  const ids = Array.from(
-    new Set((productIds || []).map((x) => Number(x)).filter(Boolean))
-  );
+  const ids = Array.from(new Set((productIds || []).map((x) => Number(x)).filter(Boolean)));
   if (!ids.length) return {};
 
   const [rows] = await sequelize.query(
     `
     SELECT
-      vc.product_id,
-      vc.branch_id,
-      CAST(COALESCE(vc.stock_qty, 0) AS SIGNED) AS qty
-    FROM v_public_catalog vc
+      vs.product_id,
+      vs.branch_id,
+      CAST(COALESCE(vs.qty, 0) AS SIGNED) AS qty
+    FROM v_stock_by_branch_product vs
     INNER JOIN branches b
-      ON b.id = vc.branch_id
+      ON b.id = vs.branch_id
      AND b.is_active = 1
-    WHERE vc.is_active = 1
-      AND vc.product_id IN (:ids)
+    WHERE vs.product_id IN (:ids)
+    ORDER BY vs.product_id ASC, vs.branch_id ASC
     `,
     { replacements: { ids } }
   );
@@ -78,10 +78,6 @@ async function getStockByBranchMap(productIds = []) {
     if (!pid || !bid) continue;
     if (!map[pid]) map[pid] = [];
     map[pid].push({ branch_id: bid, qty });
-  }
-
-  for (const pid of Object.keys(map)) {
-    map[pid].sort((a, b) => a.branch_id - b.branch_id);
   }
 
   return map;
@@ -129,9 +125,6 @@ module.exports = {
   // =========================
   // Catálogo público
   // =========================
-  // =========================
-  // Catálogo público (FIX: no depender de v_public_catalog)
-  // =========================
   async listCatalog({
     branch_id,
     search,
@@ -144,20 +137,18 @@ module.exports = {
     strict_search,
     exclude_terms,
 
+    // ✅ FIX (nuevos)
     brands,
     model,
     sort,
   }) {
-    const where = ["p.is_active = 1"];
+    const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
 
     const lim = Math.min(100, Math.max(1, toInt(limit, 24)));
     const pg = Math.max(1, toInt(page, 1));
 
-    const bid = toInt(branch_id, 0);
-    if (!bid) return { items: [], page: pg, limit: lim, total: 0, pages: 0 };
-
     const repl = {
-      branch_id: bid,
+      branch_id: toInt(branch_id),
       limit: lim,
       offset: (pg - 1) * lim,
     };
@@ -168,7 +159,7 @@ module.exports = {
     void inc;
 
     if (sid) {
-      where.push("p.subcategory_id = :subcategory_id");
+      where.push("vc.subcategory_id = :subcategory_id");
       repl.subcategory_id = sid;
 
       if (cid) {
@@ -184,13 +175,13 @@ module.exports = {
         repl.category_id = cid;
       }
     } else if (cid) {
-      where.push("p.category_id = :category_id");
+      where.push("vc.category_id = :category_id");
       repl.category_id = cid;
     }
 
-    // ✅ stock: LEFT JOIN => si no hay fila, queda 0
+    // ✅ stock filter (vc.stock_qty ya viene del view v_stock_by_branch_product)
     if (toBoolLike(in_stock, false)) {
-      where.push("(p.track_stock = 0 OR COALESCE(st.qty, 0) > 0)");
+      where.push("(vc.track_stock = 0 OR COALESCE(vc.stock_qty, 0) > 0)");
     }
 
     // ✅ FIX: filtro por marcas (case-insensitive)
@@ -202,16 +193,17 @@ module.exports = {
         repl[k] = brandArr[i];
         keys.push(`:${k}`);
       }
-      where.push(`LOWER(COALESCE(p.brand,'')) IN (${keys.join(",")})`);
+      where.push(`LOWER(COALESCE(vc.brand,'')) IN (${keys.join(",")})`);
     }
 
     // ✅ FIX: filtro por modelo exacto (case-insensitive)
     const m = toStr(model).toLowerCase();
     if (m) {
       repl.model = m;
-      where.push(`LOWER(COALESCE(p.model,'')) = :model`);
+      where.push(`LOWER(COALESCE(vc.model,'')) = :model`);
     }
 
+    // exclude_terms
     const ex = toStr(exclude_terms)
       .split(",")
       .map((x) => x.trim())
@@ -224,26 +216,32 @@ module.exports = {
 
       where.push(`
         NOT (
-          LOWER(COALESCE(p.name,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(p.brand,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(p.model,'')) LIKE :${key} ESCAPE '${ESC}'
+          LOWER(COALESCE(vc.name,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.brand,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.model,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.category_name,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :${key} ESCAPE '${ESC}'
         )
       `);
     }
 
     const q = toStr(search).toLowerCase();
     const strict = toBoolLike(strict_search, false);
+
     if (q.length) {
       repl.q = `%${escLike(q)}%`;
+
       where.push(`
         (
-          LOWER(COALESCE(p.name,'')) LIKE :q ESCAPE '${ESC}'
-          ${strict ? "" : `OR LOWER(COALESCE(p.description,'')) LIKE :q ESCAPE '${ESC}'`}
-          OR LOWER(COALESCE(p.brand,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(p.model,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(p.sku,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(p.barcode,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(p.code,'')) LIKE :q ESCAPE '${ESC}'
+          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
+          ${strict ? "" : `OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'`}
+          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
         )
       `);
     }
@@ -252,76 +250,25 @@ module.exports = {
 
     // ✅ FIX: sort
     const s = toStr(sort);
-    let orderSql = "ORDER BY p.id DESC";
-    if (s === "price_asc") orderSql = "ORDER BY COALESCE(pr.price_discount, pr.price_list, 0) ASC, p.id DESC";
-    else if (s === "price_desc") orderSql = "ORDER BY COALESCE(pr.price_discount, pr.price_list, 0) DESC, p.id DESC";
-    else if (s === "name_asc") orderSql = "ORDER BY COALESCE(p.name,'') ASC, p.id DESC";
-    else if (s === "newest") orderSql = "ORDER BY p.id DESC";
+    let orderSql = "ORDER BY vc.product_id DESC";
+    if (s === "price_asc") orderSql = "ORDER BY COALESCE(vc.price,0) ASC, vc.product_id DESC";
+    else if (s === "price_desc") orderSql = "ORDER BY COALESCE(vc.price,0) DESC, vc.product_id DESC";
+    else if (s === "name_asc") orderSql = "ORDER BY COALESCE(vc.name,'') ASC, vc.product_id DESC";
+    else if (s === "newest") orderSql = "ORDER BY vc.product_id DESC";
 
-    // ✅ COUNT total
     const [[countRow]] = await sequelize.query(
       `
       SELECT COUNT(*) AS total
-      FROM products p
-      LEFT JOIN (
-        SELECT product_id, branch_id, SUM(qty) AS qty
-        FROM stock
-        GROUP BY product_id, branch_id
-      ) st
-        ON st.product_id = p.id
-       AND st.branch_id = :branch_id
+      FROM v_public_catalog vc
       ${whereSql}
       `,
       { replacements: repl }
     );
 
-    // ✅ Items
     const [itemsRaw] = await sequelize.query(
       `
-      SELECT
-        p.id AS product_id,
-        :branch_id AS branch_id,
-        p.sku,
-        p.barcode,
-        p.code,
-        p.name,
-        p.description,
-        p.brand,
-        p.model,
-        p.is_new,
-        p.is_promo,
-        p.track_stock,
-        p.is_active,
-        COALESCE(pr.price, 0) AS price,
-        COALESCE(pr.price_list, 0) AS price_list,
-        COALESCE(pr.price_discount, 0) AS price_discount,
-        COALESCE(pr.price_reseller, 0) AS price_reseller,
-        COALESCE(p.tax_rate, 21) AS tax_rate,
-        p.category_id,
-        c.name AS category_name,
-        p.subcategory_id,
-        s2.name AS subcategory_name,
-        COALESCE(pi.url, '') AS image_url,
-        COALESCE(st.qty, 0) AS stock_qty
-      FROM products p
-      LEFT JOIN categories c ON c.id = p.category_id
-      LEFT JOIN subcategories s2 ON s2.id = p.subcategory_id
-      LEFT JOIN product_prices pr ON pr.product_id = p.id
-      LEFT JOIN (
-        SELECT product_id, MIN(sort_order) AS min_sort
-        FROM product_images
-        GROUP BY product_id
-      ) pim ON pim.product_id = p.id
-      LEFT JOIN product_images pi
-        ON pi.product_id = p.id
-       AND pi.sort_order = pim.min_sort
-      LEFT JOIN (
-        SELECT product_id, branch_id, SUM(qty) AS qty
-        FROM stock
-        GROUP BY product_id, branch_id
-      ) st
-        ON st.product_id = p.id
-       AND st.branch_id = :branch_id
+      SELECT vc.*
+      FROM v_public_catalog vc
       ${whereSql}
       ${orderSql}
       LIMIT :limit OFFSET :offset
@@ -332,16 +279,16 @@ module.exports = {
     const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);
 
-    // ✅ stock_by_branch (ya lo tenés hecho)
-    const productIds = items.map((it) => Number(it.product_id || 0)).filter(Boolean);
-    if (productIds.length) {
-      const stockMap = await getStockByBranchMap(productIds);
-      for (const it of items) {
-        const pid = Number(it.product_id || 0);
-        it.stock_by_branch = stockMap[pid] || [];
-      }
-    } else {
-      for (const it of items) it.stock_by_branch = [];
+    // ✅ stock_by_branch para cada producto
+    const productIds = items
+      .map((it) => Number(it.product_id || it.id || 0))
+      .filter(Boolean);
+
+    const stockMap = productIds.length ? await getStockByBranchMap(productIds) : {};
+
+    for (const it of items) {
+      const pid = Number(it.product_id || it.id || 0);
+      it.stock_by_branch = stockMap[pid] || [];
     }
 
     return {
@@ -352,7 +299,6 @@ module.exports = {
       pages: total ? Math.ceil(total / lim) : 0,
     };
   },
-
 
   // =========================
   // Autocompletado
@@ -411,7 +357,7 @@ module.exports = {
   },
 
   // =========================
-  // Producto individual (✅ con imágenes múltiples)
+  // Producto individual (✅ con imágenes múltiples + stock_by_branch)
   // =========================
   async getProductById({ branch_id, product_id }) {
     const bid = toInt(branch_id, 0);
@@ -463,6 +409,9 @@ module.exports = {
     return item;
   },
 
+  // =========================
+  // ✅ Media pública SIN branch_id (para cards / grillas sin 401)
+  // =========================
   async getProductMedia({ product_id }) {
     const pid = toInt(product_id, 0);
     if (!pid) return null;
@@ -533,9 +482,7 @@ module.exports = {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
       favicon_url: r.favicon_url || "",
-      updated_at: r.updated_at
-        ? new Date(r.updated_at).toISOString()
-        : new Date().toISOString(),
+      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
     };
   },
 
@@ -562,14 +509,11 @@ module.exports = {
         holder: String(process.env.TRANSFER_HOLDER || "").trim(),
       };
 
-      const finalTransfer =
-        transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
+      const finalTransfer = transfer.alias || transfer.cbu || transfer.holder ? transfer : envTransfer;
 
       return {
         transfer: finalTransfer,
-        mercadopago: {
-          enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim(),
-        },
+        mercadopago: { enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim() },
       };
     } catch (e) {
       return {
@@ -578,9 +522,7 @@ module.exports = {
           cbu: String(process.env.TRANSFER_CBU || "").trim(),
           holder: String(process.env.TRANSFER_HOLDER || "").trim(),
         },
-        mercadopago: {
-          enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim(),
-        },
+        mercadopago: { enabled: !!String(process.env.MP_ACCESS_TOKEN || "").trim() },
       };
     }
   },
