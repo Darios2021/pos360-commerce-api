@@ -1,9 +1,12 @@
 // ✅ COPY-PASTE FINAL
 // src/controllers/pos.controller.js
-// (NO se altera lo que ya funciona: getContext, listProductsForPos, createSale quedan IGUAL)
-// ✅ Se agregan: createSaleReturn (devoluciones) + createSaleExchange (cambios)
-// ✅ Usa SQL directo para registrar devoluciones/cambios (sale_returns / sale_return_items / sale_return_payments / sale_exchanges)
-// ✅ Impacta stock (reingreso) usando StockMovement/StockMovementItem + StockBalance como ya venís manejando
+// (NO se altera lo que ya funciona: getContext, listProductsForPos, createSale quedan IGUAL en comportamiento)
+// ✅ FIX REAL (POS LIST):
+// - ADMIN_ALL + USER_SCOPE_ALL: cuando in_stock=0 NO debe “perder” productos por INNER JOIN warehouses
+// - Se usa LEFT JOIN + SUM(CASE WHEN ...) para:
+//    - qty = 0 cuando no hay stock_balance
+//    - filtrar stock SOLO si in_stock=1
+// ✅ Se mantienen: createSaleReturn (devoluciones) + createSaleExchange (cambios)
 
 const { literal } = require("sequelize");
 const {
@@ -218,7 +221,7 @@ async function getContext(req, res) {
 
 /**
  * ✅ POS PRODUCTS
- * (sin cambios)
+ * ✅ FIX: ADMIN_ALL + USER_SCOPE_ALL no “pierden” productos cuando in_stock=0
  */
 async function listProductsForPos(req, res) {
   req._rid = req._rid || rid(req);
@@ -291,6 +294,9 @@ async function listProductsForPos(req, res) {
       `
       : "";
 
+    // ======================================================
+    // 1) Si hay warehouse_id => comportamiento actual OK
+    // ======================================================
     if (resolvedWarehouseId) {
       if (resolvedBranchId) {
         const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
@@ -362,12 +368,19 @@ async function listProductsForPos(req, res) {
       });
     }
 
+    // ======================================================
+    // 2) ADMIN sin warehouse => FIX (no perder productos cuando in_stock=0)
+    //    - branch_id opcional filtra el scope
+    // ======================================================
     if (admin) {
-      const joinWarehouses = resolvedBranchId
-        ? `INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id = :branchId`
-        : `INNER JOIN warehouses w ON w.id = sb.warehouse_id`;
+      const scopeBranchId = resolvedBranchId || 0;
 
-      const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
+      // qty: suma stock solo si branch coincide cuando hay filtro, si no suma todo
+      const qtyExpr = scopeBranchId
+        ? `COALESCE(SUM(CASE WHEN w.branch_id = :branchId THEN sb.qty ELSE 0 END), 0)`
+        : `COALESCE(SUM(sb.qty), 0)`;
+
+      const havingStock = inStock ? `HAVING ${qtyExpr} > 0` : "";
 
       const [rows] = await sequelize.query(
         `
@@ -390,33 +403,38 @@ async function listProductsForPos(req, res) {
           p.price_discount,
           p.price_reseller,
           (${priceExpr}) AS effective_price,
-          COALESCE(SUM(sb.qty), 0) AS qty
+          ${qtyExpr} AS qty
           ${imgSelect}
         FROM products p
         LEFT JOIN stock_balances sb ON sb.product_id = p.id
-        ${joinWarehouses}
+        LEFT JOIN warehouses w ON w.id = sb.warehouse_id
         WHERE p.is_active = 1
         ${whereQ}
         ${whereSellable}
         GROUP BY p.id
-        ${whereStockTotal}
+        ${havingStock}
         ORDER BY p.name ASC
         LIMIT :limit OFFSET :offset
         `,
-        { replacements: { like, limit, offset, branchId: resolvedBranchId || undefined } }
+        { replacements: { like, limit, offset, branchId: scopeBranchId || undefined } }
       );
 
       const [[countRow]] = await sequelize.query(
         `
-        SELECT COUNT(DISTINCT p.id) AS total
-        FROM products p
-        LEFT JOIN stock_balances sb ON sb.product_id = p.id
-        ${joinWarehouses}
-        WHERE p.is_active = 1
-        ${whereQ}
-        ${whereSellable}
+        SELECT COUNT(*) AS total
+        FROM (
+          SELECT p.id
+          FROM products p
+          LEFT JOIN stock_balances sb ON sb.product_id = p.id
+          LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE p.is_active = 1
+          ${whereQ}
+          ${whereSellable}
+          GROUP BY p.id
+          ${havingStock}
+        ) x
         `,
-        { replacements: { like, branchId: resolvedBranchId || undefined } }
+        { replacements: { like, branchId: scopeBranchId || undefined } }
       );
 
       return res.json({
@@ -432,6 +450,9 @@ async function listProductsForPos(req, res) {
       });
     }
 
+    // ======================================================
+    // 3) USER multi-scope sin warehouse => FIX (no perder productos cuando in_stock=0)
+    // ======================================================
     if (!admin && allowedBranchIds.length) {
       if (resolvedBranchId && !allowedBranchIds.includes(resolvedBranchId)) {
         return res.status(403).json({
@@ -442,7 +463,9 @@ async function listProductsForPos(req, res) {
       }
 
       const scopeBranchIds = resolvedBranchId ? [resolvedBranchId] : allowedBranchIds;
-      const whereStockTotal = inStock ? `HAVING COALESCE(SUM(sb.qty), 0) > 0` : "";
+
+      const qtyExpr = `COALESCE(SUM(CASE WHEN w.branch_id IN (:branchIds) THEN sb.qty ELSE 0 END), 0)`;
+      const havingStock = inStock ? `HAVING ${qtyExpr} > 0` : "";
 
       const [rows] = await sequelize.query(
         `
@@ -465,16 +488,16 @@ async function listProductsForPos(req, res) {
           p.price_discount,
           p.price_reseller,
           (${priceExpr}) AS effective_price,
-          COALESCE(SUM(sb.qty), 0) AS qty
+          ${qtyExpr} AS qty
           ${imgSelect}
         FROM products p
         LEFT JOIN stock_balances sb ON sb.product_id = p.id
-        INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id IN (:branchIds)
+        LEFT JOIN warehouses w ON w.id = sb.warehouse_id
         WHERE p.is_active = 1
         ${whereQ}
         ${whereSellable}
         GROUP BY p.id
-        ${whereStockTotal}
+        ${havingStock}
         ORDER BY p.name ASC
         LIMIT :limit OFFSET :offset
         `,
@@ -483,13 +506,18 @@ async function listProductsForPos(req, res) {
 
       const [[countRow]] = await sequelize.query(
         `
-        SELECT COUNT(DISTINCT p.id) AS total
-        FROM products p
-        LEFT JOIN stock_balances sb ON sb.product_id = p.id
-        INNER JOIN warehouses w ON w.id = sb.warehouse_id AND w.branch_id IN (:branchIds)
-        WHERE p.is_active = 1
-        ${whereQ}
-        ${whereSellable}
+        SELECT COUNT(*) AS total
+        FROM (
+          SELECT p.id
+          FROM products p
+          LEFT JOIN stock_balances sb ON sb.product_id = p.id
+          LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE p.is_active = 1
+          ${whereQ}
+          ${whereSellable}
+          GROUP BY p.id
+          ${havingStock}
+        ) x
         `,
         { replacements: { like, branchIds: scopeBranchIds } }
       );
@@ -871,7 +899,9 @@ async function assertReturnsTablesExist() {
   const [[r2]] = await sequelize.query(`SHOW TABLES LIKE 'sale_return_items'`);
   const [[r3]] = await sequelize.query(`SHOW TABLES LIKE 'sale_return_payments'`);
   if (!r1 || !r2 || !r3) {
-    const err = new Error("Faltan tablas de devoluciones (sale_returns / sale_return_items / sale_return_payments). Ejecutá el SQL primero.");
+    const err = new Error(
+      "Faltan tablas de devoluciones (sale_returns / sale_return_items / sale_return_payments). Ejecutá el SQL primero."
+    );
     err.httpStatus = 400;
     err.code = "RETURNS_TABLES_MISSING";
     throw err;
@@ -1250,7 +1280,6 @@ async function createSaleExchange(req, res) {
     }
 
     // 1) Ejecutamos devolución dentro de la MISMA tx (reutilizando lógica pero sin abrir tx nueva)
-    //    => replicamos parte clave de createSaleReturn, pero usando la misma `t`
     const restock = String(returnPayload.restock ?? "1") === "1" || returnPayload.restock === true;
     const reason = returnPayload.reason ? String(returnPayload.reason).slice(0, 255) : null;
     const note = returnPayload.note ? String(returnPayload.note).slice(0, 255) : null;
@@ -1426,7 +1455,6 @@ async function createSaleExchange(req, res) {
     }
 
     // 2) Creamos NUEVA venta (misma lógica que createSale, pero dentro de esta tx)
-    //    Importante: no tocamos createSale, hacemos una mini-implementación local equivalente.
     const items2 = Array.isArray(newSalePayload.items) ? newSalePayload.items : [];
     const pays2 = Array.isArray(newSalePayload.payments) ? newSalePayload.payments : [];
 
@@ -1550,7 +1578,9 @@ async function createSaleExchange(req, res) {
       });
 
       if (!sb) {
-        const e = new Error(`No existe stock_balance (cambio) para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId2}`);
+        const e = new Error(
+          `No existe stock_balance (cambio) para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId2}`
+        );
         e.httpStatus = 409;
         e.code = "STOCK_BALANCE_MISSING";
         throw e;
