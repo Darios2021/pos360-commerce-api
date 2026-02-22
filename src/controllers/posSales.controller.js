@@ -9,10 +9,10 @@
 // - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
 // - GET /pos/sales/:id/refunds (listRefundsBySale) ✅ desde VIEW
 // - GET /pos/sales/:id/exchanges (listExchangesBySale)
-// - POST /pos/sales (createSale)
+// - POST /pos/sales (createSale) (modo admin/backoffice; NO el createSale “POS puro” de pos.controller.js)
 // - DELETE /pos/sales/:id (deleteSale)
-// - POST /pos/sales/:id/refunds (createRefund) ✅ enum real (sale_return_payments.method)
-// - POST /pos/sales/:id/exchanges (createExchange) ✅ enum real
+// - POST /pos/sales/:id/refunds (createRefund) ✅ enum real + tablas returns
+// - POST /pos/sales/:id/exchanges (createExchange) ✅ enum real + tablas returns + sale_exchanges
 
 const { Op, literal } = require("sequelize");
 const {
@@ -35,20 +35,23 @@ function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
+
 function toFloat(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
 }
+
 function parseDateTime(v) {
   if (!v) return null;
   const s = String(v).trim();
-  // soporta "YYYY-MM-DD HH:mm:ss" y "YYYY-MM-DDTHH:mm:ss"
-  const d = new Date(s.includes("T") ? s : s.replace(" ", "T"));
+  const d = new Date(s.replace(" ", "T"));
   return isNaN(d.getTime()) ? null : d;
 }
+
 function nowDate() {
   return new Date();
 }
+
 function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
@@ -70,7 +73,7 @@ function normalizePayMethod(v) {
   if (x === "TARJETA") return "CARD";
   if (x === "OTRO" || x === "OTROS") return "OTHER";
 
-  // mapeos comunes
+  // Mapeos comunes
   if (x === "DEBIT" || x === "CREDIT") return "CARD";
 
   return x;
@@ -146,7 +149,6 @@ function getAuthUserId(req) {
     if (n > 0) return n;
   }
 
-  // fallback: decodifica JWT sin verificar (solo para extraer id)
   try {
     const h = String(req.headers?.authorization || "");
     const m = h.match(/^Bearer\s+(.+)$/i);
@@ -215,9 +217,7 @@ function isAdminReq(req) {
   }
 
   const norm = (s) => String(s || "").trim().toLowerCase();
-  return roleNames
-    .map(norm)
-    .some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
+  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
 }
 
 /**
@@ -232,9 +232,6 @@ function canPostSale(req, sale) {
   return toInt(sale?.user_id, 0) === toInt(uid, 0);
 }
 
-/**
- * Intenta encontrar el alias de asociación Sequelize (por si cambió)
- */
 function findAssocAlias(sourceModel, targetModel) {
   try {
     const assocs = sourceModel?.associations || {};
@@ -272,9 +269,6 @@ function pickBranchAttributes() {
   return Array.from(new Set(attrs));
 }
 
-/**
- * Obtiene nombre real de tabla (para raw SQL / VIEW)
- */
 function getTableName(model, fallback) {
   try {
     const t = model?.getTableName?.();
@@ -287,14 +281,8 @@ function getTableName(model, fallback) {
   }
 }
 
-/* =========================
-   WHERE + filtros robustos
-========================= */
-
 /**
  * ✅ Base where: branch/status/from/to/q + seller_id + customer
- * - Admin: puede filtrar branch_id
- * - User: queda fijo en su branch_id
  */
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
@@ -330,13 +318,10 @@ function buildWhereFromQuery(req) {
   else if (to) where.sold_at = { [Op.lte]: to };
 
   // seller
-  const seller_id = toInt(
-    req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller,
-    0
-  );
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   if (seller_id > 0) where.user_id = seller_id;
 
-  // customer (por texto o id si existiera customer_id)
+  // customer
   const customer = req.query.customer;
   if (customer != null && String(customer).trim()) {
     const cStr = String(customer).trim();
@@ -357,7 +342,7 @@ function buildWhereFromQuery(req) {
     }
   }
 
-  // q general (cliente + nro venta + id/total)
+  // q (buscador general)
   if (q) {
     const qNum = toFloat(q, NaN);
     where[Op.or] = [
@@ -427,9 +412,9 @@ function injectExistsFiltersIntoWhere(where, req) {
   if (ands.length) where[Op.and] = (where[Op.and] || []).concat(ands);
 }
 
-/* =========================
+/* ============================
    GET /api/v1/pos/sales
-========================= */
+============================ */
 async function listSales(req, res, next) {
   try {
     const page = Math.max(1, toInt(req.query.page, 1));
@@ -477,7 +462,7 @@ async function listSales(req, res, next) {
       });
     }
 
-    // ✅ items hasMany => separate para poder mostrar PRODUCTOS sin romper paginado
+    // ✅ Items hasMany => separate para poder mostrar productos sin romper paginado
     if (SaleItem && saleItemsAs) {
       include.push({
         model: SaleItem,
@@ -518,9 +503,6 @@ async function listSales(req, res, next) {
   }
 }
 
-/* =========================
-   GET /api/v1/pos/sales/stats
-========================= */
 /**
  * ✅ Stats:
  * - total vendido NETO (SUM(total) - SUM(refunds))
@@ -573,10 +555,7 @@ async function statsSales(req, res, next) {
       );
     }
 
-    const seller_id = toInt(
-      req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller,
-      0
-    );
+    const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
     if (seller_id > 0) {
       conds.push("s.user_id = :seller_id");
       repl.seller_id = seller_id;
@@ -592,9 +571,7 @@ async function statsSales(req, res, next) {
     const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
     if (pay_method) {
       repl.pay_method = pay_method;
-      conds.push(
-        `EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`
-      );
+      conds.push(`EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`);
     }
 
     const product = String(req.query.product || "").trim();
@@ -653,7 +630,6 @@ async function statsSales(req, res, next) {
     `;
 
     // refunds by method (sale_refunds VIEW)
-    // Nota: la VIEW trae refund_method; lo uppercasiamos por si acaso
     const sqlRefundsByMethod = `
       SELECT
         COALESCE(UPPER(r.refund_method), 'OTHER') AS method,
@@ -748,9 +724,9 @@ async function statsSales(req, res, next) {
   }
 }
 
-/* =========================
+/* ============================
    GET /api/v1/pos/sales/:id
-========================= */
+============================ */
 async function getSaleById(req, res, next) {
   try {
     const admin = isAdminReq(req);
@@ -770,7 +746,7 @@ async function getSaleById(req, res, next) {
       include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
     if (SaleItem && saleItemsAs) include.push({ model: SaleItem, as: saleItemsAs, required: false });
 
-    // ✅ get by id: no hay paginado => puede ir normal + order
+    // ✅ get by id: acá no rompe paginado, puede ir normal + order
     if (Payment && salePaymentsAs) include.push({ model: Payment, as: salePaymentsAs, required: false });
 
     const order = [];
@@ -819,9 +795,9 @@ async function getSaleById(req, res, next) {
   }
 }
 
-/* =========================
+/* ============================
    GET /api/v1/pos/sales/:id/refunds
-========================= */
+============================ */
 async function listRefundsBySale(req, res, next) {
   try {
     const sale_id = toInt(req.params.id, 0);
@@ -832,9 +808,14 @@ async function listRefundsBySale(req, res, next) {
 
     if (!isAdminReq(req)) {
       const branch_id = getAuthBranchId(req);
-      if (!branch_id) return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal." });
+      if (!branch_id)
+        return res
+          .status(400)
+          .json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal." });
       if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
-        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver devoluciones de otra sucursal." });
+        return res
+          .status(403)
+          .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver devoluciones de otra sucursal." });
       }
     }
 
@@ -845,9 +826,9 @@ async function listRefundsBySale(req, res, next) {
   }
 }
 
-/* =========================
+/* ============================
    GET /api/v1/pos/sales/:id/exchanges
-========================= */
+============================ */
 async function listExchangesBySale(req, res, next) {
   try {
     const sale_id = toInt(req.params.id, 0);
@@ -858,9 +839,14 @@ async function listExchangesBySale(req, res, next) {
 
     if (!isAdminReq(req)) {
       const branch_id = getAuthBranchId(req);
-      if (!branch_id) return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal." });
+      if (!branch_id)
+        return res
+          .status(400)
+          .json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal." });
       if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
-        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver cambios de otra sucursal." });
+        return res
+          .status(403)
+          .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver cambios de otra sucursal." });
       }
     }
 
@@ -877,9 +863,10 @@ async function listExchangesBySale(req, res, next) {
   }
 }
 
-/* =========================
+/* ============================
    POST /api/v1/pos/sales
-========================= */
+   (modo backoffice; NO el createSale “POS puro” de pos.controller.js)
+============================ */
 async function createSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
@@ -924,7 +911,9 @@ async function createSale(req, res, next) {
       const warehouse_id = toInt(it?.warehouse_id || it?.warehouseId, 0);
       if (!warehouse_id) {
         await t.rollback();
-        return res.status(400).json({ ok: false, code: "WAREHOUSE_REQUIRED", message: "warehouse_id requerido en cada item." });
+        return res
+          .status(400)
+          .json({ ok: false, code: "WAREHOUSE_REQUIRED", message: "warehouse_id requerido en cada item." });
       }
 
       normItems.push({
@@ -1034,7 +1023,7 @@ async function createSale(req, res, next) {
           };
         }),
         { transaction: t }
-      );
+    );
     }
 
     await t.commit();
@@ -1055,8 +1044,7 @@ async function createSale(req, res, next) {
 
 /* ============================================================
    ✅ HELPERS BLINDADOS para INSERT según columnas reales
-   ============================================================ */
-
+============================================================ */
 async function tryQuery(sql, options) {
   try {
     return await sequelize.query(sql, options);
@@ -1185,9 +1173,9 @@ async function insertSaleExchange({
   return true;
 }
 
-/* =========================
+/* ============================
    POST /api/v1/pos/sales/:id/refunds
-========================= */
+============================ */
 async function createRefund(req, res) {
   const t = await sequelize.transaction();
   try {
@@ -1361,7 +1349,6 @@ async function createRefund(req, res) {
     try {
       await t.rollback();
     } catch {}
-
     const msg = String(e?.original?.sqlMessage || e?.parent?.sqlMessage || e?.message || "Error devolución");
     const code = String(e?.original?.code || e?.parent?.code || e?.code || "REFUND_ERROR");
 
@@ -1397,13 +1384,20 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
     if (!product_id || qty <= 0) continue;
 
     const p = pMap.get(product_id);
-    if (!p) throw Object.assign(new Error(`Producto no existe: ${product_id}`), { status: 400, code: "PRODUCT_NOT_FOUND" });
+    if (!p)
+      throw Object.assign(new Error(`Producto no existe: ${product_id}`), { status: 400, code: "PRODUCT_NOT_FOUND" });
 
     if (Product.rawAttributes.branch_id && toInt(p.branch_id, 0) !== toInt(branch_id, 0)) {
-      throw Object.assign(new Error(`Producto ${product_id} no pertenece a la sucursal.`), { status: 403, code: "CROSS_BRANCH_PRODUCT" });
+      throw Object.assign(new Error(`Producto ${product_id} no pertenece a la sucursal.`), {
+        status: 403,
+        code: "CROSS_BRANCH_PRODUCT",
+      });
     }
     if (Product.rawAttributes.is_active && String(p.is_active) === "0") {
-      throw Object.assign(new Error(`Producto ${product_id} está desactivado.`), { status: 409, code: "PRODUCT_INACTIVE" });
+      throw Object.assign(new Error(`Producto ${product_id} está desactivado.`), {
+        status: 409,
+        code: "PRODUCT_INACTIVE",
+      });
     }
 
     const track = Product.rawAttributes.track_stock ? String(p.track_stock) !== "0" : true;
@@ -1427,9 +1421,9 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
   }
 }
 
-/* =========================
+/* ============================
    POST /api/v1/pos/sales/:id/exchanges
-========================= */
+============================ */
 async function createExchange(req, res) {
   const t = await sequelize.transaction();
   try {
@@ -1547,11 +1541,7 @@ async function createExchange(req, res) {
 
     if (!return_id) {
       await t.rollback();
-      return res.status(500).json({
-        ok: false,
-        code: "RETURN_INSERT_FAILED",
-        message: "No se pudo crear sale_returns (cambio)",
-      });
+      return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (cambio)" });
     }
 
     // 2) sale_return_items (lo que vuelve)
@@ -1638,14 +1628,7 @@ async function createExchange(req, res) {
     // 5) Si diff>0 => payment en nueva sale (DB enum)
     if (diff > 0) {
       await Payment.create(
-        {
-          sale_id: newSale.id,
-          method: normalizeCardMappedMethod(method),
-          amount: diff,
-          paid_at: sold_at,
-          reference,
-          note,
-        },
+        { sale_id: newSale.id, method: normalizeCardMappedMethod(method), amount: diff, paid_at: sold_at, reference, note },
         { transaction: t }
       );
     }
@@ -1684,7 +1667,6 @@ async function createExchange(req, res) {
     try {
       await t.rollback();
     } catch {}
-
     const status = e?.status || 500;
     const msg = String(e?.original?.sqlMessage || e?.parent?.sqlMessage || e?.message || "Error cambio");
     const code = String(e?.original?.code || e?.parent?.code || e?.code || "EXCHANGE_ERROR");
@@ -1700,9 +1682,9 @@ async function createExchange(req, res) {
   }
 }
 
-/* =========================
+/* ============================
    DELETE /api/v1/pos/sales/:id
-========================= */
+============================ */
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
@@ -1732,11 +1714,7 @@ async function deleteSale(req, res, next) {
 
     if (!admin && toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
       await t.rollback();
-      return res.status(403).json({
-        ok: false,
-        code: "CROSS_BRANCH_SALE",
-        message: "No podés eliminar una venta de otra sucursal.",
-      });
+      return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés eliminar una venta de otra sucursal." });
     }
 
     const force = String(req.query.force || "0") === "1";
@@ -1772,10 +1750,7 @@ async function deleteSale(req, res, next) {
         `DELETE FROM sale_return_payments WHERE return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`,
         { replacements: { sale_id: id }, transaction: t }
       );
-      await sequelize.query(`DELETE FROM sale_returns WHERE sale_id = :sale_id`, {
-        replacements: { sale_id: id },
-        transaction: t,
-      });
+      await sequelize.query(`DELETE FROM sale_returns WHERE sale_id = :sale_id`, { replacements: { sale_id: id }, transaction: t });
     }
 
     await Payment.destroy({ where: { sale_id: id }, transaction: t });
