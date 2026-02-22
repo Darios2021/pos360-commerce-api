@@ -2,7 +2,6 @@
 // src/controllers/dashboard.controller.js
 const { Op, fn, col, literal } = require("sequelize");
 const {
-  sequelize,
   Product,
   Category,
   Sale,
@@ -64,25 +63,20 @@ function pickExistingAttrs(model, candidates, always = ["id"]) {
 
 /**
  * ✅ Detecta alias real de asociación para evitar "as" errado
- * - Busca por target model name (Sale/Product/Warehouse/Branch/User/Payment/etc)
- * - Prioriza aliases preferidos si existen
  */
 function assocAlias(fromModel, targetModel, preferredAliases = []) {
   try {
     if (!fromModel?.associations || !targetModel) return null;
     const assocs = Object.values(fromModel.associations);
 
-    // 1) preferidos
     for (const pref of preferredAliases) {
       const found = assocs.find((a) => a?.as === pref && a?.target === targetModel);
       if (found?.as) return found.as;
     }
 
-    // 2) por target
     const found = assocs.find((a) => a?.target === targetModel);
     if (found?.as) return found.as;
 
-    // 3) por nombre
     const tname = String(targetModel?.name || "").toLowerCase();
     const found2 = assocs.find((a) => String(a?.target?.name || "").toLowerCase() === tname);
     return found2?.as || null;
@@ -91,9 +85,6 @@ function assocAlias(fromModel, targetModel, preferredAliases = []) {
   }
 }
 
-/**
- * ✅ branch_id desde contexto/auth (mismo criterio que POS)
- */
 function getAuthBranchId(req) {
   return (
     toInt(req?.ctx?.branchId, 0) ||
@@ -110,9 +101,6 @@ function getAuthBranchId(req) {
   );
 }
 
-/**
- * ✅ Admin detector robusto
- */
 function isAdminReq(req) {
   const u = req?.user || req?.auth || {};
   const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
@@ -138,11 +126,6 @@ function isAdminReq(req) {
   return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
 }
 
-/**
- * ✅ Decide scope de sucursal:
- * - Admin: todas (si no manda branch_id) o filtra (si manda branch_id)
- * - No-admin: obligado a su branch
- */
 function resolveBranchScope(req) {
   const admin = isAdminReq(req);
   const qBranch = toInt(req.query.branch_id ?? req.query.branchId, 0);
@@ -150,7 +133,7 @@ function resolveBranchScope(req) {
   if (admin) {
     return {
       admin: true,
-      branchId: qBranch > 0 ? qBranch : null, // null => todas
+      branchId: qBranch > 0 ? qBranch : null,
       mode: qBranch > 0 ? "SINGLE_BRANCH" : "ALL_BRANCHES",
     };
   }
@@ -190,9 +173,38 @@ async function salesTotalsBetween(whereBase) {
   };
 }
 
+/**
+ * ✅ SIEMPRE devuelve ventas por sucursal (aunque sea 1 sola)
+ * - Admin sin filtro: todas
+ * - Admin con branchId: solo esa
+ * - Usuario: solo su branch
+ */
+async function buildSalesByBranch(whereBase) {
+  const rows = await Sale.findAll({
+    attributes: [
+      "branch_id",
+      [fn("SUM", col("total")), "sum_total"],
+      [fn("COUNT", col("id")), "count_sales"],
+    ],
+    where: whereBase,
+    group: ["branch_id"],
+    order: [[fn("SUM", col("total")), "DESC"]],
+    raw: true,
+  }).catch(() => []);
+
+  const brs = await Branch.findAll({ attributes: ["id", "name"], raw: true }).catch(() => []);
+  const m = new Map(brs.map((b) => [toInt(b.id, 0), b.name]));
+
+  return rows.map((r) => ({
+    branch_id: toInt(r.branch_id, 0),
+    branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
+    total: Number(r.sum_total || 0),
+    count: Number(r.count_sales || 0),
+  }));
+}
+
 // ============================
 // GET /api/v1/dashboard/overview
-// (mix grande: ventas + stock + inventario + usuarios + sucursales)
 // ============================
 async function overview(req, res, next) {
   try {
@@ -248,7 +260,7 @@ async function overview(req, res, next) {
       month_count_pct: pctChange(month.count, prevMonth.count),
     };
 
-    // ===== Pagos hoy por método (alias seguro)
+    // pagos hoy por método
     const paySaleAlias = assocAlias(Payment, Sale, ["sale", "Sale"]);
     const paymentsTodayRows = await Payment.findAll({
       attributes: ["method", [fn("SUM", col("amount")), "sum_amount"]],
@@ -273,36 +285,28 @@ async function overview(req, res, next) {
       }))
       .sort((a, b) => b.total - a.total);
 
-    // ===== Inventario KPIs rápidos
+    // inventory KPIs
     const productHasBranch = !!Product?.rawAttributes?.branch_id;
     const prodWhere = productHasBranch && scope.branchId ? { branch_id: scope.branchId } : {};
     const totalProducts = await Product.count({ where: prodWhere });
 
-    const activeProducts = await Product.count({ where: { ...prodWhere, ...(Product?.rawAttributes?.is_active ? { is_active: 1 } : {}) } }).catch(() => 0);
-    const promoProducts = await Product.count({ where: { ...prodWhere, ...(Product?.rawAttributes?.is_promo ? { is_promo: 1 } : {}) } }).catch(() => 0);
-    const newProducts = await Product.count({ where: { ...prodWhere, ...(Product?.rawAttributes?.is_new ? { is_new: 1 } : {}) } }).catch(() => 0);
+    const activeProducts = await Product.count({
+      where: { ...prodWhere, ...(Product?.rawAttributes?.is_active ? { is_active: 1 } : {}) },
+    }).catch(() => 0);
 
-    // noPrice: si existen campos price/price_list
     let noPriceProducts = 0;
     if (Product?.rawAttributes?.price || Product?.rawAttributes?.price_list) {
       const ands = [];
-      if (Product?.rawAttributes?.price_list) {
-        ands.push({ [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] });
-      }
-      if (Product?.rawAttributes?.price) {
-        ands.push({ [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] });
-      }
-      if (ands.length) {
-        noPriceProducts = await Product.count({ where: { ...prodWhere, [Op.and]: ands } }).catch(() => 0);
-      }
+      if (Product?.rawAttributes?.price_list) ands.push({ [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] });
+      if (Product?.rawAttributes?.price) ands.push({ [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] });
+      if (ands.length) noPriceProducts = await Product.count({ where: { ...prodWhere, [Op.and]: ands } }).catch(() => 0);
     }
 
     const categories = await Category.count().catch(() => 0);
-
     const usersTotal = await User.count().catch(() => 0);
     const branchesTotal = await Branch.count().catch(() => 0);
 
-    // ===== Stock KPIs (básico: depende de StockBalance + Warehouse branch)
+    // stock KPIs
     const qtyField =
       StockBalance?.rawAttributes?.quantity ? "quantity" :
       StockBalance?.rawAttributes?.qty ? "qty" :
@@ -338,31 +342,15 @@ async function overview(req, res, next) {
       lowThreshold,
     };
 
-    // ===== Admin: ventas por sucursal (para el pie del frontend)
-    let salesByBranch = null;
-    if (scope.admin && !scope.branchId) {
-      const rows = await Sale.findAll({
-        attributes: [
-          "branch_id",
-          [fn("SUM", col("total")), "sum_total"],
-          [fn("COUNT", col("id")), "count_sales"],
-        ],
-        where: { status: "PAID", sold_at: { [Op.between]: [monthFrom, todayTo] } },
-        group: ["branch_id"],
-        order: [[fn("SUM", col("total")), "DESC"]],
-        raw: true,
-      });
+    // ✅ salesByBranch SIEMPRE (usamos último 30 días para gráfico)
+    const d30 = new Date(todayFrom);
+    d30.setDate(d30.getDate() - 30);
 
-      const brs = await Branch.findAll({ attributes: ["id", "name"], raw: true }).catch(() => []);
-      const m = new Map(brs.map((b) => [toInt(b.id, 0), b.name]));
-
-      salesByBranch = rows.map((r) => ({
-        branch_id: toInt(r.branch_id, 0),
-        branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
-        total: Number(r.sum_total || 0),
-        count: Number(r.count_sales || 0),
-      }));
-    }
+    const salesByBranch = await buildSalesByBranch({
+      ...baseBranch,
+      status: "PAID",
+      sold_at: { [Op.gte]: d30 },
+    });
 
     return res.json({
       ok: true,
@@ -374,14 +362,11 @@ async function overview(req, res, next) {
           month,
           trend,
           paymentsToday,
-          // ✅ compat con tu DashboardSalesTab
           salesByBranch,
         },
         inventory: {
           totalProducts,
           activeProducts,
-          promoProducts,
-          newProducts,
           noPriceProducts,
           categories,
         },
@@ -413,23 +398,22 @@ async function inventory(req, res, next) {
     const prodWhere = productHasBranch && scope.branchId ? { branch_id: scope.branchId } : {};
 
     const totalProducts = await Product.count({ where: prodWhere });
-    const activeProducts = await Product.count({ where: { ...prodWhere, ...(Product?.rawAttributes?.is_active ? { is_active: 1 } : {}) } }).catch(() => 0);
-    const noPriceProducts = (() => {
-      const hasPrice = !!Product?.rawAttributes?.price;
-      const hasPriceList = !!Product?.rawAttributes?.price_list;
-      if (!hasPrice && !hasPriceList) return Promise.resolve(0);
+    const activeProducts = await Product.count({
+      where: { ...prodWhere, ...(Product?.rawAttributes?.is_active ? { is_active: 1 } : {}) },
+    }).catch(() => 0);
 
+    let noPriceProducts = 0;
+    if (Product?.rawAttributes?.price || Product?.rawAttributes?.price_list) {
       const ands = [];
-      if (hasPriceList) ands.push({ [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] });
-      if (hasPrice) ands.push({ [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] });
-      return Product.count({ where: { ...prodWhere, [Op.and]: ands } }).catch(() => 0);
-    })();
+      if (Product?.rawAttributes?.price_list) ands.push({ [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] });
+      if (Product?.rawAttributes?.price) ands.push({ [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] });
+      if (ands.length) noPriceProducts = await Product.count({ where: { ...prodWhere, [Op.and]: ands } }).catch(() => 0);
+    }
 
     const categories = await Category.count().catch(() => 0);
 
-    // últimos productos (tabla) - include category/parent si existe la asociación
     const prodCatAlias = assocAlias(Product, Category, ["category", "Category"]);
-    const catParentAlias = assocAlias(Category, Category, ["parent", "Parent"]); // self ref
+    const catParentAlias = assocAlias(Category, Category, ["parent", "Parent"]);
 
     const lastProducts = await Product.findAll({
       where: prodWhere,
@@ -456,7 +440,7 @@ async function inventory(req, res, next) {
       data: {
         totalProducts,
         activeProducts,
-        noPriceProducts: await noPriceProducts,
+        noPriceProducts,
         categories,
         lastProducts,
       },
@@ -469,7 +453,7 @@ async function inventory(req, res, next) {
 
 // ============================
 // GET /api/v1/dashboard/sales
-// ✅ payload COMPAT con tu DashboardSalesTab.vue
+// ✅ compat con DashboardSalesTab.vue
 // ============================
 async function sales(req, res, next) {
   try {
@@ -487,10 +471,8 @@ async function sales(req, res, next) {
     const to = endOfDay(now);
 
     const whereToday = withBranchWhere({ sold_at: { [Op.between]: [from, to] }, status: "PAID" }, scope.branchId);
-
     const todayAgg = await salesTotalsBetween(whereToday);
 
-    // ✅ compat: fields planos
     const todayCount = todayAgg.count;
     const todayTotal = todayAgg.total;
     const avgTicket = todayAgg.avgTicket;
@@ -559,7 +541,7 @@ async function sales(req, res, next) {
       }
     }
 
-    // últimas ventas (tabla)
+    // últimas ventas
     const salePaymentsAlias = assocAlias(Sale, Payment, ["payments", "Payments"]);
     const saleBranchAlias = assocAlias(Sale, Branch, ["branch", "Branch"]);
     const saleUserAlias = assocAlias(Sale, User, ["user", "User"]);
@@ -579,41 +561,19 @@ async function sales(req, res, next) {
       include: includeLast,
     }).catch(() => []);
 
-    // ✅ Admin: ventas por sucursal (para el PieChart del frontend)
-    let salesByBranch = null;
-    if (scope.admin && !scope.branchId) {
-      const d30 = new Date();
-      d30.setDate(d30.getDate() - 30);
-      d30.setHours(0, 0, 0, 0);
+    // ✅ salesByBranch SIEMPRE (últimos 30 días)
+    const d30 = new Date();
+    d30.setDate(d30.getDate() - 30);
+    d30.setHours(0, 0, 0, 0);
 
-      const rows = await Sale.findAll({
-        attributes: [
-          "branch_id",
-          [fn("SUM", col("total")), "sum_total"],
-          [fn("COUNT", col("id")), "count_sales"],
-        ],
-        where: { status: "PAID", sold_at: { [Op.gte]: d30 } },
-        group: ["branch_id"],
-        order: [[fn("SUM", col("total")), "DESC"]],
-        raw: true,
-      }).catch(() => []);
-
-      const brs = await Branch.findAll({ attributes: ["id", "name"], raw: true }).catch(() => []);
-      const m = new Map(brs.map((b) => [toInt(b.id, 0), b.name]));
-
-      salesByBranch = rows.map((r) => ({
-        branch_id: toInt(r.branch_id, 0),
-        branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
-        total: Number(r.sum_total || 0),
-        count: Number(r.count_sales || 0),
-      }));
-    }
+    const salesByBranch = await buildSalesByBranch(
+      withBranchWhere({ status: "PAID", sold_at: { [Op.gte]: d30 } }, scope.branchId)
+    );
 
     return res.json({
       ok: true,
       scope,
       data: {
-        // ✅ compat exacta con DashboardSalesTab.vue
         todayCount,
         todayTotal,
         avgTicket,
@@ -621,7 +581,7 @@ async function sales(req, res, next) {
         paymentsByMethod,
         salesByDay,
         lastSales,
-        salesByBranch, // null si no admin o si filtró una sucursal
+        salesByBranch,
       },
     });
   } catch (e) {
@@ -632,7 +592,7 @@ async function sales(req, res, next) {
 
 // ============================
 // GET /api/v1/dashboard/stock
-// ✅ payload COMPAT con tu DashboardStockTab.vue
+// (dejamos como estaba tu versión compat)
 // ============================
 async function stock(req, res, next) {
   try {
@@ -670,9 +630,7 @@ async function stock(req, res, next) {
       attributes: pickExistingAttrs(Warehouse, ["name", ...(warehouseHasBranch ? ["branch_id"] : [])], ["id"]),
       required: true,
       ...(warehouseHasBranch && scope.branchId ? { where: { branch_id: scope.branchId } } : {}),
-      include: whBranchAlias
-        ? [{ model: Branch, as: whBranchAlias, attributes: ["id", "name"], required: false }]
-        : [],
+      include: whBranchAlias ? [{ model: Branch, as: whBranchAlias, attributes: ["id", "name"], required: false }] : [],
     };
 
     const includeProduct = sbProductAlias
@@ -684,7 +642,6 @@ async function stock(req, res, next) {
         }
       : null;
 
-    // KPIs: out/low/ok
     const agg = await StockBalance.findOne({
       attributes: [
         [fn("SUM", literal(`CASE WHEN ${qtyField} <= 0 THEN 1 ELSE 0 END`)), "out_cnt"],
@@ -698,41 +655,18 @@ async function stock(req, res, next) {
     const outOfStockCount = Number(agg?.out_cnt || 0);
     const lowStockCount = Number(agg?.low_cnt || 0);
 
-    // trackedProducts: si Product.track_stock existe => contar productos distintos track_stock=1 en balances
     let trackedProducts = 0;
-    if (includeProduct && Product?.rawAttributes?.track_stock) {
-      try {
-        const rows = await StockBalance.findAll({
-          attributes: [[fn("COUNT", fn("DISTINCT", col("product_id"))), "cnt"]],
-          include: [
-            includeWarehouse,
-            {
-              ...includeProduct,
-              required: true,
-              where: { track_stock: 1 },
-            },
-          ],
-          raw: true,
-        });
-        trackedProducts = Number(rows?.[0]?.cnt || 0);
-      } catch {
-        trackedProducts = 0;
-      }
-    } else {
-      // fallback: distinct product_id en balances
-      try {
-        const rows = await StockBalance.findAll({
-          attributes: [[fn("COUNT", fn("DISTINCT", col("product_id"))), "cnt"]],
-          include: [includeWarehouse],
-          raw: true,
-        });
-        trackedProducts = Number(rows?.[0]?.cnt || 0);
-      } catch {
-        trackedProducts = 0;
-      }
+    try {
+      const rows = await StockBalance.findAll({
+        attributes: [[fn("COUNT", fn("DISTINCT", col("product_id"))), "cnt"]],
+        include: [includeWarehouse],
+        raw: true,
+      });
+      trackedProducts = Number(rows?.[0]?.cnt || 0);
+    } catch {
+      trackedProducts = 0;
     }
 
-    // Low stock items (tabla) -> compat con tu DashboardStockTab
     const lowItemsRows = await StockBalance.findAll({
       attributes: ["id", "product_id", "warehouse_id", qtyField, ...(minField ? [minField] : [])],
       include: [includeWarehouse, ...(includeProduct ? [includeProduct] : [])],
@@ -749,11 +683,8 @@ async function stock(req, res, next) {
         product_id: r.product_id,
         name: r.product?.name || `Producto #${r.product_id}`,
         sku: r.product?.sku || null,
-
-        // ✅ estos campos los usa tu tabla
         stock: stockVal,
         min_stock: minVal,
-
         branch_id: r.warehouse?.branch_id ?? null,
         branch_name: r.warehouse?.branch?.name ?? null,
         warehouse_id: r.warehouse_id,
@@ -761,9 +692,9 @@ async function stock(req, res, next) {
       };
     });
 
-    // Stock por sucursal (admin only, todas)
+    // stockByBranch (admin sin filtro: todas; usuario: su sucursal)
     let stockByBranch = null;
-    if (scope.admin && !scope.branchId && warehouseHasBranch) {
+    if (warehouseHasBranch) {
       const rows = await StockBalance.findAll({
         attributes: [
           [col(`${sbWarehouseAlias || "warehouse"}.branch_id`), "branch_id"],
@@ -777,6 +708,7 @@ async function stock(req, res, next) {
             as: sbWarehouseAlias || undefined,
             attributes: [],
             required: true,
+            ...(scope.branchId ? { where: { branch_id: scope.branchId } } : {}),
           },
         ],
         group: [col(`${sbWarehouseAlias || "warehouse"}.branch_id`)],
@@ -786,27 +718,24 @@ async function stock(req, res, next) {
       const brs = await Branch.findAll({ attributes: ["id", "name"], raw: true }).catch(() => []);
       const m = new Map(brs.map((b) => [toInt(b.id, 0), b.name]));
 
-      stockByBranch = rows
-        .map((r) => ({
-          branch_id: toInt(r.branch_id, 0),
-          branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
-          out: Number(r.out_cnt || 0),
-          low: Number(r.low_cnt || 0),
-          ok: Number(r.ok_cnt || 0),
-        }))
-        .sort((a, b) => (b.ok + b.low + b.out) - (a.ok + a.low + a.out));
+      stockByBranch = rows.map((r) => ({
+        branch_id: toInt(r.branch_id, 0),
+        branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
+        out: Number(r.out_cnt || 0),
+        low: Number(r.low_cnt || 0),
+        ok: Number(r.ok_cnt || 0),
+      }));
     }
 
     return res.json({
       ok: true,
       scope,
       data: {
-        // ✅ compat exacta con DashboardStockTab.vue
         outOfStockCount,
         lowStockCount,
         trackedProducts,
         lowStockItems,
-        stockByBranch, // null si no admin/todas
+        stockByBranch,
       },
     });
   } catch (e) {
