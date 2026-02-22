@@ -223,7 +223,7 @@ async function getContext(req, res) {
  * ✅ POS PRODUCTS
  * ✅ FIX: ADMIN_ALL + USER_SCOPE_ALL no “pierden” productos cuando in_stock=0
  */
-listProductsForPos
+
 /**
  * ✅ POS CREATE SALE (admin no vende)
  * ✅ FIX: guarda customer_phone/customer_doc (soporta body.customer_* y body.extra.customer)
