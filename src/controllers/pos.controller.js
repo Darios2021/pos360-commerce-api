@@ -222,7 +222,277 @@ async function getContext(req, res) {
 /**
  * ✅ POS PRODUCTS
  * ✅ FIX: ADMIN_ALL + USER_SCOPE_ALL no “pierden” productos cuando in_stock=0
+ *
+ * ⚠️ CORRECCIÓN REAL:
+ * - El crash era porque exportás listProductsForPos pero NO existía.
+ * - Además, si el user tiene múltiples sucursales, NO debemos quedar clavados a ctxWarehouseId.
+ *   (Eso te dejaba en ~14 de branch 1 en vez de ~225 de branch 3).
+ *
+ * Soporta 2 modos:
+ * 1) warehouse_id explícito => lista por depósito (qty de ese depósito)
+ * 2) sin warehouse_id:
+ *    - admin => agregado global (o por branch_id si viene)
+ *    - user => agregado por branches permitidas (o por branch_id si viene)
+ *
+ * Query:
+ * - q
+ * - in_stock=1|0 (default 1)
+ * - sellable=1|0 (default 1) // precio efectivo > 0
+ * - branch_id (opcional)
+ * - warehouse_id (opcional)
+ * - limit/page
  */
+async function listProductsForPos(req, res) {
+  req._rid = req._rid || rid(req);
+
+  try {
+    const admin = isAdminReq(req);
+
+    // SOLO explícitos (query/body) para decidir modo
+    const explicit = resolveExplicitPosContext(req);
+    const requestedBranchId = toInt(explicit.branchId, 0) || 0;
+    const requestedWarehouseId = toInt(explicit.warehouseId, 0) || 0;
+
+    // Scope usuario (multi-sucursal)
+    const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
+    if (!admin && !allowedBranchIds.length) {
+      return res.status(403).json({
+        ok: false,
+        code: "NO_BRANCH_SCOPE",
+        message: "El usuario no tiene branches asignadas para ver stock.",
+      });
+    }
+
+    // Params
+    const q = String(req.query.q || "").trim();
+    const like = `%${q}%`;
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "48", 10), 1), 5000);
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const offset = (page - 1) * limit;
+
+    const inStock = String(req.query.in_stock ?? "1") === "1";
+    const sellable = String(req.query.sellable ?? "1") === "1";
+
+    const priceExpr = `
+      COALESCE(
+        NULLIF(p.price_discount,0),
+        NULLIF(p.price_list,0),
+        NULLIF(p.price_reseller,0),
+        p.price,
+        0
+      )
+    `;
+
+    const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
+    const whereQ = q
+      ? `AND (
+          p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
+          OR p.brand LIKE :like OR p.model LIKE :like
+        )`
+      : "";
+
+    // ======================================================
+    // 1) MODO DEPÓSITO (warehouse_id explícito)
+    // ======================================================
+    if (requestedWarehouseId) {
+      const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
+
+      const [rows] = await sequelize.query(
+        `
+        SELECT
+          p.id, p.branch_id, p.code, p.sku, p.barcode, p.name, p.brand, p.model,
+          p.category_id, p.subcategory_id, p.is_new, p.is_promo, p.is_active,
+          p.price, p.price_list, p.price_discount, p.price_reseller,
+          (${priceExpr}) AS effective_price,
+          COALESCE(sb.qty, 0) AS qty
+        FROM products p
+        LEFT JOIN stock_balances sb
+          ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereStock}
+        ${whereSellable}
+        ORDER BY p.name ASC
+        LIMIT :limit OFFSET :offset
+        `,
+        { replacements: { warehouseId: requestedWarehouseId, like, limit, offset } }
+      );
+
+      const [[countRow]] = await sequelize.query(
+        `
+        SELECT COUNT(*) AS total
+        FROM products p
+        LEFT JOIN stock_balances sb
+          ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${inStock ? `AND COALESCE(sb.qty,0) > 0` : ""}
+        ${whereSellable}
+        `,
+        { replacements: { warehouseId: requestedWarehouseId, like } }
+      );
+
+      return res.json({
+        ok: true,
+        data: rows,
+        meta: {
+          scope: "WAREHOUSE",
+          page,
+          limit,
+          total: Number(countRow?.total || 0),
+          warehouse_id: requestedWarehouseId,
+        },
+      });
+    }
+
+    // ======================================================
+    // 2) ADMIN (sin warehouse) => agregado global o por branch
+    // ======================================================
+    if (admin) {
+      const scopeBranchId = requestedBranchId || 0;
+
+      const qtyExpr = scopeBranchId
+        ? `COALESCE(SUM(CASE WHEN w.branch_id = :branchId THEN sb.qty ELSE 0 END), 0)`
+        : `COALESCE(SUM(sb.qty), 0)`;
+
+      const havingStock = inStock ? `HAVING ${qtyExpr} > 0` : "";
+
+      const [rows] = await sequelize.query(
+        `
+        SELECT
+          p.id, p.branch_id, p.code, p.sku, p.barcode, p.name, p.brand, p.model,
+          p.category_id, p.subcategory_id, p.is_new, p.is_promo, p.is_active,
+          p.price, p.price_list, p.price_discount, p.price_reseller,
+          (${priceExpr}) AS effective_price,
+          ${qtyExpr} AS qty
+        FROM products p
+        LEFT JOIN stock_balances sb ON sb.product_id = p.id
+        LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereSellable}
+        GROUP BY p.id
+        ${havingStock}
+        ORDER BY p.name ASC
+        LIMIT :limit OFFSET :offset
+        `,
+        { replacements: { like, limit, offset, branchId: scopeBranchId || undefined } }
+      );
+
+      const [[countRow]] = await sequelize.query(
+        `
+        SELECT COUNT(*) AS total
+        FROM (
+          SELECT p.id
+          FROM products p
+          LEFT JOIN stock_balances sb ON sb.product_id = p.id
+          LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE p.is_active = 1
+          ${whereQ}
+          ${whereSellable}
+          GROUP BY p.id
+          ${havingStock}
+        ) x
+        `,
+        { replacements: { like, branchId: scopeBranchId || undefined } }
+      );
+
+      return res.json({
+        ok: true,
+        data: rows,
+        meta: {
+          scope: "ADMIN_ALL",
+          page,
+          limit,
+          total: Number(countRow?.total || 0),
+          branch_id: scopeBranchId || null,
+        },
+      });
+    }
+
+    // ======================================================
+    // 3) USER (sin warehouse) => agregado SOLO en sus branches
+    // ======================================================
+    if (requestedBranchId && !allowedBranchIds.includes(requestedBranchId)) {
+      return res.status(403).json({
+        ok: false,
+        code: "BRANCH_NOT_ALLOWED",
+        message: `No tenés permisos para operar/ver la sucursal ${requestedBranchId}.`,
+      });
+    }
+
+    const scopeBranchIds = requestedBranchId ? [requestedBranchId] : allowedBranchIds;
+
+    const qtyExpr = `COALESCE(SUM(CASE WHEN w.branch_id IN (:branchIds) THEN sb.qty ELSE 0 END), 0)`;
+    const havingStock = inStock ? `HAVING ${qtyExpr} > 0` : "";
+
+    logPos(req, "info", "listProductsForPos scope", {
+      admin,
+      requestedBranchId,
+      requestedWarehouseId,
+      allowedBranchIds,
+      scopeBranchIds,
+      inStock,
+      sellable,
+    });
+
+    const [rows] = await sequelize.query(
+      `
+      SELECT
+        p.id, p.branch_id, p.code, p.sku, p.barcode, p.name, p.brand, p.model,
+        p.category_id, p.subcategory_id, p.is_new, p.is_promo, p.is_active,
+        p.price, p.price_list, p.price_discount, p.price_reseller,
+        (${priceExpr}) AS effective_price,
+        ${qtyExpr} AS qty
+      FROM products p
+      LEFT JOIN stock_balances sb ON sb.product_id = p.id
+      LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+      WHERE p.is_active = 1
+      ${whereQ}
+      ${whereSellable}
+      GROUP BY p.id
+      ${havingStock}
+      ORDER BY p.name ASC
+      LIMIT :limit OFFSET :offset
+      `,
+      { replacements: { like, limit, offset, branchIds: scopeBranchIds } }
+    );
+
+    const [[countRow]] = await sequelize.query(
+      `
+      SELECT COUNT(*) AS total
+      FROM (
+        SELECT p.id
+        FROM products p
+        LEFT JOIN stock_balances sb ON sb.product_id = p.id
+        LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+        WHERE p.is_active = 1
+        ${whereQ}
+        ${whereSellable}
+        GROUP BY p.id
+        ${havingStock}
+      ) x
+      `,
+      { replacements: { like, branchIds: scopeBranchIds } }
+    );
+
+    return res.json({
+      ok: true,
+      data: rows,
+      meta: {
+        scope: "USER_SCOPE_ALL",
+        page,
+        limit,
+        total: Number(countRow?.total || 0),
+        branch_ids: scopeBranchIds,
+      },
+    });
+  } catch (e) {
+    logPos(req, "error", "listProductsForPos error", { err: e.message });
+    return res.status(500).json({ ok: false, code: "POS_PRODUCTS_ERROR", message: e.message });
+  }
+}
 
 /**
  * ✅ POS CREATE SALE (admin no vende)
@@ -426,9 +696,7 @@ async function createSale(req, res) {
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(
-            `Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`
-          ),
+          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
           { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
         );
       }
