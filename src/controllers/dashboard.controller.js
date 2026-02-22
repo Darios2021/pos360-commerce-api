@@ -1,14 +1,198 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/dashboard.controller.js
-const svc = require("../services/dashboard.service");
+
+const { Op, fn, col, literal, QueryTypes } = require("sequelize");
+const {
+  sequelize,
+  Product,
+  Category,
+  Sale,
+  SaleItem,
+  Payment,
+  Branch,
+  User,
+  Warehouse,
+  StockBalance,
+  StockMovement,
+} = require("../models");
+
+// =========================
+// Helpers
+// =========================
+function toInt(v, d = 0) {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : d;
+}
+
+function ymd(d) {
+  const x = new Date(d);
+  const yyyy = x.getFullYear();
+  const mm = String(x.getMonth() + 1).padStart(2, "0");
+  const dd = String(x.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function startOfDay(d = new Date()) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function endOfDay(d = new Date()) {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
+function methodLabel(m) {
+  const x = String(m || "").toUpperCase();
+  if (x === "CASH") return "Efectivo";
+  if (x === "CARD") return "Tarjeta / Débito";
+  if (x === "TRANSFER") return "Transferencia";
+  if (x === "QR") return "QR";
+  if (x === "OTHER") return "Otro";
+  return x || "—";
+}
+
+function pickExistingAttrs(model, candidates, always = ["id"]) {
+  const attrs = [];
+  for (const a of always) if (model?.rawAttributes?.[a]) attrs.push(a);
+  for (const a of candidates) if (model?.rawAttributes?.[a]) attrs.push(a);
+  return attrs.length ? attrs : ["id"];
+}
+
+/**
+ * ✅ branch_id desde contexto/auth (mismo criterio que POS)
+ */
+function getAuthBranchId(req) {
+  return (
+    toInt(req?.ctx?.branchId, 0) ||
+    toInt(req?.ctx?.branch_id, 0) ||
+    toInt(req?.user?.branch_id, 0) ||
+    toInt(req?.user?.branchId, 0) ||
+    toInt(req?.auth?.branch_id, 0) ||
+    toInt(req?.auth?.branchId, 0) ||
+    toInt(req?.branch?.id, 0) ||
+    toInt(req?.branchId, 0) ||
+    toInt(req?.branchContext?.branch_id, 0) ||
+    toInt(req?.branchContext?.id, 0) ||
+    0
+  );
+}
+
+/**
+ * ✅ Admin detector robusto
+ */
+function isAdminReq(req) {
+  const u = req?.user || req?.auth || {};
+  const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
+  if (email === "admin@360pos.local" || email.includes("admin@360pos.local")) return true;
+
+  if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
+
+  const roleNames = [];
+  if (typeof u?.role === "string") roleNames.push(u.role);
+  if (typeof u?.rol === "string") roleNames.push(u.rol);
+
+  if (Array.isArray(u?.roles)) {
+    for (const r of u.roles) {
+      if (!r) continue;
+      if (typeof r === "string") roleNames.push(r);
+      else if (typeof r?.name === "string") roleNames.push(r.name);
+      else if (typeof r?.role === "string") roleNames.push(r.role);
+      else if (typeof r?.role?.name === "string") roleNames.push(r.role.name);
+    }
+  }
+
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
+}
+
+/**
+ * ✅ Decide scope de sucursal:
+ * - Admin: todas (si no manda branch_id) o filtra (si manda branch_id)
+ * - No-admin: obligado a su branch (desde auth)
+ */
+function resolveBranchScope(req) {
+  const admin = isAdminReq(req);
+  const qBranch = toInt(req.query.branch_id ?? req.query.branchId, 0);
+
+  if (admin) {
+    return {
+      admin: true,
+      branchId: qBranch > 0 ? qBranch : null,
+      mode: qBranch > 0 ? "SINGLE_BRANCH" : "ALL_BRANCHES",
+    };
+  }
+
+  const branchId = getAuthBranchId(req);
+  return {
+    admin: false,
+    branchId: branchId > 0 ? branchId : null,
+    mode: "USER_BRANCH",
+  };
+}
+
+function withBranchWhere(whereBase, branchId) {
+  const where = { ...(whereBase || {}) };
+  if (branchId) where.branch_id = branchId;
+  return where;
+}
+
+/**
+ * ✅ Encuentra el alias real de una asociación Sequelize (evita 500 por "as" mal)
+ */
+function findAssocAs(fromModel, toModel) {
+  try {
+    const assocs = fromModel?.associations || {};
+    for (const key of Object.keys(assocs)) {
+      const a = assocs[key];
+      if (a?.target === toModel) return a.as || key;
+    }
+  } catch {}
+  return null;
+}
+
+// =========================
+// SALES STATS
+// =========================
+async function salesTotalsBetween(whereBase) {
+  const row = await Sale.findOne({
+    attributes: [
+      [fn("COUNT", col("Sale.id")), "count_sales"],
+      [fn("SUM", col("total")), "sum_total"],
+      [fn("AVG", col("total")), "avg_ticket"],
+      [fn("SUM", col("discount_total")), "sum_discount"],
+      [fn("SUM", col("tax_total")), "sum_tax"],
+    ],
+    where: whereBase,
+    raw: true,
+  });
+
+  return {
+    count: Number(row?.count_sales || 0),
+    total: Number(row?.sum_total || 0),
+    avgTicket: Number(row?.avg_ticket || 0),
+    discountTotal: Number(row?.sum_discount || 0),
+    taxTotal: Number(row?.sum_tax || 0),
+  };
+}
+
+function pctChange(curr, prev) {
+  const c = Number(curr || 0);
+  const p = Number(prev || 0);
+  if (p === 0 && c === 0) return 0;
+  if (p === 0) return 100;
+  return ((c - p) / p) * 100;
+}
 
 // ============================
 // GET /api/v1/dashboard/overview
 // ============================
 async function overview(req, res, next) {
   try {
-    const scope = svc.resolveBranchScope(req);
+    const scope = resolveBranchScope(req);
 
+    // ✅ NO-admin debe tener sucursal sí o sí
     if (!scope.admin && !scope.branchId) {
       return res.status(400).json({
         ok: false,
@@ -18,8 +202,8 @@ async function overview(req, res, next) {
     }
 
     const now = new Date();
-    const todayFrom = svc.startOfDay(now);
-    const todayTo = svc.endOfDay(now);
+    const todayFrom = startOfDay(now);
+    const todayTo = endOfDay(now);
 
     const weekFrom = new Date(todayFrom);
     weekFrom.setDate(weekFrom.getDate() - 6);
@@ -38,34 +222,216 @@ async function overview(req, res, next) {
     const prevMonthTo = new Date(monthFrom);
     prevMonthTo.setMilliseconds(-1);
 
-    const branchId = scope.branchId; // null => todas
-    const today = await svc.getSalesTotals({ from: todayFrom, to: todayTo, branchId });
-    const week = await svc.getSalesTotals({ from: weekFrom, to: todayTo, branchId });
-    const month = await svc.getSalesTotals({ from: monthFrom, to: todayTo, branchId });
+    const baseBranch = scope.branchId ? { branch_id: scope.branchId } : {};
 
-    const prevWeek = await svc.getSalesTotals({ from: prevWeekFrom, to: prevWeekTo, branchId });
-    const prevMonth = await svc.getSalesTotals({ from: prevMonthFrom, to: prevMonthTo, branchId });
+    const todayWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [todayFrom, todayTo] } };
+    const weekWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [weekFrom, todayTo] } };
+    const monthWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [monthFrom, todayTo] } };
+
+    const prevWeekWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [prevWeekFrom, prevWeekTo] } };
+    const prevMonthWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [prevMonthFrom, prevMonthTo] } };
+
+    const today = await salesTotalsBetween(todayWhere);
+    const week = await salesTotalsBetween(weekWhere);
+    const month = await salesTotalsBetween(monthWhere);
+
+    const prevWeek = await salesTotalsBetween(prevWeekWhere);
+    const prevMonth = await salesTotalsBetween(prevMonthWhere);
 
     const trend = {
-      week_total_pct: svc.pctChange(week.total, prevWeek.total),
-      week_count_pct: svc.pctChange(week.count, prevWeek.count),
-      month_total_pct: svc.pctChange(month.total, prevMonth.total),
-      month_count_pct: svc.pctChange(month.count, prevMonth.count),
+      week_total_pct: pctChange(week.total, prevWeek.total),
+      week_count_pct: pctChange(week.count, prevWeek.count),
+      month_total_pct: pctChange(month.total, prevMonth.total),
+      month_count_pct: pctChange(month.count, prevMonth.count),
     };
 
-    // Pagos por método (hoy)
-    const paymentsToday = await svc.getPaymentsByMethodToday({ from: todayFrom, to: todayTo, branchId });
+    // ===== Pagos hoy por método (alias-safe + fallback SQL)
+    let paymentsToday = [];
+    try {
+      const asSale = findAssocAs(Payment, Sale);
+      if (asSale) {
+        const rows = await Payment.findAll({
+          attributes: ["method", [fn("SUM", col("amount")), "sum_amount"]],
+          include: [
+            {
+              model: Sale,
+              as: asSale,
+              attributes: [],
+              required: true,
+              where: todayWhere,
+            },
+          ],
+          group: ["method"],
+          raw: true,
+        });
 
-    // Ventas por sucursal (últimos 30 días) — SIEMPRE
-    const d30 = new Date(todayFrom);
-    d30.setDate(d30.getDate() - 30);
-    const salesByBranch = await svc.getSalesByBranch({ from: d30, branchId });
+        paymentsToday = rows
+          .map((r) => ({
+            method: String(r.method || "").toUpperCase(),
+            label: methodLabel(r.method),
+            total: Number(r.sum_amount || 0),
+          }))
+          .sort((a, b) => b.total - a.total);
+      } else {
+        // fallback SQL
+        const rows = await sequelize.query(
+          `
+          SELECT p.method, SUM(p.amount) as sum_amount
+          FROM payments p
+          INNER JOIN sales s ON s.id = p.sale_id
+          WHERE s.status = 'PAID'
+            AND s.sold_at BETWEEN :from AND :to
+            ${scope.branchId ? "AND s.branch_id = :branchId" : ""}
+          GROUP BY p.method
+          `,
+          {
+            type: QueryTypes.SELECT,
+            replacements: {
+              from: todayFrom,
+              to: todayTo,
+              branchId: scope.branchId || null,
+            },
+          }
+        );
 
-    // Stock KPIs
-    const stock = await svc.getStock({ branchId, lowThreshold: 3 });
+        paymentsToday = rows
+          .map((r) => ({
+            method: String(r.method || "").toUpperCase(),
+            label: methodLabel(r.method),
+            total: Number(r.sum_amount || 0),
+          }))
+          .sort((a, b) => b.total - a.total);
+      }
+    } catch {
+      paymentsToday = [];
+    }
 
-    // Inventory KPIs + últimos productos
-    const inventory = await svc.getInventory({ branchId });
+    // ===== ventas últimos 7 días
+    const salesByDayRows = await Sale.findAll({
+      attributes: [
+        [fn("DATE", col("sold_at")), "day"],
+        [fn("SUM", col("total")), "sum_total"],
+        [fn("COUNT", col("Sale.id")), "count_sales"],
+      ],
+      where: { ...baseBranch, status: "PAID", sold_at: { [Op.gte]: weekFrom } },
+      group: [fn("DATE", col("sold_at"))],
+      order: [[fn("DATE", col("sold_at")), "ASC"]],
+      raw: true,
+    });
+
+    const mapDay = new Map();
+    for (const r of salesByDayRows) mapDay.set(String(r.day), { total: Number(r.sum_total || 0), count: Number(r.count_sales || 0) });
+
+    const salesByDay = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(weekFrom);
+      d.setDate(weekFrom.getDate() + i);
+      const key = ymd(d);
+      const v = mapDay.get(key) || { total: 0, count: 0 };
+      salesByDay.push({ date: key, total: v.total, count: v.count });
+    }
+
+    // ===== últimas ventas
+    const includeLast = [];
+    const asPayments = findAssocAs(Sale, Payment);
+    if (asPayments) includeLast.push({ model: Payment, as: asPayments, required: false });
+
+    const asBranch = findAssocAs(Sale, Branch);
+    if (asBranch) includeLast.push({ model: Branch, as: asBranch, required: false, attributes: ["id", "name"] });
+
+    const asUser = findAssocAs(Sale, User);
+    if (asUser) {
+      const userAttrs = pickExistingAttrs(User, ["full_name", "name", "username", "email", "identifier"], ["id"]);
+      includeLast.push({ model: User, as: asUser, required: false, attributes: userAttrs });
+    }
+
+    const lastSales = await Sale.findAll({
+      where: withBranchWhere({ status: "PAID" }, scope.branchId),
+      order: [["id", "DESC"]],
+      limit: 10,
+      include: includeLast,
+    });
+
+    // ===== ventas por sucursal (últimos 30 días) (admin-only sin filtro)
+    let salesByBranch = [];
+    if (scope.admin && !scope.branchId) {
+      const d30 = new Date(todayFrom);
+      d30.setDate(d30.getDate() - 30);
+
+      const rows = await Sale.findAll({
+        attributes: [
+          "branch_id",
+          [fn("SUM", col("total")), "sum_total"],
+          [fn("COUNT", col("id")), "count_sales"],
+        ],
+        where: { status: "PAID", sold_at: { [Op.gte]: d30 } },
+        group: ["branch_id"],
+        order: [[fn("SUM", col("total")), "DESC"]],
+        raw: true,
+      });
+
+      const brs = await Branch.findAll({ attributes: ["id", "name"], raw: true }).catch(() => []);
+      const m = new Map(brs.map((b) => [toInt(b.id, 0), b.name]));
+
+      salesByBranch = rows.map((r) => ({
+        branch_id: toInt(r.branch_id, 0),
+        branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
+        total: Number(r.sum_total || 0),
+        count: Number(r.count_sales || 0),
+      }));
+    }
+
+    // ===== inventory KPIs
+    const prodWhere = scope.branchId ? { branch_id: scope.branchId } : {};
+    const totalProducts = await Product.count({ where: prodWhere });
+    const activeProducts = await Product.count({ where: { ...prodWhere, is_active: 1 } }).catch(() => 0);
+
+    const noPriceProducts = await Product.count({
+      where: {
+        ...prodWhere,
+        [Op.and]: [
+          { [Op.or]: [{ price_list: { [Op.lte]: 0 } }, { price_list: null }] },
+          { [Op.or]: [{ price: { [Op.lte]: 0 } }, { price: null }] },
+        ],
+      },
+    }).catch(() => 0);
+
+    const categoriesTotal = await Category.count().catch(() => 0);
+    const usersTotal = await User.count().catch(() => 0);
+    const branchesTotal = await Branch.count().catch(() => 0);
+
+    // ===== stock KPIs (stock_balances.qty)
+    const qtyField = StockBalance?.rawAttributes?.qty ? "qty" : "qty";
+    const lowThreshold = 3;
+
+    const asWh = findAssocAs(StockBalance, Warehouse);
+    let stockKpis = { outCount: 0, lowCount: 0, okCount: 0, lowThreshold };
+    if (asWh) {
+      const includeWarehouse = {
+        model: Warehouse,
+        as: asWh,
+        attributes: [],
+        required: true,
+        ...(scope.branchId ? { where: { branch_id: scope.branchId } } : {}),
+      };
+
+      const row = await StockBalance.findOne({
+        attributes: [
+          [fn("SUM", literal(`CASE WHEN ${qtyField} <= 0 THEN 1 ELSE 0 END`)), "out_cnt"],
+          [fn("SUM", literal(`CASE WHEN ${qtyField} > 0 AND ${qtyField} <= ${lowThreshold} THEN 1 ELSE 0 END`)), "low_cnt"],
+          [fn("SUM", literal(`CASE WHEN ${qtyField} > ${lowThreshold} THEN 1 ELSE 0 END`)), "ok_cnt"],
+        ],
+        include: [includeWarehouse],
+        raw: true,
+      }).catch(() => ({ out_cnt: 0, low_cnt: 0, ok_cnt: 0 }));
+
+      stockKpis = {
+        outCount: Number(row?.out_cnt || 0),
+        lowCount: Number(row?.low_cnt || 0),
+        okCount: Number(row?.ok_cnt || 0),
+        lowThreshold,
+      };
+    }
 
     return res.json({
       ok: true,
@@ -76,17 +442,19 @@ async function overview(req, res, next) {
           week,
           month,
           trend,
-          paymentsToday,
-
-          // ✅ canon
-          salesByBranch,
-
-          // ✅ compat con dashboards viejos (por si el front mira otro nombre)
-          byBranch: salesByBranch,
-          salesByBranchPie: salesByBranch,
+          paymentsToday,     // ✅ HOY por método
+          salesByDay,        // ✅ 7 días
+          salesByBranch,     // ✅ 30 días (admin sin filtro)
+          lastSales,         // ✅ últimas ventas
         },
-        inventory,
-        stock,
+        inventory: {
+          totalProducts,
+          activeProducts,
+          noPriceProducts,
+          categories: categoriesTotal,
+        },
+        users: { usersTotal, branchesTotal },
+        stock: stockKpis,
       },
     });
   } catch (e) {
@@ -96,141 +464,30 @@ async function overview(req, res, next) {
 }
 
 // ============================
-// GET /api/v1/dashboard/inventory
-// ============================
-async function inventory(req, res, next) {
-  try {
-    const scope = svc.resolveBranchScope(req);
-
-    if (!scope.admin && !scope.branchId) {
-      return res.status(400).json({
-        ok: false,
-        code: "BRANCH_REQUIRED",
-        message: "No se pudo determinar la sucursal del usuario (branch_id).",
-      });
-    }
-
-    const data = await svc.getInventory({ branchId: scope.branchId });
-
-    return res.json({
-      ok: true,
-      scope,
-      data,
-    });
-  } catch (e) {
-    console.error("❌ [DASHBOARD INVENTORY ERROR]", e);
-    next(e);
-  }
-}
-
-// ============================
-// GET /api/v1/dashboard/sales
+// Endpoints "compat" (si tu frontend llama /sales /inventory /stock)
+// Recomendación: que el frontend use /overview, pero dejo estos para no romper.
 // ============================
 async function sales(req, res, next) {
   try {
-    const scope = svc.resolveBranchScope(req);
-
-    if (!scope.admin && !scope.branchId) {
-      return res.status(400).json({
-        ok: false,
-        code: "BRANCH_REQUIRED",
-        message: "No se pudo determinar la sucursal del usuario (branch_id).",
-      });
-    }
-
-    const now = new Date();
-    const from = svc.startOfDay(now);
-    const to = svc.endOfDay(now);
-    const branchId = scope.branchId;
-
-    const todayAgg = await svc.getSalesTotals({ from, to, branchId });
-
-    const days = 7;
-    const start = new Date();
-    start.setDate(start.getDate() - (days - 1));
-    start.setHours(0, 0, 0, 0);
-
-    const salesByDay = await svc.getSalesByDay({ start, days, branchId });
-
-    const paymentsToday = await svc.getPaymentsByMethodToday({ from, to, branchId });
-
-    let topPaymentLabel = "—";
-    let topVal = 0;
-    const paymentsByMethod = {};
-    for (const p of paymentsToday) {
-      paymentsByMethod[p.method] = p.total;
-      if (p.total > topVal) {
-        topVal = p.total;
-        topPaymentLabel = p.label;
-      }
-    }
-
-    const lastSales = await svc.getLastSales({ limit: 10, branchId });
-
-    // Ventas por sucursal últimos 30 días — SIEMPRE (aunque sea una sola)
-    const d30 = new Date(from);
-    d30.setDate(d30.getDate() - 30);
-    const salesByBranch = await svc.getSalesByBranch({ from: d30, branchId });
-
-    return res.json({
-      ok: true,
-      scope,
-      data: {
-        todayCount: todayAgg.count,
-        todayTotal: todayAgg.total,
-        avgTicket: todayAgg.avgTicket,
-
-        topPaymentLabel,
-        paymentsByMethod,
-
-        salesByDay,
-        lastSales,
-
-        // ✅ canon
-        salesByBranch,
-
-        // ✅ compat
-        byBranch: salesByBranch,
-        salesByBranchPie: salesByBranch,
-      },
-    });
+    // ✅ devolvemos la misma data desde overview, así no hay 2 lógicas
+    return overview(req, res, next);
   } catch (e) {
-    console.error("❌ [DASHBOARD SALES ERROR]", e);
     next(e);
   }
 }
-
-// ============================
-// GET /api/v1/dashboard/stock
-// ============================
+async function inventory(req, res, next) {
+  try {
+    return overview(req, res, next);
+  } catch (e) {
+    next(e);
+  }
+}
 async function stock(req, res, next) {
   try {
-    const scope = svc.resolveBranchScope(req);
-
-    if (!scope.admin && !scope.branchId) {
-      return res.status(400).json({
-        ok: false,
-        code: "BRANCH_REQUIRED",
-        message: "No se pudo determinar la sucursal del usuario (branch_id).",
-      });
-    }
-
-    const data = await svc.getStock({ branchId: scope.branchId, lowThreshold: 3 });
-
-    return res.json({
-      ok: true,
-      scope,
-      data,
-    });
+    return overview(req, res, next);
   } catch (e) {
-    console.error("❌ [DASHBOARD STOCK ERROR]", e);
     next(e);
   }
 }
 
-module.exports = {
-  overview,
-  inventory,
-  sales,
-  stock,
-};
+module.exports = { overview, sales, inventory, stock };
