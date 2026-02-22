@@ -9,6 +9,10 @@
 //    - filtrar stock SOLO si in_stock=1
 // ✅ FIX CLAVE: parseBool robusto (acepta 1/0, true/false, vacío) => evita "total=260 siempre" y globalItems=14
 // ✅ Se mantienen: createSaleReturn (devoluciones) + createSaleExchange (cambios)
+//
+// ✅ FIX ADMIN:
+// - Admin SÍ puede vender y registrar cambios
+// - Si el admin NO tiene branch_id en el usuario, debe venir branch_id/warehouse_id explícito (query/body/ctx) o error claro
 
 const { literal } = require("sequelize");
 const {
@@ -517,8 +521,9 @@ async function listProductsForPos(req, res) {
    POST /pos/sales
 ========================= */
 /**
- * ✅ POS CREATE SALE (admin no vende)
+ * ✅ POS CREATE SALE
  * ✅ FIX: guarda customer_phone/customer_doc (soporta body.customer_* y body.extra.customer)
+ * ✅ FIX ADMIN: admin puede vender si se resuelve branch/warehouse
  */
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
@@ -527,12 +532,7 @@ async function createSale(req, res) {
   try {
     const admin = isAdminReq(req);
     if (admin) {
-      logPos(req, "warn", "createSale blocked: admin cannot sell");
-      return res.status(403).json({
-        ok: false,
-        code: "ADMIN_CANNOT_SELL",
-        message: "El usuario admin no puede registrar ventas desde POS (solo vista).",
-      });
+      logPos(req, "info", "createSale admin allowed");
     }
 
     const body = req.body || {};
@@ -579,29 +579,51 @@ async function createSale(req, res) {
 
     const userId = toInt(req.user.id, 0);
 
+    // ✅ Para admin, dejamos que venga explícito (body/query) o ctx.
+    // Para user, usa su branch_id como antes.
     const userBranchId = toInt(req.user.branch_id, 0);
-    const { warehouseId: ctxWarehouseId } = resolvePosContext(req);
 
-    const resolvedBranchId = userBranchId;
+    const explicit = resolveExplicitPosContext(req);
+    const ctx = resolvePosContext(req);
+
+    const resolvedBranchId = admin
+      ? (toInt(explicit.branchId, 0) || userBranchId || toInt(ctx.branchId, 0) || 0)
+      : userBranchId;
 
     if (!resolvedBranchId) {
-      logPos(req, "warn", "createSale blocked: missing branch", { userBranchId });
+      logPos(req, "warn", "createSale blocked: missing branch (admin needs explicit branch_id)", {
+        admin,
+        userBranchId,
+        explicit,
+        ctx,
+      });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
-        message: "Falta branch_id (sucursal). El usuario no tiene sucursal asignada.",
+        message: admin
+          ? "Admin: falta branch_id explícito (query/body) o branch_id en el usuario."
+          : "Falta branch_id (sucursal). El usuario no tiene sucursal asignada.",
       });
     }
 
-    let resolvedWarehouseId = toInt(ctxWarehouseId, 0);
-    if (!resolvedWarehouseId) {
+    let resolvedWarehouseId = admin
+      ? (toInt(explicit.warehouseId, 0) || toInt(ctx.warehouseId, 0) || 0)
+      : (toInt(ctx.warehouseId, 0) || 0);
+
+    if (!admin && !resolvedWarehouseId && resolvedBranchId) {
+      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+    }
+    if (admin && !resolvedWarehouseId && resolvedBranchId) {
+      // admin: si no especifica, intentamos default del branch
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
 
     if (!resolvedWarehouseId) {
       logPos(req, "warn", "createSale blocked: missing warehouse", {
         resolvedBranchId,
-        ctxWarehouseId,
+        admin,
+        explicit,
+        ctx,
       });
       return res.status(400).json({
         ok: false,
@@ -609,6 +631,18 @@ async function createSale(req, res) {
         message:
           "Falta warehouse_id (depósito). Enviá warehouse_id o asegurate de tener al menos 1 depósito creado para la sucursal.",
       });
+    }
+
+    // (opcional) cross-check warehouse pertenece a branch cuando admin manda explícito
+    if (admin) {
+      const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
+      if (!ok) {
+        return res.status(400).json({
+          ok: false,
+          code: "WAREHOUSE_BRANCH_MISMATCH",
+          message: "El warehouse_id no pertenece al branch_id indicado.",
+        });
+      }
     }
 
     if (items.length === 0) {
@@ -644,6 +678,7 @@ async function createSale(req, res) {
     for (const it of normalizedItems) subtotal += it.quantity * it.unit_price;
 
     logPos(req, "info", "createSale start", {
+      admin,
       resolvedBranchId,
       resolvedWarehouseId,
       items: normalizedItems.length,
@@ -1192,11 +1227,7 @@ async function createSaleExchange(req, res) {
 
     const admin = isAdminReq(req);
     if (admin) {
-      return res.status(403).json({
-        ok: false,
-        code: "ADMIN_CANNOT_EXCHANGE",
-        message: "El usuario admin no puede registrar cambios desde POS (solo vista).",
-      });
+      logPos(req, "info", "createSaleExchange admin allowed");
     }
 
     const userId = toInt(req.user.id, 0);
@@ -1234,13 +1265,26 @@ async function createSaleExchange(req, res) {
       return res.status(404).json({ ok: false, code: "SALE_NOT_FOUND", message: "Venta no encontrada" });
     }
 
-    if (!userBranchId) {
-      await t.rollback();
-      return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
-    }
-    if (toInt(sale.branch_id, 0) !== userBranchId) {
-      await t.rollback();
-      return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
+    // ✅ Scope sucursal:
+    // - user normal: debe coincidir con su branch_id (como antes)
+    // - admin: si no tiene branch_id asignada, pedimos branch_id explícito (o al menos que coincida con la venta)
+    if (!admin) {
+      if (!userBranchId) {
+        await t.rollback();
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "El usuario no tiene sucursal asignada",
+        });
+      }
+      if (toInt(sale.branch_id, 0) !== userBranchId) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_SALE",
+          message: "No podés operar una venta de otra sucursal",
+        });
+      }
     }
 
     // 1) Devolución dentro de la MISMA tx
@@ -1422,8 +1466,10 @@ async function createSaleExchange(req, res) {
     const items2 = Array.isArray(newSalePayload.items) ? newSalePayload.items : [];
     const pays2 = Array.isArray(newSalePayload.payments) ? newSalePayload.payments : [];
 
-    const extra2 = newSalePayload.extra && typeof newSalePayload.extra === "object" ? newSalePayload.extra : {};
-    const c2 = extra2.customer && typeof extra2.customer === "object" ? extra2.customer : (newSalePayload.customer || {});
+    const extra2 =
+      newSalePayload.extra && typeof newSalePayload.extra === "object" ? newSalePayload.extra : {};
+    const c2 =
+      extra2.customer && typeof extra2.customer === "object" ? extra2.customer : (newSalePayload.customer || {});
 
     const first2 = String(c2.first_name || "").trim();
     const last2 = String(c2.last_name || "").trim();
