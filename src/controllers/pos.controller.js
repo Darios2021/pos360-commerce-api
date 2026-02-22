@@ -1,11 +1,13 @@
-// ✅ COPY-PASTE FINAL
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/pos.controller.js
+//
 // (NO se altera lo que ya funciona: getContext, listProductsForPos, createSale quedan IGUAL en comportamiento)
 // ✅ FIX REAL (POS LIST):
 // - ADMIN_ALL + USER_SCOPE_ALL: cuando in_stock=0 NO debe “perder” productos por INNER JOIN warehouses
 // - Se usa LEFT JOIN + SUM(CASE WHEN ...) para:
 //    - qty = 0 cuando no hay stock_balance
 //    - filtrar stock SOLO si in_stock=1
+// ✅ FIX CLAVE: parseBool robusto (acepta 1/0, true/false, vacío) => evita "total=260 siempre" y globalItems=14
 // ✅ Se mantienen: createSaleReturn (devoluciones) + createSaleExchange (cambios)
 
 const { literal } = require("sequelize");
@@ -21,6 +23,9 @@ const {
   Warehouse,
 } = require("../models");
 
+/* =========================
+   Utils
+========================= */
 function toNum(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
@@ -29,6 +34,18 @@ function toNum(v, def = 0) {
 function toInt(v, def = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : def;
+}
+
+function parseBool(v, def = false) {
+  if (v === undefined || v === null) return def;
+
+  const s = String(v).trim().toLowerCase();
+  if (s === "") return def;
+
+  if (["1", "true", "t", "yes", "y", "on"].includes(s)) return true;
+  if (["0", "false", "f", "no", "n", "off"].includes(s)) return false;
+
+  return def;
 }
 
 function normalizeRoles(raw) {
@@ -156,6 +173,9 @@ async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
   return toInt(w.branch_id, 0) === bid;
 }
 
+/* =========================
+   GET /pos/context
+========================= */
 async function getContext(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -219,14 +239,12 @@ async function getContext(req, res) {
   }
 }
 
+/* =========================
+   GET /pos/products
+========================= */
 /**
  * ✅ POS PRODUCTS
  * ✅ FIX: ADMIN_ALL + USER_SCOPE_ALL no “pierden” productos cuando in_stock=0
- *
- * ⚠️ CORRECCIÓN REAL:
- * - El crash era porque exportás listProductsForPos pero NO existía.
- * - Además, si el user tiene múltiples sucursales, NO debemos quedar clavados a ctxWarehouseId.
- *   (Eso te dejaba en ~14 de branch 1 en vez de ~225 de branch 3).
  *
  * Soporta 2 modos:
  * 1) warehouse_id explícito => lista por depósito (qty de ese depósito)
@@ -236,8 +254,8 @@ async function getContext(req, res) {
  *
  * Query:
  * - q
- * - in_stock=1|0 (default 1)
- * - sellable=1|0 (default 1) // precio efectivo > 0
+ * - in_stock=1|0|true|false (default true)
+ * - sellable=1|0|true|false (default true) // precio efectivo > 0
  * - branch_id (opcional)
  * - warehouse_id (opcional)
  * - limit/page
@@ -271,8 +289,9 @@ async function listProductsForPos(req, res) {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const offset = (page - 1) * limit;
 
-    const inStock = String(req.query.in_stock ?? "1") === "1";
-    const sellable = String(req.query.sellable ?? "1") === "1";
+    // ✅ FIX CLAVE
+    const inStock = parseBool(req.query.in_stock, true);
+    const sellable = parseBool(req.query.sellable, true);
 
     const priceExpr = `
       COALESCE(
@@ -494,6 +513,9 @@ async function listProductsForPos(req, res) {
   }
 }
 
+/* =========================
+   POST /pos/sales
+========================= */
 /**
  * ✅ POS CREATE SALE (admin no vende)
  * ✅ FIX: guarda customer_phone/customer_doc (soporta body.customer_* y body.extra.customer)
@@ -883,13 +905,6 @@ function calcReturnTotal(items) {
  *   items: [{ product_id, warehouse_id, qty, unit_price }],
  *   payments: [{ method, amount, reference?, note? }]
  * }
- *
- * Reglas:
- * - No admin: solo su misma branch
- * - amount(payments) debe coincidir con total devuelto
- * - total devuelto no puede superar paid_total de la venta (por ahora, simple y seguro)
- * - si restock=1: reingresa stock (movement type=in) y suma qty a stock_balances
- * - si total devuelto == paid_total => status REFUNDED
  */
 async function createSaleReturn(req, res) {
   req._rid = req._rid || rid(req);
@@ -908,16 +923,23 @@ async function createSaleReturn(req, res) {
 
     const body = req.body || {};
     const saleId = toInt(body.sale_id || body.id || req.params?.id, 0);
-    const restock = String(body.restock ?? "1") === "1" || body.restock === true;
+    const restock = parseBool(body.restock, true);
     const reason = body.reason ? String(body.reason).slice(0, 255) : null;
     const note = body.note ? String(body.note).slice(0, 255) : null;
 
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
-    if (!saleId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
-    if (!items.length) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "items requerido (array no vacío)" });
-    if (!payments.length) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "payments requerido (array no vacío)" });
+    if (!saleId)
+      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
+    if (!items.length)
+      return res
+        .status(400)
+        .json({ ok: false, code: "BAD_REQUEST", message: "items requerido (array no vacío)" });
+    if (!payments.length)
+      return res
+        .status(400)
+        .json({ ok: false, code: "BAD_REQUEST", message: "payments requerido (array no vacío)" });
 
     t = await sequelize.transaction();
 
@@ -935,11 +957,15 @@ async function createSaleReturn(req, res) {
     if (!admin) {
       if (!userBranchId) {
         await t.rollback();
-        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
+        return res
+          .status(400)
+          .json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
       }
       if (toInt(sale.branch_id, 0) !== userBranchId) {
         await t.rollback();
-        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
+        return res
+          .status(403)
+          .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
       }
     }
 
@@ -1149,12 +1175,8 @@ async function createSaleReturn(req, res) {
  *   sale_id,
  *   note,
  *   return: { restock, reason, note, items[], payments[] },
- *   new_sale: { items[], payments[], note?, extra? customer? }  // mismo formato que createSale
+ *   new_sale: { items[], payments[], note?, extra? customer? }
  * }
- *
- * Reglas:
- * - admin NO (mismo criterio que createSale: admin no vende, por ende no hace cambios)
- * - se registra: devolución + venta nueva + fila en sale_exchanges
  */
 async function createSaleExchange(req, res) {
   req._rid = req._rid || rid(req);
@@ -1182,13 +1204,13 @@ async function createSaleExchange(req, res) {
 
     const body = req.body || {};
     const saleId = toInt(body.sale_id || body.id || req.params?.id, 0);
-    if (!saleId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
+    if (!saleId)
+      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
 
     const returnPayload = body.return || body.returnData || {};
     const newSalePayload = body.new_sale || body.newSale || body.newSaleData || {};
     const exchangeNote = body.note ? String(body.note).slice(0, 255) : null;
 
-    // Validaciones mínimas
     if (!Array.isArray(returnPayload.items) || !returnPayload.items.length) {
       return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "return.items requerido" });
     }
@@ -1201,7 +1223,6 @@ async function createSaleExchange(req, res) {
 
     t = await sequelize.transaction();
 
-    // Bloqueamos venta original
     const sale = await Sale.findByPk(saleId, {
       include: [{ model: SaleItem }, { model: Payment }],
       transaction: t,
@@ -1222,8 +1243,8 @@ async function createSaleExchange(req, res) {
       return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
     }
 
-    // 1) Ejecutamos devolución dentro de la MISMA tx (reutilizando lógica pero sin abrir tx nueva)
-    const restock = String(returnPayload.restock ?? "1") === "1" || returnPayload.restock === true;
+    // 1) Devolución dentro de la MISMA tx
+    const restock = parseBool(returnPayload.restock, true);
     const reason = returnPayload.reason ? String(returnPayload.reason).slice(0, 255) : null;
     const note = returnPayload.note ? String(returnPayload.note).slice(0, 255) : null;
 
@@ -1397,7 +1418,7 @@ async function createSaleExchange(req, res) {
       await sale.update({ status: "REFUNDED" }, { transaction: t });
     }
 
-    // 2) Creamos NUEVA venta (misma lógica que createSale, pero dentro de esta tx)
+    // 2) Nueva venta dentro de tx (igual a createSale, pero sin abrir otra tx)
     const items2 = Array.isArray(newSalePayload.items) ? newSalePayload.items : [];
     const pays2 = Array.isArray(newSalePayload.payments) ? newSalePayload.payments : [];
 
