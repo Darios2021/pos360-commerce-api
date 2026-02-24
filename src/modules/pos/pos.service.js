@@ -1,3 +1,4 @@
+// ✅ COPY-PASTE FINAL COMPLETO (AJUSTADO)
 // src/modules/pos/pos.service.js
 const { QueryTypes } = require("sequelize");
 const { initPosModels } = require("./pos.models");
@@ -12,20 +13,61 @@ function round2(n) {
 }
 
 /**
+ * ✅ Resolver caja abierta para la sucursal (dentro de la TX)
+ * - Si payload.cash_register_id viene: valida que exista y esté OPEN para branch_id
+ * - Si NO viene: busca la última OPEN por branch_id
+ * - Si no hay OPEN: bloquea venta (CASH_REGISTER_REQUIRED)
+ */
+async function resolveCashRegisterId({ CashRegister, branchId, cashRegisterId, transaction }) {
+  if (!branchId) {
+    const err = new Error("Missing branch_id");
+    err.status = 400;
+    err.code = "BRANCH_REQUIRED";
+    throw err;
+  }
+
+  if (cashRegisterId) {
+    const cr = await CashRegister.findOne({
+      where: { id: cashRegisterId, branch_id: branchId, status: "OPEN" },
+      order: [["id", "DESC"]],
+      transaction,
+    });
+    if (!cr) {
+      const err = new Error("Caja inválida o cerrada para la sucursal");
+      err.status = 409;
+      err.code = "CASH_REGISTER_INVALID";
+      throw err;
+    }
+    return cr.id;
+  }
+
+  const open = await CashRegister.findOne({
+    where: { branch_id: branchId, status: "OPEN" },
+    order: [["id", "DESC"]],
+    transaction,
+  });
+
+  if (!open) {
+    const err = new Error("Debe abrir caja antes de vender");
+    err.status = 409;
+    err.code = "CASH_REGISTER_REQUIRED";
+    throw err;
+  }
+
+  return open.id;
+}
+
+/**
  * Crea una venta POS y descuenta stock (warehouse-based)
- * TODO en transacción:
- *  - valida stock_balances (FOR UPDATE)
- *  - crea sales, sale_items, payments
- *  - crea stock_movements (type=out) + stock_movement_items
- *  - actualiza stock_balances.qty
  */
 async function createPosSale(payload, ctxUser) {
-  const { sequelize, Sale, SaleItem, Payment } = initPosModels();
+  const { sequelize, Sale, SaleItem, Payment, CashRegister } = initPosModels();
 
   const userId = ctxUser?.id ?? payload.user_id ?? null;
   if (!userId) {
     const err = new Error("Missing user_id (req.user.id o payload.user_id)");
     err.status = 400;
+    err.code = "USER_REQUIRED";
     throw err;
   }
 
@@ -33,15 +75,15 @@ async function createPosSale(payload, ctxUser) {
   if (!branchId) {
     const err = new Error("Missing branch_id");
     err.status = 400;
+    err.code = "BRANCH_REQUIRED";
     throw err;
   }
-
-  const cashRegisterId = payload.cash_register_id ?? null;
 
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (items.length === 0) {
     const err = new Error("items vacío");
     err.status = 400;
+    err.code = "ITEMS_REQUIRED";
     throw err;
   }
 
@@ -58,8 +100,15 @@ async function createPosSale(payload, ctxUser) {
   let total = 0;
 
   return await sequelize.transaction(async (t) => {
+    // ✅ Caja obligatoria y consistente
+    const cashRegisterId = await resolveCashRegisterId({
+      CashRegister,
+      branchId,
+      cashRegisterId: payload.cash_register_id ?? null,
+      transaction: t,
+    });
+
     // 1) Validación y locks de stock
-    // Agrupar por warehouse+product para validar stock una sola vez
     const needMap = new Map(); // key `${warehouseId}:${productId}` => qty
     for (const it of items) {
       const productId = it.product_id;
@@ -69,16 +118,19 @@ async function createPosSale(payload, ctxUser) {
       if (!productId) {
         const err = new Error("Item missing product_id");
         err.status = 400;
+        err.code = "ITEM_PRODUCT_REQUIRED";
         throw err;
       }
       if (!warehouseId) {
         const err = new Error(`Item product_id=${productId}: missing warehouse_id`);
         err.status = 400;
+        err.code = "ITEM_WAREHOUSE_REQUIRED";
         throw err;
       }
       if (qty <= 0) {
         const err = new Error(`Item product_id=${productId}: invalid quantity`);
         err.status = 400;
+        err.code = "ITEM_QTY_INVALID";
         throw err;
       }
 
@@ -109,6 +161,7 @@ async function createPosSale(payload, ctxUser) {
       if (rows.length === 0) {
         const err = new Error(`Sin stock_balance para warehouse_id=${warehouseId} product_id=${productId}`);
         err.status = 409;
+        err.code = "STOCK_BALANCE_MISSING";
         throw err;
       }
 
@@ -118,6 +171,7 @@ async function createPosSale(payload, ctxUser) {
           `Stock insuficiente: warehouse_id=${warehouseId} product_id=${productId} disponible=${currentQty} requerido=${needQty}`
         );
         err.status = 409;
+        err.code = "STOCK_INSUFFICIENT";
         throw err;
       }
     }
@@ -141,7 +195,6 @@ async function createPosSale(payload, ctxUser) {
       taxTotal = round2(taxTotal + taxAmount);
       total = round2(total + lineTotal);
 
-      // snapshot product
       const prodRows = await sequelize.query(
         `SELECT name, sku, barcode FROM products WHERE id = :id LIMIT 1`,
         { type: QueryTypes.SELECT, replacements: { id: productId }, transaction: t }
@@ -228,7 +281,6 @@ async function createPosSale(payload, ctxUser) {
     const refType = "sale";
     const refId = String(sale.id);
 
-    // Elegimos warehouse_id principal si viene a nivel payload, sino el del primer item
     const movementWarehouseId = defaultWarehouseId ?? preparedItems[0].warehouse_id;
 
     const [_, metaMove] = await sequelize.query(
@@ -255,6 +307,7 @@ async function createPosSale(payload, ctxUser) {
     if (!movementId) {
       const err = new Error("No se pudo crear stock_movements (insertId vacío)");
       err.status = 500;
+      err.code = "STOCK_MOVEMENT_CREATE_FAILED";
       throw err;
     }
 
@@ -277,7 +330,6 @@ async function createPosSale(payload, ctxUser) {
         }
       );
 
-      // Update balance (ya está lockeado por FOR UPDATE en la validación)
       await sequelize.query(
         `
         UPDATE stock_balances
@@ -298,10 +350,7 @@ async function createPosSale(payload, ctxUser) {
     // 9) Devuelve venta completa
     const full = await Sale.findByPk(sale.id, {
       transaction: t,
-      include: [
-        { association: "items" },
-        { association: "payments" },
-      ],
+      include: [{ association: "items" }, { association: "payments" }],
     });
 
     return {

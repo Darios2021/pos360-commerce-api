@@ -1,15 +1,22 @@
+// ✅ COPY-PASTE FINAL COMPLETO (AJUSTADO)
 // src/modules/pos/pos.controller.js
-const { Op } = require("sequelize");
+const { Op, QueryTypes } = require("sequelize");
 const { sequelize, Sale, SaleItem, Payment, Product, ProductImage, Category } = require("../../models");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : d;
 }
+function toNum(v, d = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+function round2(n) {
+  return Math.round((toNum(n, 0) + Number.EPSILON) * 100) / 100;
+}
 
 function parseDateTime(v) {
   if (!v) return null;
-  // Acepta "YYYY-MM-DD" o "YYYY-MM-DD HH:mm:ss"
   const s = String(v).trim();
   const dt = s.length === 10 ? `${s} 00:00:00` : s;
   const d = new Date(dt.replace(" ", "T"));
@@ -24,15 +31,30 @@ function includeFullProduct() {
       required: false,
       include: [
         { model: Category, as: "category", required: false, attributes: ["id", "name", "parent_id"] },
-        { model: ProductImage, as: "images", required: false }, // para foto
+        { model: ProductImage, as: "images", required: false },
       ],
     },
   ];
 }
 
+// ✅ helper: obtener caja OPEN de branch
+async function getOpenCashRegisterId(branchId, t) {
+  const rows = await sequelize.query(
+    `
+    SELECT id
+    FROM cash_registers
+    WHERE branch_id = :branch_id
+      AND status = 'OPEN'
+    ORDER BY opened_at DESC
+    LIMIT 1
+    `,
+    { type: QueryTypes.SELECT, replacements: { branch_id: branchId }, transaction: t }
+  );
+  return rows?.[0]?.id ?? null;
+}
+
 /**
  * GET /pos/sales
- * Query: page, limit, q, status, from, to, branch_id
  */
 async function listSales(req, res) {
   try {
@@ -72,22 +94,13 @@ async function listSales(req, res) {
       offset,
       include: [
         { model: Payment, as: "payments", required: false },
-        {
-          model: SaleItem,
-          as: "items",
-          required: false,
-          include: includeFullProduct(),
-        },
+        { model: SaleItem, as: "items", required: false, include: includeFullProduct() },
       ],
     });
 
     const pages = Math.max(1, Math.ceil(count / limit));
 
-    res.json({
-      ok: true,
-      data: rows,
-      meta: { page, limit, total: count, pages },
-    });
+    res.json({ ok: true, data: rows, meta: { page, limit, total: count, pages } });
   } catch (e) {
     console.error("[POS listSales ERROR]", e);
     res.status(500).json({ ok: false, message: e.message });
@@ -105,17 +118,11 @@ async function getSale(req, res) {
     const sale = await Sale.findByPk(id, {
       include: [
         { model: Payment, as: "payments", required: false },
-        {
-          model: SaleItem,
-          as: "items",
-          required: false,
-          include: includeFullProduct(),
-        },
+        { model: SaleItem, as: "items", required: false, include: includeFullProduct() },
       ],
     });
 
     if (!sale) return res.status(404).json({ ok: false, code: "NOT_FOUND" });
-
     res.json({ ok: true, data: sale });
   } catch (e) {
     console.error("[POS getSale ERROR]", e);
@@ -125,84 +132,118 @@ async function getSale(req, res) {
 
 /**
  * POST /pos/sales
- * (tu createSale actual)
+ * ✅ FIX: cash_register_id SIEMPRE (requiere caja OPEN)
  */
 async function createSale(req, res) {
   let t;
   try {
-    const { branch_id, user_id, customer_name, items = [], payments = [] } = req.body;
+    const body = req.body || {};
+    const branchId = toInt(body.branch_id, 0) || 0;
+    const userId = toInt(body.user_id, 0) || (req.user?.id ?? 0);
 
-    if (!items.length) {
-      return res.status(400).json({ ok: false, message: "Venta sin items." });
-    }
+    const customerName = body.customer_name || "Consumidor Final";
+    const items = Array.isArray(body.items) ? body.items : [];
+    const paymentsIn = Array.isArray(body.payments) ? body.payments : [];
+
+    if (!branchId) return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "branch_id requerido" });
+    if (!userId) return res.status(400).json({ ok: false, code: "USER_REQUIRED", message: "user_id requerido" });
+    if (!items.length) return res.status(400).json({ ok: false, code: "ITEMS_REQUIRED", message: "Venta sin items." });
 
     t = await sequelize.transaction();
 
+    // ✅ caja OPEN obligatoria
+    const cashRegisterId = await getOpenCashRegisterId(branchId, t);
+    if (!cashRegisterId) {
+      await t.rollback();
+      return res.status(409).json({
+        ok: false,
+        code: "CASH_REGISTER_REQUIRED",
+        message: "Debe abrir caja antes de vender (no hay caja OPEN para la sucursal).",
+      });
+    }
+
+    // calcular total
     let calculatedTotal = 0;
-    items.forEach(i => {
-      calculatedTotal += (Number(i.quantity) * Number(i.unit_price));
-    });
+    const prepared = items.map((i) => {
+      const qty = round2(i.quantity ?? i.qty ?? 0);
+      const price = round2(i.unit_price ?? i.price ?? 0);
+      const lineTotal = round2(qty * price);
+      calculatedTotal = round2(calculatedTotal + lineTotal);
 
-    const sale = await Sale.create({
-      branch_id: branch_id || 1,
-      user_id: user_id || 1,
-      customer_name: customer_name || "Consumidor Final",
-      subtotal: calculatedTotal,
-      tax_total: 0,
-      discount_total: 0,
-      total: calculatedTotal,
-      paid_total: 0,
-      change_total: 0,
-      status: "PAID",
-      sold_at: new Date()
-    }, { transaction: t });
-
-    for (const item of items) {
-      const qty = Number(item.quantity);
-      const price = Number(item.unit_price);
-      const lineTotal = qty * price;
-
-      await SaleItem.create({
-        sale_id: sale.id,
-        product_id: item.product_id,
+      return {
+        product_id: toInt(i.product_id, 0),
         quantity: qty,
         unit_price: price,
         line_total: lineTotal,
-        product_name_snapshot: item.product_name_snapshot || "Item",
-        product_sku_snapshot: item.product_sku_snapshot || null,
-        product_barcode_snapshot: item.product_barcode_snapshot || null,
-      }, { transaction: t });
+        product_name_snapshot: i.product_name_snapshot || i.name || "Item",
+        product_sku_snapshot: i.product_sku_snapshot || i.sku || null,
+        product_barcode_snapshot: i.product_barcode_snapshot || i.barcode || null,
+      };
+    });
+
+    // pagos: si no mandan, asumimos CASH exacto
+    let payments = paymentsIn;
+    if (!payments.length) payments = [{ method: "CASH", amount: calculatedTotal }];
+
+    const paidTotal = round2(payments.reduce((a, p) => a + toNum(p.amount, 0), 0));
+    const changeTotal = paidTotal > calculatedTotal ? round2(paidTotal - calculatedTotal) : 0;
+
+    const sale = await Sale.create(
+      {
+        branch_id: branchId,
+        cash_register_id: cashRegisterId, // ✅ CRÍTICO
+        user_id: userId,
+        customer_name: customerName,
+
+        subtotal: calculatedTotal,
+        tax_total: 0,
+        discount_total: 0,
+        total: calculatedTotal,
+
+        paid_total: paidTotal,
+        change_total: changeTotal,
+
+        status: "PAID",
+        sold_at: new Date(),
+      },
+      { transaction: t }
+    );
+
+    for (const item of prepared) {
+      if (!item.product_id) {
+        await t.rollback();
+        return res.status(400).json({ ok: false, code: "ITEM_PRODUCT_REQUIRED", message: "Item sin product_id" });
+      }
+
+      await SaleItem.create(
+        {
+          sale_id: sale.id,
+          ...item,
+        },
+        { transaction: t }
+      );
     }
 
-    let totalPaid = 0;
     for (const p of payments) {
-      const amount = Number(p.amount);
-      totalPaid += amount;
-
-      await Payment.create({
-        sale_id: sale.id,
-        amount,
-        method: p.method,
-        paid_at: new Date(),
-      }, { transaction: t });
+      await Payment.create(
+        {
+          sale_id: sale.id,
+          amount: round2(p.amount ?? 0),
+          method: String(p.method ?? "CASH").toUpperCase(),
+          paid_at: new Date(),
+          reference: p.reference ?? null,
+          note: p.note ?? null,
+        },
+        { transaction: t }
+      );
     }
-
-    sale.paid_total = totalPaid;
-    sale.change_total = totalPaid - calculatedTotal;
-    await sale.save({ transaction: t });
 
     await t.commit();
 
-    // devolver venta completa con include
     const full = await Sale.findByPk(sale.id, {
       include: [
         { model: Payment, as: "payments", required: false },
-        {
-          model: SaleItem,
-          as: "items",
-          required: false,
-          include: includeFullProduct(),
-        },
+        { model: SaleItem, as: "items", required: false, include: includeFullProduct() },
       ],
     });
 
@@ -215,8 +256,7 @@ async function createSale(req, res) {
 }
 
 /**
- * DELETE /pos/sales/:id  (solo admin por middleware)
- * Borra cabecera + items + pagos (FK cascade puede ayudar, pero lo hacemos prolijo)
+ * DELETE /pos/sales/:id
  */
 async function deleteSale(req, res) {
   let t;
