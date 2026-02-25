@@ -273,7 +273,6 @@ async function overview(req, res, next) {
           }))
           .sort((a, b) => b.total - a.total);
       } else {
-        // fallback SQL
         const rows = await sequelize.query(
           `
           SELECT p.method, SUM(p.amount) as sum_amount
@@ -306,21 +305,24 @@ async function overview(req, res, next) {
       paymentsToday = [];
     }
 
-    // ===== ventas últimos 7 días
+    // ===== ventas últimos 7 días (FIX key YYYY-MM-DD)
     const salesByDayRows = await Sale.findAll({
       attributes: [
-        [fn("DATE", col("sold_at")), "day"],
+        [literal("DATE_FORMAT(sold_at, '%Y-%m-%d')"), "day"],
         [fn("SUM", col("total")), "sum_total"],
         [fn("COUNT", col("Sale.id")), "count_sales"],
       ],
       where: { ...baseBranch, status: "PAID", sold_at: { [Op.gte]: weekFrom } },
-      group: [fn("DATE", col("sold_at"))],
-      order: [[fn("DATE", col("sold_at")), "ASC"]],
+      group: [literal("DATE_FORMAT(sold_at, '%Y-%m-%d')")],
+      order: [[literal("DATE_FORMAT(sold_at, '%Y-%m-%d')"), "ASC"]],
       raw: true,
     });
 
     const mapDay = new Map();
-    for (const r of salesByDayRows) mapDay.set(String(r.day), { total: Number(r.sum_total || 0), count: Number(r.count_sales || 0) });
+    for (const r of salesByDayRows) {
+      const k = String(r.day);
+      mapDay.set(k, { total: Number(r.sum_total || 0), count: Number(r.count_sales || 0) });
+    }
 
     const salesByDay = [];
     for (let i = 0; i < 7; i++) {
@@ -381,7 +383,7 @@ async function overview(req, res, next) {
       }));
     }
 
-    // ===== inventory KPIs
+    // ===== inventory KPIs + lastProducts (para que NO diga "Sin productos")
     const prodWhere = scope.branchId ? { branch_id: scope.branchId } : {};
     const totalProducts = await Product.count({ where: prodWhere });
     const activeProducts = await Product.count({ where: { ...prodWhere, is_active: 1 } }).catch(() => 0);
@@ -400,38 +402,152 @@ async function overview(req, res, next) {
     const usersTotal = await User.count().catch(() => 0);
     const branchesTotal = await Branch.count().catch(() => 0);
 
-    // ===== stock KPIs (stock_balances.qty)
-    const qtyField = StockBalance?.rawAttributes?.qty ? "qty" : "qty";
+    // ✅ lastProducts (RAW SQL con categoría + parent)
+    const whereProdSql = scope.branchId ? "WHERE p.branch_id = :branchId" : "WHERE 1=1";
+    const lastProducts = await sequelize.query(
+      `
+      SELECT
+        p.id, p.name, p.sku, p.is_active,
+        p.category_id,
+        c.name AS category_name,
+        c.parent_id AS category_parent_id,
+        cp.name AS category_parent_name
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN categories cp ON cp.id = c.parent_id
+      ${whereProdSql}
+      ORDER BY p.id DESC
+      LIMIT 10
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { branchId: scope.branchId || null },
+      }
+    );
+
+    const invLastProducts = (lastProducts || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      sku: r.sku,
+      is_active: r.is_active,
+      category: r.category_id
+        ? {
+            id: r.category_id,
+            name: r.category_name,
+            parent_id: r.category_parent_id,
+            parent: r.category_parent_id ? { id: r.category_parent_id, name: r.category_parent_name } : null,
+          }
+        : null,
+    }));
+
+    // ===== stock KPIs + stockByBranch + lowStockItems (para gráficos completos)
     const lowThreshold = 3;
 
-    const asWh = findAssocAs(StockBalance, Warehouse);
-    let stockKpis = { outCount: 0, lowCount: 0, okCount: 0, lowThreshold };
-    if (asWh) {
-      const includeWarehouse = {
-        model: Warehouse,
-        as: asWh,
-        attributes: [],
-        required: true,
-        ...(scope.branchId ? { where: { branch_id: scope.branchId } } : {}),
-      };
+    const whereWhBranch = scope.branchId ? "AND w.branch_id = :branchId" : "";
+    const stockAgg = await sequelize
+      .query(
+        `
+        SELECT
+          SUM(CASE WHEN sb.qty <= 0 THEN 1 ELSE 0 END) AS out_cnt,
+          SUM(CASE WHEN sb.qty > 0 AND sb.qty <= :lowThreshold THEN 1 ELSE 0 END) AS low_cnt,
+          SUM(CASE WHEN sb.qty > :lowThreshold THEN 1 ELSE 0 END) AS ok_cnt,
+          COALESCE(SUM(sb.qty),0) AS sum_units,
+          COUNT(DISTINCT sb.product_id) AS distinct_products
+        FROM stock_balances sb
+        INNER JOIN warehouses w ON w.id = sb.warehouse_id
+        WHERE 1=1
+          ${whereWhBranch}
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { branchId: scope.branchId || null, lowThreshold },
+        }
+      )
+      .then((rows) => rows?.[0] || null)
+      .catch(() => null);
 
-      const row = await StockBalance.findOne({
-        attributes: [
-          [fn("SUM", literal(`CASE WHEN ${qtyField} <= 0 THEN 1 ELSE 0 END`)), "out_cnt"],
-          [fn("SUM", literal(`CASE WHEN ${qtyField} > 0 AND ${qtyField} <= ${lowThreshold} THEN 1 ELSE 0 END`)), "low_cnt"],
-          [fn("SUM", literal(`CASE WHEN ${qtyField} > ${lowThreshold} THEN 1 ELSE 0 END`)), "ok_cnt"],
-        ],
-        include: [includeWarehouse],
-        raw: true,
-      }).catch(() => ({ out_cnt: 0, low_cnt: 0, ok_cnt: 0 }));
+    const lowStockItemsRows = await sequelize
+      .query(
+        `
+        SELECT
+          sb.product_id,
+          p.name,
+          p.sku,
+          sb.qty AS stock,
+          sb.warehouse_id,
+          w.name AS warehouse_name,
+          w.branch_id,
+          b.name AS branch_name
+        FROM stock_balances sb
+        INNER JOIN warehouses w ON w.id = sb.warehouse_id
+        LEFT JOIN branches b ON b.id = w.branch_id
+        LEFT JOIN products p ON p.id = sb.product_id
+        WHERE sb.qty <= :lowThreshold
+          ${whereWhBranch}
+        ORDER BY sb.qty ASC
+        LIMIT 50
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { branchId: scope.branchId || null, lowThreshold },
+        }
+      )
+      .catch(() => []);
 
-      stockKpis = {
-        outCount: Number(row?.out_cnt || 0),
-        lowCount: Number(row?.low_cnt || 0),
-        okCount: Number(row?.ok_cnt || 0),
-        lowThreshold,
-      };
-    }
+    const stockByBranchRows = await sequelize
+      .query(
+        `
+        SELECT
+          w.branch_id,
+          b.name AS branch_name,
+          SUM(CASE WHEN sb.qty <= 0 THEN 1 ELSE 0 END) AS out_cnt,
+          SUM(CASE WHEN sb.qty > 0 AND sb.qty <= :lowThreshold THEN 1 ELSE 0 END) AS low_cnt,
+          SUM(CASE WHEN sb.qty > :lowThreshold THEN 1 ELSE 0 END) AS ok_cnt,
+          COALESCE(SUM(sb.qty),0) AS sum_units
+        FROM stock_balances sb
+        INNER JOIN warehouses w ON w.id = sb.warehouse_id
+        LEFT JOIN branches b ON b.id = w.branch_id
+        WHERE 1=1
+          ${whereWhBranch}
+        GROUP BY w.branch_id, b.name
+        ORDER BY sum_units DESC
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { branchId: scope.branchId || null, lowThreshold },
+        }
+      )
+      .catch(() => []);
+
+    const stockKpis = {
+      outCount: Number(stockAgg?.out_cnt || 0),
+      lowCount: Number(stockAgg?.low_cnt || 0),
+      okCount: Number(stockAgg?.ok_cnt || 0),
+      totalUnits: Number(stockAgg?.sum_units || 0),
+      trackedProducts: Number(stockAgg?.distinct_products || 0),
+      lowThreshold,
+
+      lowStockItems: (lowStockItemsRows || []).map((r) => ({
+        product_id: r.product_id,
+        name: r.name || `Producto #${r.product_id}`,
+        sku: r.sku || null,
+        stock: Number(r.stock || 0),
+        min_stock: lowThreshold,
+        warehouse_id: r.warehouse_id,
+        warehouse_name: r.warehouse_name || null,
+        branch_id: r.branch_id || null,
+        branch_name: r.branch_name || null,
+      })),
+
+      stockByBranch: (stockByBranchRows || []).map((r) => ({
+        branch_id: Number(r.branch_id || 0),
+        branch_name: r.branch_name || `Sucursal #${r.branch_id}`,
+        out: Number(r.out_cnt || 0),
+        low: Number(r.low_cnt || 0),
+        ok: Number(r.ok_cnt || 0),
+        units: Number(r.sum_units || 0),
+      })),
+    };
 
     return res.json({
       ok: true,
@@ -442,19 +558,20 @@ async function overview(req, res, next) {
           week,
           month,
           trend,
-          paymentsToday,     // ✅ HOY por método
-          salesByDay,        // ✅ 7 días
-          salesByBranch,     // ✅ 30 días (admin sin filtro)
-          lastSales,         // ✅ últimas ventas
+          paymentsToday,
+          salesByDay,
+          salesByBranch,
+          lastSales,
         },
         inventory: {
           totalProducts,
           activeProducts,
           noPriceProducts,
           categories: categoriesTotal,
+          lastProducts: invLastProducts, // ✅ AHORA SÍ
         },
         users: { usersTotal, branchesTotal },
-        stock: stockKpis,
+        stock: stockKpis, // ✅ AHORA VIENE COMPLETO
       },
     });
   } catch (e) {
@@ -464,12 +581,10 @@ async function overview(req, res, next) {
 }
 
 // ============================
-// Endpoints "compat" (si tu frontend llama /sales /inventory /stock)
-// Recomendación: que el frontend use /overview, pero dejo estos para no romper.
+// Endpoints "compat"
 // ============================
 async function sales(req, res, next) {
   try {
-    // ✅ devolvemos la misma data desde overview, así no hay 2 lógicas
     return overview(req, res, next);
   } catch (e) {
     next(e);
