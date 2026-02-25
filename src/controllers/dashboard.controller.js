@@ -60,6 +60,10 @@ function pickExistingAttrs(model, candidates, always = ["id"]) {
   return attrs.length ? attrs : ["id"];
 }
 
+function hasAttr(model, attr) {
+  return !!model?.rawAttributes?.[attr];
+}
+
 /**
  * ✅ branch_id desde contexto/auth (mismo criterio que POS)
  */
@@ -150,19 +154,6 @@ function findAssocAs(fromModel, toModel) {
     }
   } catch {}
   return null;
-}
-
-/**
- * ✅ FIX: detecta la columna real del cajero en sales
- * (según tu schema): user_id / created_by / cashier_id / sold_by / cashier_user_id
- */
-function pickSaleUserColumn() {
-  const candidates = ["user_id", "created_by", "cashier_id", "cashier_user_id", "sold_by"];
-  const attrs = Sale?.rawAttributes || {};
-  for (const c of candidates) {
-    if (attrs?.[c]) return c;
-  }
-  return "user_id";
 }
 
 // =========================
@@ -356,7 +347,11 @@ async function overview(req, res, next) {
 
     const asUser = findAssocAs(Sale, User);
     if (asUser) {
-      const userAttrs = pickExistingAttrs(User, ["full_name", "name", "username", "email", "identifier"], ["id"]);
+      const userAttrs = pickExistingAttrs(
+        User,
+        ["first_name", "last_name", "username", "email", "identifier"],
+        ["id"]
+      );
       includeLast.push({ model: User, as: asUser, required: false, attributes: userAttrs });
     }
 
@@ -374,6 +369,7 @@ async function overview(req, res, next) {
     d30From.setDate(d30From.getDate() - 29);
 
     const whereBranch30 = scope.branchId ? "AND s.branch_id = :branchId" : "";
+
     const sales30Rows = await sequelize
       .query(
         `
@@ -401,6 +397,7 @@ async function overview(req, res, next) {
         { total: Number(r.sum_total || 0), count: Number(r.count_sales || 0) },
       ])
     );
+
     const salesByDay30 = [];
     for (let i = 0; i < 30; i++) {
       const d = new Date(d30From);
@@ -450,26 +447,34 @@ async function overview(req, res, next) {
     }
 
     // ==========================
-    // ✅ FIX (ÚNICO CAMBIO IMPORTANTE): Top cajeros (30 días)
-    // - Detecta columna real en sales (user_id / created_by / cashier_id / etc.)
-    // - NO rompe el resto
+    // ✅ FIX REAL: Top cajeros (30 días) (TU ESQUEMA: users.first_name/last_name)
     // ==========================
-    const saleUserCol = pickSaleUserColumn();
+    const userLabelExpr = `
+      COALESCE(
+        NULLIF(TRIM(CONCAT_WS(' ',
+          ${hasAttr(User, "first_name") ? "u.first_name" : "NULL"},
+          ${hasAttr(User, "last_name") ? "u.last_name" : "NULL"}
+        )), ''),
+        ${hasAttr(User, "username") ? "u.username" : "NULL"},
+        ${hasAttr(User, "email") ? "u.email" : "NULL"},
+        CONCAT('User #', u.id)
+      )
+    `;
+
     const topCashiers30d = await sequelize
       .query(
         `
         SELECT
-          s.${saleUserCol} AS user_id,
-          COALESCE(u.full_name, u.name, u.username, u.email, CONCAT('User #', u.id), CONCAT('User #', s.${saleUserCol})) AS user_label,
+          s.user_id,
+          ${userLabelExpr} AS user_label,
           COALESCE(SUM(s.total),0) AS sum_total,
           COUNT(*) AS count_sales
         FROM sales s
-        LEFT JOIN users u ON u.id = s.${saleUserCol}
+        LEFT JOIN users u ON u.id = s.user_id
         WHERE s.status='PAID'
           AND s.sold_at BETWEEN :from AND :to
           ${whereBranch30}
-          AND s.${saleUserCol} IS NOT NULL
-        GROUP BY s.${saleUserCol}, user_label
+        GROUP BY s.user_id, user_label
         ORDER BY sum_total DESC
         LIMIT 10
         `,
@@ -490,7 +495,6 @@ async function overview(req, res, next) {
 
     // ==========================
     // ✅ NUEVO: Top productos (30 días)
-    // - usa sale_items: qty / line_total si existen, sino fallback unit_price*qty
     // ==========================
     const hasQty = !!SaleItem?.rawAttributes?.qty;
     const hasLineTotal = !!SaleItem?.rawAttributes?.line_total;
@@ -565,11 +569,7 @@ async function overview(req, res, next) {
 
     const bestMonth12m =
       bestMonthRow && Number(bestMonthRow.sum_total || 0) > 0
-        ? {
-            ym: String(bestMonthRow.ym || ""),
-            total: Number(bestMonthRow.sum_total || 0),
-            count: Number(bestMonthRow.count_sales || 0),
-          }
+        ? { ym: String(bestMonthRow.ym || ""), total: Number(bestMonthRow.sum_total || 0), count: Number(bestMonthRow.count_sales || 0) }
         : null;
 
     // ===== ventas por sucursal (últimos 30 días) (admin-only sin filtro)
@@ -594,7 +594,7 @@ async function overview(req, res, next) {
       }));
     }
 
-    // ===== inventory KPIs + lastProducts (para que NO diga "Sin productos")
+    // ===== inventory KPIs + lastProducts
     const prodWhere = scope.branchId ? { branch_id: scope.branchId } : {};
     const totalProducts = await Product.count({ where: prodWhere });
     const activeProducts = await Product.count({ where: { ...prodWhere, is_active: 1 } }).catch(() => 0);
@@ -613,7 +613,6 @@ async function overview(req, res, next) {
     const usersTotal = await User.count().catch(() => 0);
     const branchesTotal = await Branch.count().catch(() => 0);
 
-    // ✅ lastProducts (RAW SQL con categoría + parent)
     const whereProdSql = scope.branchId ? "WHERE p.branch_id = :branchId" : "WHERE 1=1";
     const lastProducts = await sequelize.query(
       `
@@ -630,10 +629,7 @@ async function overview(req, res, next) {
       ORDER BY p.id DESC
       LIMIT 10
       `,
-      {
-        type: QueryTypes.SELECT,
-        replacements: { branchId: scope.branchId || null },
-      }
+      { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null } }
     );
 
     const invLastProducts = (lastProducts || []).map((r) => ({
@@ -651,10 +647,10 @@ async function overview(req, res, next) {
         : null,
     }));
 
-    // ===== stock KPIs + stockByBranch + lowStockItems (para gráficos completos)
+    // ===== stock KPIs + stockByBranch + lowStockItems
     const lowThreshold = 3;
-
     const whereWhBranch = scope.branchId ? "AND w.branch_id = :branchId" : "";
+
     const stockAgg = await sequelize
       .query(
         `
@@ -669,10 +665,7 @@ async function overview(req, res, next) {
         WHERE 1=1
           ${whereWhBranch}
         `,
-        {
-          type: QueryTypes.SELECT,
-          replacements: { branchId: scope.branchId || null, lowThreshold },
-        }
+        { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null, lowThreshold } }
       )
       .then((rows) => rows?.[0] || null)
       .catch(() => null);
@@ -698,10 +691,7 @@ async function overview(req, res, next) {
         ORDER BY sb.qty ASC
         LIMIT 50
         `,
-        {
-          type: QueryTypes.SELECT,
-          replacements: { branchId: scope.branchId || null, lowThreshold },
-        }
+        { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null, lowThreshold } }
       )
       .catch(() => []);
 
@@ -723,10 +713,7 @@ async function overview(req, res, next) {
         GROUP BY w.branch_id, b.name
         ORDER BY sum_units DESC
         `,
-        {
-          type: QueryTypes.SELECT,
-          replacements: { branchId: scope.branchId || null, lowThreshold },
-        }
+        { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null, lowThreshold } }
       )
       .catch(() => []);
 
@@ -737,7 +724,6 @@ async function overview(req, res, next) {
       totalUnits: Number(stockAgg?.sum_units || 0),
       trackedProducts: Number(stockAgg?.distinct_products || 0),
       lowThreshold,
-
       lowStockItems: (lowStockItemsRows || []).map((r) => ({
         product_id: r.product_id,
         name: r.name || `Producto #${r.product_id}`,
@@ -749,7 +735,6 @@ async function overview(req, res, next) {
         branch_id: r.branch_id || null,
         branch_name: r.branch_name || null,
       })),
-
       stockByBranch: (stockByBranchRows || []).map((r) => ({
         branch_id: Number(r.branch_id || 0),
         branch_name: r.branch_name || `Sucursal #${r.branch_id}`,
@@ -771,14 +756,13 @@ async function overview(req, res, next) {
           trend,
           paymentsToday,
           salesByDay,
-          salesByDay30, // ✅ NUEVO
+          salesByDay30,
           salesByBranch,
           lastSales,
-
-          topBranch30d, // ✅ NUEVO
-          topCashiers30d, // ✅ FIX ROBUSTO (único cambio)
-          topProducts30d, // ✅ NUEVO
-          bestMonth12m, // ✅ NUEVO
+          topBranch30d,
+          topCashiers30d,
+          topProducts30d,
+          bestMonth12m,
         },
         inventory: {
           totalProducts,
