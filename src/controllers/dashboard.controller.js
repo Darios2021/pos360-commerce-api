@@ -157,6 +157,35 @@ function findAssocAs(fromModel, toModel) {
 }
 
 // =========================
+// Period range (para TOPs/series)
+// =========================
+function normalizePeriod(p) {
+  const x = String(p || "").trim().toLowerCase();
+  if (["30d", "1m", "mes", "ultimo_mes", "último_mes"].includes(x)) return "30d";
+  if (["90d", "3m", "tres_meses", "últimos_3_meses", "ultimos_3_meses"].includes(x)) return "90d";
+  if (["12m", "1y", "anual", "año", "year"].includes(x)) return "12m";
+  if (["all", "todo", "siempre", "desde_siempre", "historico", "histórico"].includes(x)) return "all";
+  return "30d";
+}
+
+function computeRange(period, todayFrom, todayTo) {
+  const p = normalizePeriod(period);
+  if (p === "all") return { period: "all", from: null, to: todayTo };
+
+  if (p === "12m") {
+    const from = new Date(todayFrom);
+    from.setMonth(from.getMonth() - 11);
+    from.setDate(1);
+    return { period: "12m", from, to: todayTo };
+  }
+
+  const days = p === "90d" ? 90 : 30;
+  const from = new Date(todayFrom);
+  from.setDate(from.getDate() - (days - 1));
+  return { period: p, from, to: todayTo };
+}
+
+// =========================
 // SALES STATS
 // =========================
 async function salesTotalsBetween(whereBase) {
@@ -249,22 +278,14 @@ async function overview(req, res, next) {
       month_count_pct: pctChange(month.count, prevMonth.count),
     };
 
-    // ===== Pagos hoy por método (alias-safe + fallback SQL)
+    // ===== Pagos hoy por método
     let paymentsToday = [];
     try {
       const asSale = findAssocAs(Payment, Sale);
       if (asSale) {
         const rows = await Payment.findAll({
           attributes: ["method", [fn("SUM", col("amount")), "sum_amount"]],
-          include: [
-            {
-              model: Sale,
-              as: asSale,
-              attributes: [],
-              required: true,
-              where: todayWhere,
-            },
-          ],
+          include: [{ model: Sale, as: asSale, attributes: [], required: true, where: todayWhere }],
           group: ["method"],
           raw: true,
         });
@@ -289,11 +310,7 @@ async function overview(req, res, next) {
           `,
           {
             type: QueryTypes.SELECT,
-            replacements: {
-              from: todayFrom,
-              to: todayTo,
-              branchId: scope.branchId || null,
-            },
+            replacements: { from: todayFrom, to: todayTo, branchId: scope.branchId || null },
           }
         );
 
@@ -309,7 +326,7 @@ async function overview(req, res, next) {
       paymentsToday = [];
     }
 
-    // ===== ventas últimos 7 días (FIX key YYYY-MM-DD)
+    // ===== ventas últimos 7 días
     const salesByDayRows = await Sale.findAll({
       attributes: [
         [literal("DATE_FORMAT(sold_at, '%Y-%m-%d')"), "day"],
@@ -347,11 +364,7 @@ async function overview(req, res, next) {
 
     const asUser = findAssocAs(Sale, User);
     if (asUser) {
-      const userAttrs = pickExistingAttrs(
-        User,
-        ["first_name", "last_name", "username", "email", "identifier"],
-        ["id"]
-      );
+      const userAttrs = pickExistingAttrs(User, ["first_name", "last_name", "username", "email", "identifier"], ["id"]);
       includeLast.push({ model: User, as: asUser, required: false, attributes: userAttrs });
     }
 
@@ -363,14 +376,21 @@ async function overview(req, res, next) {
     });
 
     // ==========================
-    // ✅ NUEVO: Ventas 30 días (serie diaria para picos)
+    // ✅ Periodo seleccionable (para gráficos/tops)
     // ==========================
-    const d30From = new Date(todayFrom);
-    d30From.setDate(d30From.getDate() - 29);
+    const range = computeRange(req.query.period, todayFrom, todayTo);
+    const whereBranchRange = scope.branchId ? "AND s.branch_id = :branchId" : "";
+    const whereBetweenRange = range.from ? "AND s.sold_at BETWEEN :from AND :to" : "AND s.sold_at <= :to";
 
-    const whereBranch30 = scope.branchId ? "AND s.branch_id = :branchId" : "";
+    // ==========================
+    // ✅ Serie diaria para picos (según periodo)
+    // - si period=all: devolvemos últimos 180 días para no matar el frontend
+    //   (y aparte mandamos from=null para que sepas que es histórico)
+    // ==========================
+    const dailyMaxDays = range.period === "all" ? 180 : range.period === "12m" ? 365 : range.period === "90d" ? 90 : 30;
+    const dailyFrom = range.period === "all" ? (() => { const d = new Date(todayFrom); d.setDate(d.getDate() - (dailyMaxDays - 1)); return d; })() : (range.from || (() => { const d = new Date(todayFrom); d.setDate(d.getDate() - (dailyMaxDays - 1)); return d; })());
 
-    const sales30Rows = await sequelize
+    const salesDailyRows = await sequelize
       .query(
         `
         SELECT
@@ -379,38 +399,38 @@ async function overview(req, res, next) {
           COUNT(*) AS count_sales
         FROM sales s
         WHERE s.status='PAID'
-          AND s.sold_at BETWEEN :from AND :to
-          ${whereBranch30}
+          AND s.sold_at BETWEEN :dailyFrom AND :to
+          ${whereBranchRange}
         GROUP BY DATE_FORMAT(s.sold_at, '%Y-%m-%d')
         ORDER BY day ASC
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: d30From, to: todayTo, branchId: scope.branchId || null },
+          replacements: { dailyFrom, to: range.to, branchId: scope.branchId || null },
         }
       )
       .catch(() => []);
 
-    const map30 = new Map(
-      (sales30Rows || []).map((r) => [
+    const mapDaily = new Map(
+      (salesDailyRows || []).map((r) => [
         String(r.day),
         { total: Number(r.sum_total || 0), count: Number(r.count_sales || 0) },
       ])
     );
 
-    const salesByDay30 = [];
-    for (let i = 0; i < 30; i++) {
-      const d = new Date(d30From);
-      d.setDate(d30From.getDate() + i);
+    const salesByPeriodDaily = [];
+    for (let i = 0; i < dailyMaxDays; i++) {
+      const d = new Date(dailyFrom);
+      d.setDate(dailyFrom.getDate() + i);
       const key = ymd(d);
-      const v = map30.get(key) || { total: 0, count: 0 };
-      salesByDay30.push({ date: key, total: v.total, count: v.count });
+      const v = mapDaily.get(key) || { total: 0, count: 0 };
+      salesByPeriodDaily.push({ date: key, total: v.total, count: v.count });
     }
 
     // ==========================
-    // ✅ NUEVO: Sucursal top (30 días) — SOLO si está en "Todas las sucursales"
+    // ✅ Top Sucursal (según periodo) — solo en todas las sucursales
     // ==========================
-    let topBranch30d = null;
+    let topBranchPeriod = null;
     if (!scope.branchId) {
       const topBranchRow = await sequelize
         .query(
@@ -423,21 +443,21 @@ async function overview(req, res, next) {
           FROM sales s
           LEFT JOIN branches b ON b.id = s.branch_id
           WHERE s.status='PAID'
-            AND s.sold_at BETWEEN :from AND :to
+            ${whereBetweenRange}
           GROUP BY s.branch_id, b.name
           ORDER BY sum_total DESC
           LIMIT 1
           `,
           {
             type: QueryTypes.SELECT,
-            replacements: { from: d30From, to: todayTo },
+            replacements: { from: range.from, to: range.to },
           }
         )
         .then((rows) => rows?.[0] || null)
         .catch(() => null);
 
       if (topBranchRow && Number(topBranchRow.sum_total || 0) > 0) {
-        topBranch30d = {
+        topBranchPeriod = {
           branch_id: Number(topBranchRow.branch_id || 0),
           branch_name: topBranchRow.branch_name || `Sucursal #${topBranchRow.branch_id}`,
           total: Number(topBranchRow.sum_total || 0),
@@ -447,7 +467,7 @@ async function overview(req, res, next) {
     }
 
     // ==========================
-    // ✅ FIX REAL: Top cajeros (30 días) (TU ESQUEMA: users.first_name/last_name)
+    // ✅ Top cajeros (según periodo)
     // ==========================
     const userLabelExpr = `
       COALESCE(
@@ -461,7 +481,7 @@ async function overview(req, res, next) {
       )
     `;
 
-    const topCashiers30d = await sequelize
+    const topCashiersPeriod = await sequelize
       .query(
         `
         SELECT
@@ -472,15 +492,15 @@ async function overview(req, res, next) {
         FROM sales s
         LEFT JOIN users u ON u.id = s.user_id
         WHERE s.status='PAID'
-          AND s.sold_at BETWEEN :from AND :to
-          ${whereBranch30}
+          ${whereBetweenRange}
+          ${whereBranchRange}
         GROUP BY s.user_id, user_label
         ORDER BY sum_total DESC
         LIMIT 10
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: d30From, to: todayTo, branchId: scope.branchId || null },
+          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null },
         }
       )
       .then((rows) =>
@@ -494,14 +514,14 @@ async function overview(req, res, next) {
       .catch(() => []);
 
     // ==========================
-    // ✅ NUEVO: Top productos (30 días)
+    // ✅ Top productos (según periodo)
     // ==========================
     const hasQty = !!SaleItem?.rawAttributes?.qty;
     const hasLineTotal = !!SaleItem?.rawAttributes?.line_total;
     const qtyExpr = hasQty ? "si.qty" : "1";
     const totalExpr = hasLineTotal ? "si.line_total" : "(COALESCE(si.unit_price,0) * COALESCE(si.qty,1))";
 
-    const topProducts30d = await sequelize
+    const topProductsPeriod = await sequelize
       .query(
         `
         SELECT
@@ -514,15 +534,15 @@ async function overview(req, res, next) {
         INNER JOIN sales s ON s.id = si.sale_id
         LEFT JOIN products p ON p.id = si.product_id
         WHERE s.status='PAID'
-          AND s.sold_at BETWEEN :from AND :to
-          ${whereBranch30}
+          ${whereBetweenRange}
+          ${whereBranchRange}
         GROUP BY si.product_id, product_name, sku
         ORDER BY units DESC, sum_total DESC
         LIMIT 10
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: d30From, to: todayTo, branchId: scope.branchId || null },
+          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null },
         }
       )
       .then((rows) =>
@@ -537,13 +557,8 @@ async function overview(req, res, next) {
       .catch(() => []);
 
     // ==========================
-    // ✅ NUEVO: Mejor mes (últimos 12 meses)
+    // ✅ Mejor mes dentro del periodo
     // ==========================
-    const m12From = new Date(todayFrom);
-    m12From.setMonth(m12From.getMonth() - 11);
-    m12From.setDate(1);
-
-    const whereBranch12 = scope.branchId ? "AND s.branch_id = :branchId" : "";
     const bestMonthRow = await sequelize
       .query(
         `
@@ -553,31 +568,34 @@ async function overview(req, res, next) {
           COUNT(*) AS count_sales
         FROM sales s
         WHERE s.status='PAID'
-          AND s.sold_at BETWEEN :from AND :to
-          ${whereBranch12}
+          ${whereBetweenRange}
+          ${whereBranchRange}
         GROUP BY ym
         ORDER BY sum_total DESC
         LIMIT 1
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: m12From, to: todayTo, branchId: scope.branchId || null },
+          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null },
         }
       )
       .then((rows) => rows?.[0] || null)
       .catch(() => null);
 
-    const bestMonth12m =
+    const bestMonthPeriod =
       bestMonthRow && Number(bestMonthRow.sum_total || 0) > 0
         ? { ym: String(bestMonthRow.ym || ""), total: Number(bestMonthRow.sum_total || 0), count: Number(bestMonthRow.count_sales || 0) }
         : null;
 
-    // ===== ventas por sucursal (últimos 30 días) (admin-only sin filtro)
+    // ===== ventas por sucursal (últimos 30 días) (admin-only sin filtro) (lo dejo igual)
     let salesByBranch = [];
     if (scope.admin && !scope.branchId) {
+      const d30 = new Date(todayFrom);
+      d30.setDate(d30.getDate() - 30);
+
       const rows = await Sale.findAll({
         attributes: ["branch_id", [fn("SUM", col("total")), "sum_total"], [fn("COUNT", col("id")), "count_sales"]],
-        where: { status: "PAID", sold_at: { [Op.gte]: d30From } },
+        where: { status: "PAID", sold_at: { [Op.gte]: d30 } },
         group: ["branch_id"],
         order: [[fn("SUM", col("total")), "DESC"]],
         raw: true,
@@ -594,7 +612,7 @@ async function overview(req, res, next) {
       }));
     }
 
-    // ===== inventory KPIs + lastProducts
+    // ===== inventory KPIs + lastProducts (igual)
     const prodWhere = scope.branchId ? { branch_id: scope.branchId } : {};
     const totalProducts = await Product.count({ where: prodWhere });
     const activeProducts = await Product.count({ where: { ...prodWhere, is_active: 1 } }).catch(() => 0);
@@ -647,7 +665,7 @@ async function overview(req, res, next) {
         : null,
     }));
 
-    // ===== stock KPIs + stockByBranch + lowStockItems
+    // ===== stock KPIs (igual)
     const lowThreshold = 3;
     const whereWhBranch = scope.branchId ? "AND w.branch_id = :branchId" : "";
 
@@ -756,13 +774,19 @@ async function overview(req, res, next) {
           trend,
           paymentsToday,
           salesByDay,
-          salesByDay30,
           salesByBranch,
           lastSales,
-          topBranch30d,
-          topCashiers30d,
-          topProducts30d,
-          bestMonth12m,
+
+          // ✅ periodo seleccionable
+          period: range.period, // "30d" | "90d" | "12m" | "all"
+          periodFrom: range.from ? ymd(range.from) : null,
+          periodTo: ymd(range.to),
+
+          salesByPeriodDaily,   // 👈 reemplaza al "salesByDay30" para el gráfico de picos
+          topBranchPeriod,
+          topCashiersPeriod,
+          topProductsPeriod,
+          bestMonthPeriod,
         },
         inventory: {
           totalProducts,
