@@ -793,8 +793,8 @@ async function createSale(req, res) {
     let totalPaid = 0;
 
     for (const pay of payments) {
-      const amount = toNum(pay.amount);
-      const method = String(pay.method || "CASH").toUpperCase();
+    const amount = toNum(pay.amount);
+    const method = mapPayMethod(pay.method);
 
       if (!Number.isFinite(amount) || amount <= 0) {
         throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), {
@@ -883,13 +883,24 @@ async function createSale(req, res) {
  */
 function mapPayMethod(raw) {
   const m = String(raw || "").trim().toUpperCase();
+
+  // ✅ MercadoPago / MP => QR (porque tu enum DB no tiene "MERCADOPAGO")
+  if (m === "MERCADOPAGO" || m === "MERCADO_PAGO" || m === "MERCADO PAGO" || m === "MP") return "QR";
+
+  // ✅ alias comunes
+  if (m === "EFECTIVO") return "CASH";
+  if (m === "TRANSFERENCIA") return "TRANSFER";
+  if (m === "TARJETA" || m === "DEBITO" || m === "DÉBITO" || m === "CREDITO" || m === "CRÉDITO") return "CARD";
+
+  // ✅ enums ya válidos
   if (m === "CASH") return "CASH";
-  if (m === "TRANSFER" || m === "TRANSFERENCIA") return "TRANSFER";
+  if (m === "TRANSFER") return "TRANSFER";
+  if (m === "CARD") return "CARD";
   if (m === "QR") return "QR";
-  if (m === "CARD" || m === "DEBIT" || m === "CREDIT" || m === "TARJETA") return "CARD";
+  if (m === "OTHER") return "OTHER";
+
   return "OTHER";
 }
-
 /**
  * Verifica que existan las tablas de devoluciones/cambios.
  * (Si no existen, devolvemos error claro sin romper nada.)
