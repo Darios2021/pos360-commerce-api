@@ -675,6 +675,17 @@ async function getBranchesMatrix(req, res, next) {
 // =====================
 // GET /api/v1/products
 // =====================
+// =====================
+// GET /api/v1/products
+// ✅ LIST REAL + OPTIMIZADO + FILTROS REALES (SQL)
+// - Scope por sucursal (product_branches)
+// - Admin puede ver todo o filtrar por branch_id
+// - Soporta: q, category_id, subcategory_id, in_stock, sellable,
+//            is_active/include_inactive, has_images, price_min/max,
+//            price_presence (with/without), images (with/without)
+// - Devuelve meta.total real (sin inventos)
+// - Agrega branches_gc + branches_count para UI chips (solo admin)
+// =====================
 async function list(req, res, next) {
   try {
     const admin = isAdminReq(req);
@@ -694,13 +705,44 @@ async function list(req, res, next) {
       });
     }
 
+    // -------------------------
+    // Scope sucursal (habilitados)
+    // -------------------------
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
     const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
+    // Dueña (solo admin)
     const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
+
+    // Para stock_qty (si no viene branch => total global)
     const stockBranchId = admin ? (branchIdScope || 0) : branchIdScope;
 
+    // -------------------------
+    // Filtros reales (SQL)
+    // -------------------------
+    const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || 0;
+    const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || 0;
+
+    // is_active: por defecto SOLO activos (para admin y no admin)
+    // admin puede pedir include_inactive=1 para ver todo
+    const includeInactive =
+      admin &&
+      (toInt(req.query.include_inactive, 0) === 1 || String(req.query.include_inactive || "").toLowerCase() === "true");
+
+    const isActiveFilterRaw = req.query.is_active;
+    const hasExplicitIsActive = Object.prototype.hasOwnProperty.call(req.query || {}, "is_active");
+
     const where = {};
+
+    // Por defecto: activos
+    if (!includeInactive && !hasExplicitIsActive) {
+      where.is_active = 1;
+    } else if (hasExplicitIsActive) {
+      // si viene explícito, respetarlo
+      const v = String(isActiveFilterRaw ?? "").toLowerCase().trim();
+      if (v === "1" || v === "true") where.is_active = 1;
+      else if (v === "0" || v === "false") where.is_active = 0;
+    }
 
     if (q) {
       const qNum = toFloat(q, NaN);
@@ -717,24 +759,47 @@ async function list(req, res, next) {
 
     if (admin && ownerBranchId) where.branch_id = ownerBranchId;
 
+    if (categoryId) where.category_id = categoryId;
+    if (subcategoryId) where.subcategory_id = subcategoryId;
+
+    // AND literals
     where[Op.and] = where[Op.and] || [];
 
-    if (!admin) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
-    else if (branchIdScope) where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+    // Scope habilitación por sucursal (product_branches)
+    if (!admin) {
+      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+    } else if (branchIdScope) {
+      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+    }
 
+    // Stock filters
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
 
-    if (inStock || sellable) {
-      if (!admin || branchIdScope) {
-        where[Op.and].push(existsStockInBranch(branchIdScope));
-      } else {
+    // Compat: stock=with/without
+    const stockMode = String(req.query.stock || req.query.stockFilter || "").toLowerCase().trim();
+    const wantWithStock = stockMode === "with" || inStock || sellable;
+    const wantWithoutStock = stockMode === "without";
+
+    if (wantWithStock) {
+      if (!admin || branchIdScope) where[Op.and].push(existsStockInBranch(branchIdScope));
+      else
         where[Op.and].push(
           Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`)
+        );
+    } else if (wantWithoutStock) {
+      if (!admin || branchIdScope) {
+        where[Op.and].push(
+          Sequelize.literal(`NOT ${existsStockInBranch(branchIdScope).val || existsStockInBranch(branchIdScope)}`)
+        );
+      } else {
+        where[Op.and].push(
+          Sequelize.literal(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`)
         );
       }
     }
 
+    // Sellable => algún precio > 0
     if (sellable) {
       where[Op.and].push(
         Sequelize.literal(`(
@@ -742,14 +807,80 @@ async function list(req, res, next) {
             COALESCE(Product.price,0),
             COALESCE(Product.price_list,0),
             COALESCE(Product.price_discount,0),
-            COALESCE(Product.price_reseller,0),
-            COALESCE(Product.price,0)
+            COALESCE(Product.price_reseller,0)
           ) > 0
         )`)
       );
     }
 
+    // Precio lista filtros
+    const priceMin = toFloat(req.query.price_min ?? req.query.priceMin, NaN);
+    const priceMax = toFloat(req.query.price_max ?? req.query.priceMax, NaN);
+
+    const pricePresence = String(req.query.price_presence || req.query.pricePresence || "").toLowerCase().trim();
+    // price_presence: with/without/all
+    if (pricePresence === "with") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) > 0`));
+    if (pricePresence === "without") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= 0`));
+
+    if (Number.isFinite(priceMin)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) >= ${priceMin}`));
+    if (Number.isFinite(priceMax)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= ${priceMax}`));
+
+    // Imágenes (EXISTS)
+    const imagesMode = String(req.query.images || req.query.imagesFilter || "").toLowerCase().trim();
+    const hasImages = imagesMode === "with" || String(req.query.has_images || "").toLowerCase() === "true";
+    const noImages = imagesMode === "without" || String(req.query.no_images || "").toLowerCase() === "true";
+
+    if (hasImages) {
+      where[Op.and].push(
+        Sequelize.literal(`EXISTS (
+          SELECT 1 FROM product_images pi
+          WHERE pi.product_id = Product.id
+          LIMIT 1
+        )`)
+      );
+    } else if (noImages) {
+      where[Op.and].push(
+        Sequelize.literal(`NOT EXISTS (
+          SELECT 1 FROM product_images pi
+          WHERE pi.product_id = Product.id
+          LIMIT 1
+        )`)
+      );
+    }
+
+    // -------------------------
+    // Includes
+    // -------------------------
     const include = buildProductIncludes({ includeBranch: admin });
+
+    // -------------------------
+    // Attributes extra (stock + branches GC para chips)
+    // -------------------------
+    const attrsInclude = [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]];
+
+    if (admin) {
+      // branches list => "1:Casa Central|3:Rivadavia"
+      attrsInclude.push([
+        Sequelize.literal(`(
+          SELECT COALESCE(GROUP_CONCAT(CONCAT(b.id,':',b.name) SEPARATOR '|'), '')
+          FROM product_branches pb
+          JOIN branches b ON b.id = pb.branch_id
+          WHERE pb.product_id = Product.id
+            AND pb.is_active = 1
+        )`),
+        "branches_gc",
+      ]);
+
+      attrsInclude.push([
+        Sequelize.literal(`(
+          SELECT COUNT(*)
+          FROM product_branches pb
+          WHERE pb.product_id = Product.id
+            AND pb.is_active = 1
+        )`),
+        "branches_count",
+      ]);
+    }
 
     const { count, rows } = await Product.findAndCountAll({
       where,
@@ -758,7 +889,7 @@ async function list(req, res, next) {
       offset,
       include,
       distinct: true,
-      attributes: { include: [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]] },
+      attributes: { include: attrsInclude },
     });
 
     const data = (rows || []).map((r) => {
