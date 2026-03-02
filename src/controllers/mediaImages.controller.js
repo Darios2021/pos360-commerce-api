@@ -336,27 +336,53 @@ function getSizeWarning(meta) {
   return "";
 }
 
+// ✅ COPY-PASTE FINAL COMPLETO (REEMPLAZAR ESTAS FUNCIONES)
+// - buildOgJpg
+// - buildSquareJpg
+// - buildWebp
+//
+// ✅ FIX CALIDAD:
+// 1) Foreground (contain) => withoutEnlargement:true (NO upscaling)
+// 2) JPG => mejor calidad + chromaSubsampling 4:4:4 (texto/logos nítidos)
+// 3) WEBP => lossless para imágenes chicas o con alpha (logos), si no usa tu config normal
+
 async function buildOgJpg(buffer) {
   const W = 1200;
   const H = 630;
 
   const img = await decodeImage(buffer);
 
+  // fondo borroso (puede upscalear, da igual porque es blur)
   const bg = await img
     .clone()
     .resize(W, H, { fit: "cover" })
     .blur(28)
-    .jpeg({ quality: 72, mozjpeg: true, progressive: true })
+    .jpeg({
+      quality: 78,
+      mozjpeg: true,
+      progressive: true,
+      chromaSubsampling: "4:4:4",
+    })
     .toBuffer();
 
+  // ✅ foreground SIN agrandar (clave para logos chicos)
   const fg = await img
     .clone()
-    .resize(W, H, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .resize(W, H, {
+      fit: "contain",
+      withoutEnlargement: true, // ✅ FIX
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
     .toBuffer();
 
   return sharp(bg)
     .composite([{ input: fg, top: 0, left: 0 }])
-    .jpeg({ quality: 86, mozjpeg: true, progressive: true })
+    .jpeg({
+      quality: 92, // ✅ más calidad
+      mozjpeg: true,
+      progressive: true,
+      chromaSubsampling: "4:4:4", // ✅ texto mejor
+    })
     .toBuffer();
 }
 
@@ -370,17 +396,32 @@ async function buildSquareJpg(buffer) {
     .clone()
     .resize(W, H, { fit: "cover" })
     .blur(28)
-    .jpeg({ quality: 72, mozjpeg: true, progressive: true })
+    .jpeg({
+      quality: 78,
+      mozjpeg: true,
+      progressive: true,
+      chromaSubsampling: "4:4:4",
+    })
     .toBuffer();
 
+  // ✅ foreground SIN agrandar
   const fg = await img
     .clone()
-    .resize(W, H, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .resize(W, H, {
+      fit: "contain",
+      withoutEnlargement: true, // ✅ FIX
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
     .toBuffer();
 
   return sharp(bg)
     .composite([{ input: fg, top: 0, left: 0 }])
-    .jpeg({ quality: 86, mozjpeg: true, progressive: true })
+    .jpeg({
+      quality: 92,
+      mozjpeg: true,
+      progressive: true,
+      chromaSubsampling: "4:4:4",
+    })
     .toBuffer();
 }
 
@@ -390,11 +431,11 @@ async function buildWebp(buffer) {
 
   const w = toInt(meta.width, 0);
   const h = toInt(meta.height, 0);
-
   const maxSide = WEBP_MAX_SIDE;
 
   let pipe = img.clone();
 
+  // ✅ solo baja tamaño si excede maxSide (nunca agranda)
   if (w > maxSide || h > maxSide) {
     pipe = pipe.resize({
       width: maxSide,
@@ -404,6 +445,20 @@ async function buildWebp(buffer) {
     });
   }
 
+  // ✅ logos/texto: si es chica o tiene alpha => lossless webp (queda MUCHO más nítido)
+  const isSmall = (w > 0 && h > 0 && Math.max(w, h) <= 1200);
+  const hasAlpha = !!meta.hasAlpha;
+
+  if (isSmall || hasAlpha) {
+    return pipe
+      .webp({
+        lossless: true, // ✅ FIX CALIDAD logos
+        effort: 6,
+      })
+      .toBuffer();
+  }
+
+  // ✅ fotos/hero grandes => tu preset de calidad alta
   return pipe
     .webp({
       quality: WEBP_QUALITY,
