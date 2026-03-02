@@ -1,15 +1,17 @@
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (ALINEADO A DB REAL: products.subcategory_id -> subcategories.id)
+// ✅ (ALINEADO A DB REAL: products.subcategory_id -> subcategories.id)
 // Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
 //
-// ✅ DEBUG TEMPORAL AGREGADO (para ver por qué devuelve 0 items)
-// - Logs: [PRODUCTS/LIST] hit / computed / result
-// - Si querés apagarlo: poné DEBUG_PRODUCTS=false en env o borrá los console.log
+// ✅ FIX CLAVE (tu caso "0 de 0" sin errores):
+// - getBranchId() ahora también mira query/header (x-branch-id) además de req.ctx/req.user
+// - En list/getOne/getStock: si NO es admin y no hay ctxBranchId, intenta fallback a query/header antes de tirar BRANCH_REQUIRED
+//
+// ✅ FIX adicional:
+// - stock=without: antes armaba un NOT raro; ahora arma SQL correcto con NOT EXISTS()
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
-
-const DEBUG_PRODUCTS = String(process.env.DEBUG_PRODUCTS ?? "true").toLowerCase() === "true";
 
 // =====================
 // Helpers básicos
@@ -48,7 +50,16 @@ function toBool(v, d = false) {
   return d;
 }
 
+// ✅ Branch id ultra robusto (ctx + user + query + header)
 function getBranchId(req) {
+  const hdr =
+    req?.headers?.["x-branch-id"] ??
+    req?.headers?.["x-branchid"] ??
+    req?.headers?.["X-Branch-Id"] ??
+    req?.headers?.["X-BranchID"];
+
+  const q = req?.query?.branch_id ?? req?.query?.branchId ?? req?.query?.branch ?? null;
+
   return (
     toInt(req?.ctx?.branchId, 0) ||
     toInt(req?.ctx?.branch_id, 0) ||
@@ -56,6 +67,9 @@ function getBranchId(req) {
     toInt(req?.branch?.id, 0) ||
     toInt(req?.user?.branch_id, 0) ||
     toInt(req?.user?.branchId, 0) ||
+    toInt(req?.user?.branch?.id, 0) ||
+    toInt(q, 0) ||
+    toInt(hdr, 0) ||
     0
   );
 }
@@ -127,12 +141,7 @@ function isFkConstraintError(err) {
 
 function creatorLabelFromUser(u) {
   if (!u) return null;
-  return (
-    u.username ||
-    u.email ||
-    [u.first_name, u.last_name].filter(Boolean).join(" ") ||
-    (u.id ? `User #${u.id}` : null)
-  );
+  return u.username || u.email || [u.first_name, u.last_name].filter(Boolean).join(" ") || (u.id ? `User #${u.id}` : null);
 }
 
 function codeFromId(id) {
@@ -144,15 +153,6 @@ function codeFromId(id) {
 // =====================
 // Includes (ALINEADO A DB REAL)
 // =====================
-/**
- * ✅ Includes defensivos
- * - category -> Category (+ parent si existe)
- * - subcategory -> Subcategory (+ category si existe)
- * - images
- * - createdByUser
- *
- * Nota: si tus asociaciones usan otro "as", igual lo buscamos de forma defensiva.
- */
 function buildProductIncludes({ includeBranch = false } = {}) {
   const inc = [];
   const A = Product?.associations || {};
@@ -177,7 +177,6 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     try {
       const SubModel = A[subAs]?.target || Subcategory;
       const SA = SubModel?.associations || {};
-      // subcategory -> category (por subcategories.category_id)
       const subCatAs = SA.category ? "category" : SA.Category ? "Category" : null;
       if (subCatAs) subInclude.include = [{ association: subCatAs, required: false }];
     } catch {}
@@ -213,10 +212,6 @@ function buildProductIncludes({ includeBranch = false } = {}) {
 // =====================
 // Category/Subcategory SANITIZE (DB REAL)
 // =====================
-/**
- * ✅ Solo valida category_id si vino.
- * ✅ subcategory_id: lo dejamos pasar (int) y lo resolvemos SIEMPRE con ensureSubcategoryFK()
- */
 async function sanitizeCategoryFKs(payload) {
   if (!payload) return payload;
 
@@ -243,14 +238,6 @@ async function sanitizeCategoryFKs(payload) {
 }
 
 // ✅ FIX DEFINITIVO (schema real + evita "se crea con cualquiera"):
-/**
- * products.subcategory_id -> FK a subcategories.id
- *
- * Regla (anti colisión IDs):
- * 1) PRIORIDAD: si incoming existe como Category HIJA (parent_id) => convertir a Subcategory real (category_id + name)
- * 2) Si NO es Category HIJA, recién ahí permitir que sea Subcategory.id real
- * 3) Si no cierra => null
- */
 async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
   if (!payload) return payload;
   if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return payload;
@@ -518,6 +505,7 @@ async function upsertProductBranches({ productId, branchIds, transaction = null 
 
 function enabledInBranchLiteral(branchId) {
   const bid = toInt(branchId, 0);
+  if (!bid) return Sequelize.literal(`1=0`); // sin branch => no habilitado
   return Sequelize.literal(`EXISTS (
     SELECT 1
     FROM product_branches pb
@@ -547,16 +535,23 @@ function stockQtyLiteralByBranch(branchId = 0) {
   )`);
 }
 
-function existsStockInBranch(branchId) {
+// ✅ SQL string para EXISTS stock (para poder hacer NOT EXISTS bien)
+function existsStockInBranchSql(branchId) {
   const bid = toInt(branchId, 0);
-  return Sequelize.literal(`EXISTS (
+  return `EXISTS (
     SELECT 1
     FROM stock_balances sb
     JOIN warehouses w ON w.id = sb.warehouse_id
     WHERE sb.product_id = Product.id
       AND w.branch_id = ${bid}
       AND sb.qty > 0
-  )`);
+  )`;
+}
+
+function existsStockInBranchLiteral(branchId) {
+  const bid = toInt(branchId, 0);
+  if (!bid) return Sequelize.literal(`0=1`);
+  return Sequelize.literal(existsStockInBranchSql(bid));
 }
 
 // =====================
@@ -597,6 +592,8 @@ async function getBranchesMatrix(req, res, next) {
     if (!productId) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const admin = isAdminReq(req);
+
+    // ✅ fallback a query/header si no hay ctx
     const ctxBranchId = getBranchId(req);
 
     if (!admin && !ctxBranchId) {
@@ -677,13 +674,6 @@ async function getBranchesMatrix(req, res, next) {
 // =====================
 // GET /api/v1/products
 // ✅ LIST REAL + OPTIMIZADO + FILTROS REALES (SQL)
-// - Scope por sucursal (product_branches)
-// - Admin puede ver todo o filtrar por branch_id
-// - Soporta: q, category_id, subcategory_id, in_stock, sellable,
-//            is_active/include_inactive, has_images, price_min/max,
-//            price_presence (with/without), images (with/without)
-// - Devuelve meta.total real (sin inventos)
-// - Agrega branches_gc + branches_count para UI chips (solo admin)
 // =====================
 async function list(req, res, next) {
   try {
@@ -695,33 +685,25 @@ async function list(req, res, next) {
 
     const q = String(req.query.q || "").trim();
 
+    // ✅ ctxBranchId ahora cae a query/header también
     const ctxBranchId = getBranchId(req);
 
-    // ✅ DEBUG: confirma hit + scope base
-    if (DEBUG_PRODUCTS) {
-      console.log("[PRODUCTS/LIST] hit", {
-        url: req.originalUrl,
-        query: req.query,
-        headers_branch: req.headers["x-branch-id"],
-        ctxBranchId,
-        isAdmin: admin,
-        user: req?.user ? { id: req.user.id, branch_id: req.user.branch_id, role: req.user.role } : null,
-      });
-    }
+    // -------------------------
+    // Scope sucursal (habilitados)
+    // -------------------------
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
 
-    if (!admin && !ctxBranchId) {
+    // admin: puede filtrar branch_id, si no pasa => 0 (sin scope)
+    // no-admin: usa sí o sí su branch (ctx o fallback)
+    const branchIdScope = admin ? (branchIdQuery || 0) : (ctxBranchId || branchIdQuery || 0);
+
+    if (!admin && !branchIdScope) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
         message: "No se pudo determinar la sucursal del usuario (branch_id).",
       });
     }
-
-    // -------------------------
-    // Scope sucursal (habilitados)
-    // -------------------------
-    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
-    const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
     // Dueña (solo admin)
     const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
@@ -735,8 +717,7 @@ async function list(req, res, next) {
     const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || 0;
     const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || 0;
 
-    // is_active: por defecto SOLO activos (para admin y no admin)
-    // admin puede pedir include_inactive=1 para ver todo
+    // is_active: por defecto SOLO activos
     const includeInactive =
       admin &&
       (toInt(req.query.include_inactive, 0) === 1 || String(req.query.include_inactive || "").toLowerCase() === "true");
@@ -746,11 +727,9 @@ async function list(req, res, next) {
 
     const where = {};
 
-    // Por defecto: activos
     if (!includeInactive && !hasExplicitIsActive) {
       where.is_active = 1;
     } else if (hasExplicitIsActive) {
-      // si viene explícito, respetarlo
       const v = String(isActiveFilterRaw ?? "").toLowerCase().trim();
       if (v === "1" || v === "true") where.is_active = 1;
       else if (v === "0" || v === "false") where.is_active = 0;
@@ -774,7 +753,6 @@ async function list(req, res, next) {
     if (categoryId) where.category_id = categoryId;
     if (subcategoryId) where.subcategory_id = subcategoryId;
 
-    // AND literals
     where[Op.and] = where[Op.and] || [];
 
     // Scope habilitación por sucursal (product_branches)
@@ -788,27 +766,16 @@ async function list(req, res, next) {
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
 
-    // Compat: stock=with/without
     const stockMode = String(req.query.stock || req.query.stockFilter || "").toLowerCase().trim();
     const wantWithStock = stockMode === "with" || inStock || sellable;
     const wantWithoutStock = stockMode === "without";
 
     if (wantWithStock) {
-      if (!admin || branchIdScope) where[Op.and].push(existsStockInBranch(branchIdScope));
-      else
-        where[Op.and].push(
-          Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`)
-        );
+      if (!admin || branchIdScope) where[Op.and].push(existsStockInBranchLiteral(branchIdScope));
+      else where[Op.and].push(Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
     } else if (wantWithoutStock) {
-      if (!admin || branchIdScope) {
-        where[Op.and].push(
-          Sequelize.literal(`NOT ${existsStockInBranch(branchIdScope).val || existsStockInBranch(branchIdScope)}`)
-        );
-      } else {
-        where[Op.and].push(
-          Sequelize.literal(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`)
-        );
-      }
+      if (!admin || branchIdScope) where[Op.and].push(Sequelize.literal(`NOT (${existsStockInBranchSql(branchIdScope)})`));
+      else where[Op.and].push(Sequelize.literal(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
     }
 
     // Sellable => algún precio > 0
@@ -830,14 +797,13 @@ async function list(req, res, next) {
     const priceMax = toFloat(req.query.price_max ?? req.query.priceMax, NaN);
 
     const pricePresence = String(req.query.price_presence || req.query.pricePresence || "").toLowerCase().trim();
-    // price_presence: with/without/all
     if (pricePresence === "with") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) > 0`));
     if (pricePresence === "without") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= 0`));
 
     if (Number.isFinite(priceMin)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) >= ${priceMin}`));
     if (Number.isFinite(priceMax)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= ${priceMax}`));
 
-    // Imágenes (EXISTS)
+    // Imágenes
     const imagesMode = String(req.query.images || req.query.imagesFilter || "").toLowerCase().trim();
     const hasImages = imagesMode === "with" || String(req.query.has_images || "").toLowerCase() === "true";
     const noImages = imagesMode === "without" || String(req.query.no_images || "").toLowerCase() === "true";
@@ -860,34 +826,11 @@ async function list(req, res, next) {
       );
     }
 
-    // ✅ DEBUG: scope final + where serializado
-    if (DEBUG_PRODUCTS) {
-      try {
-        console.log("[PRODUCTS/LIST] computed", {
-          branchIdQuery,
-          branchIdScope,
-          ownerBranchId,
-          includeInactive,
-          where_keys: Object.keys(where || {}),
-          where: JSON.stringify(where, (k, v) => (typeof v === "function" ? "[Function]" : v), 2),
-        });
-      } catch (e) {
-        console.log("[PRODUCTS/LIST] computed (json fail)", e?.message);
-      }
-    }
-
-    // -------------------------
-    // Includes
-    // -------------------------
     const include = buildProductIncludes({ includeBranch: admin });
 
-    // -------------------------
-    // Attributes extra (stock + branches GC para chips)
-    // -------------------------
     const attrsInclude = [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]];
 
     if (admin) {
-      // branches list => "1:Casa Central|3:Rivadavia"
       attrsInclude.push([
         Sequelize.literal(`(
           SELECT COALESCE(GROUP_CONCAT(CONCAT(b.id,':',b.name) SEPARATOR '|'), '')
@@ -920,15 +863,6 @@ async function list(req, res, next) {
       attributes: { include: attrsInclude },
     });
 
-    // ✅ DEBUG: resultado
-    if (DEBUG_PRODUCTS) {
-      console.log("[PRODUCTS/LIST] result", {
-        count_type: typeof count,
-        count,
-        rows: rows?.length || 0,
-      });
-    }
-
     const data = (rows || []).map((r) => {
       const x = r?.toJSON ? r.toJSON() : r;
       const u = x?.createdByUser || null;
@@ -951,18 +885,18 @@ async function getOne(req, res, next) {
     if (!id) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const admin = isAdminReq(req);
-    const ctxBranchId = getBranchId(req);
 
-    if (!admin && !ctxBranchId) {
+    const ctxBranchId = getBranchId(req);
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
+    const branchIdScope = admin ? (branchIdQuery || 0) : (ctxBranchId || branchIdQuery || 0);
+
+    if (!admin && !branchIdScope) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
         message: "No se pudo determinar la sucursal del usuario (branch_id).",
       });
     }
-
-    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
-    const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
     const include = buildProductIncludes({ includeBranch: admin });
 
@@ -1014,11 +948,11 @@ async function getStock(req, res, next) {
     if (!productId) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
     const admin = isAdminReq(req);
-    const ctxBranchId = getBranchId(req);
 
-    const branchId = admin
-      ? toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0)
-      : ctxBranchId;
+    const ctxBranchId = getBranchId(req);
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
+
+    const branchId = admin ? (branchIdQuery || ctxBranchId || 0) : (ctxBranchId || branchIdQuery || 0);
 
     if (!branchId) {
       return res.status(400).json({
@@ -1082,21 +1016,21 @@ async function create(req, res, next) {
     payload.created_by = toInt(req?.user?.id, 0) || null;
 
     if (!admin) {
-      if (!ctxBranchId) {
+      const bid = ctxBranchId || toInt(req.query.branch_id || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
+      if (!bid) {
         return res.status(400).json({
           ok: false,
           code: "BRANCH_REQUIRED",
           message: "No se pudo determinar la sucursal del usuario (branch_id).",
         });
       }
-      payload.branch_id = ctxBranchId;
+      payload.branch_id = bid;
     } else {
       if (!payload.branch_id) payload.branch_id = ctxBranchId || 1;
     }
 
     await sanitizeCategoryFKs(payload);
 
-    // ✅ Si SKU vino vacío, lo dejamos vacío acá y lo seteamos luego con code (evita 409 por duplicados)
     if (payload.sku != null && String(payload.sku).trim() === "") payload.sku = "";
 
     const errors = validateProductPayload(payload, { isPatch: false });
@@ -1110,13 +1044,9 @@ async function create(req, res, next) {
     }
 
     const createdId = await sequelize.transaction(async (t) => {
-      // ✅ CLAVE: convertir y alinear subcategory_id a FK real subcategories.id
       await ensureSubcategoryFK(payload, { transaction: t });
 
-      // SKU temporal si viene vacío
-      const tmpSku = isNonEmptyStr(payload.sku)
-        ? payload.sku.trim()
-        : `TMP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const tmpSku = isNonEmptyStr(payload.sku) ? payload.sku.trim() : `TMP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
       const p = await Product.create({ ...payload, sku: tmpSku }, { transaction: t });
 
@@ -1132,7 +1062,8 @@ async function create(req, res, next) {
     });
 
     const include = buildProductIncludes({ includeBranch: admin });
-    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
+
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
     const branchIdScope = admin ? (branchIdQuery || 0) : getBranchId(req);
 
     const fresh = await Product.findOne({
@@ -1184,7 +1115,7 @@ async function update(req, res, next) {
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
 
     if (!admin) {
-      const bid = ctxBranchId;
+      const bid = ctxBranchId || toInt(req.query.branch_id || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
       if (!bid) {
         return res.status(400).json({
           ok: false,
@@ -1233,7 +1164,6 @@ async function update(req, res, next) {
     }
 
     await sequelize.transaction(async (t) => {
-      // ✅ CLAVE: convertir y alinear subcategory_id a FK real
       await ensureSubcategoryFK(patch, { transaction: t });
 
       await p.update(patch, { transaction: t });
@@ -1256,8 +1186,8 @@ async function update(req, res, next) {
 
     const include = buildProductIncludes({ includeBranch: admin });
 
-    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
-    const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"] || req.headers["x-branchid"], 0);
+    const branchIdScope = admin ? (branchIdQuery || 0) : (ctxBranchId || branchIdQuery || 0);
 
     const updated = await Product.findOne({
       where: { id },
@@ -1320,7 +1250,6 @@ async function remove(req, res, next) {
 
     const totalQty = Number(srow?.total_qty || 0);
 
-    // Si tiene stock => soft delete + deshabilitar en product_branches
     if (totalQty > 0) {
       await sequelize.transaction(async (t) => {
         await sequelize.query(
@@ -1351,7 +1280,6 @@ async function remove(req, res, next) {
       });
     }
 
-    // Si NO tiene stock => intentamos borrado físico
     try {
       await sequelize.transaction(async (t) => {
         if (ProductImage?.destroy) await ProductImage.destroy({ where: { product_id: id }, transaction: t });
@@ -1371,7 +1299,6 @@ async function remove(req, res, next) {
 
       return res.json({ ok: true, message: "Producto eliminado" });
     } catch (err) {
-      // Si falla por FK (ventas/movimientos) => soft delete
       if (isFkConstraintError(err)) {
         await sequelize.transaction(async (t) => {
           await sequelize.query(
