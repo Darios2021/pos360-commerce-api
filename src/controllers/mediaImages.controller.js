@@ -17,6 +17,10 @@
 // - PUT    /api/v1/admin/media/images/:id   (multipart overwrite: key/url/filename/stem -> regenera variantes)
 // - DELETE /api/v1/admin/media/images/:id
 // - GET    /api/v1/admin/media/images/used-by/:filename
+//
+// ✅ FIX PEDIDO: NO BLOQUEA imágenes chicas (quita ensureMinimum duro)
+// - Si es chica, se permite.
+// - Si querés aviso, devolvemos meta + optional warning (sin 400).
 
 const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
@@ -57,11 +61,6 @@ const PREFIXES = String(process.env.S3_MEDIA_PREFIXES || "products,media")
 const UPLOAD_PREFIX = String(process.env.S3_MEDIA_UPLOAD_PREFIX || "media").trim().replace(/^\/+|\/+$/g, "");
 
 // ====== ✅ IMAGEN: tuning para HERO / UI ======
-// Para evitar pérdida de calidad en banners/slider desktop:
-//
-// - WEBP_MAX_SIDE: recomendado 2560 (o 2400). Antes era 1600.
-// - WEBP_QUALITY:  94 (antes 82).
-// - chromaSubsampling 4:4:4 + smartSubsample + nearLossless: mejora MUCHO texto/edges.
 const WEBP_MAX_SIDE = envInt("MEDIA_WEBP_MAX_SIDE", 2560);
 const WEBP_QUALITY = envInt("MEDIA_WEBP_QUALITY", 94);
 
@@ -129,11 +128,6 @@ function stripExt(name) {
 /**
  * Dado cualquier key/filename/url (webp/jpg/_og/_sq),
  * devuelve el "stem" base (sin sufijos) y los keys esperados.
- *
- * Ej:
- *  media/abc.webp    -> stemKey media/abc
- *  media/abc_og.jpg  -> stemKey media/abc
- *  media/abc_sq.jpg  -> stemKey media/abc
  */
 function deriveStemFromKey(key) {
   const k = String(key || "");
@@ -198,7 +192,6 @@ async function listStorageObjects({ q }) {
 
   const s3 = s3Client();
   const qLower = String(q || "").trim().toLowerCase();
-
   const all = [];
 
   for (const pref of PREFIXES) {
@@ -250,7 +243,7 @@ async function resolveKeyForOverwrite(rawId) {
   // 1) Normalizar raw (url/key/bucket/key)
   const maybeKey = normalizeKeyFromRaw(raw);
 
-  // ✅ probar headObject directo SIEMPRE que tengamos algo
+  // ✅ probar headObject directo
   if (maybeKey) {
     try {
       await s3.headObject({ Bucket: BUCKET, Key: maybeKey }).promise();
@@ -282,7 +275,6 @@ async function resolveKeyForOverwrite(rawId) {
   if (!filename) return "";
 
   const candidates = [];
-
   if (UPLOAD_PREFIX) candidates.push(`${UPLOAD_PREFIX}/${filename}`);
   for (const p of PREFIXES) {
     if (!p) continue;
@@ -328,21 +320,20 @@ async function resolveKeyForOverwrite(rawId) {
 
 // ====== IMAGE PIPELINE ======
 async function decodeImage(buffer) {
-  // ✅ rotate() respeta EXIF orientation -> previene previews “girados”
-  // ✅ failOnError=false evita que sharp reviente con archivos raros (y vos ya validás tamaño)
+  // ✅ rotate() respeta EXIF orientation
   return sharp(buffer, { failOnError: false, animated: false }).rotate();
 }
 
-function ensureMinimum(meta) {
+// ✅ ANTES: bloqueaba con 400 si era chica.
+// ✅ AHORA: NO BLOQUEA. Solo devuelve un warning opcional.
+function getSizeWarning(meta) {
   const w = toInt(meta?.width, 0);
   const h = toInt(meta?.height, 0);
 
-  if (w < 300 || h < 200) {
-    const err = new Error(`Imagen demasiado chica (${w}x${h}). Mínimo recomendado: ancho ≥ 300px y alto ≥ 200px.`);
-    err.status = 400;
-    err.friendlyMessage = err.message;
-    throw err;
+  if (w > 0 && h > 0 && (w < 300 || h < 200)) {
+    return `Imagen chica (${w}x${h}). Recomendado: ancho ≥ 300px y alto ≥ 200px.`;
   }
+  return "";
 }
 
 async function buildOgJpg(buffer) {
@@ -415,11 +406,11 @@ async function buildWebp(buffer) {
 
   return pipe
     .webp({
-      quality: WEBP_QUALITY, // subimos por env
-      effort: 6, // ✅ más compresión “lenta” pero mejor
-      chromaSubsampling: "4:4:4", // ✅ clave para texto
+      quality: WEBP_QUALITY,
+      effort: 6,
+      chromaSubsampling: "4:4:4",
       smartSubsample: true,
-      nearLossless: true, // ✅ mejora edges/lettering
+      nearLossless: true,
     })
     .toBuffer();
 }
@@ -427,13 +418,15 @@ async function buildWebp(buffer) {
 async function generateVariants(fileBuffer) {
   const base = await decodeImage(fileBuffer);
   const meta = await base.metadata();
-  ensureMinimum(meta);
+
+  // ✅ NO ensureMinimum(meta)
+  const warning = getSizeWarning(meta);
 
   const og = await buildOgJpg(fileBuffer);
   const sq = await buildSquareJpg(fileBuffer);
   const webp = await buildWebp(fileBuffer);
 
-  return { meta, og, sq, webp };
+  return { meta, warning, og, sq, webp };
 }
 
 async function putObject({ key, body, contentType, cacheControl }) {
@@ -598,6 +591,7 @@ exports.uploadOne = async (req, res) => {
       og_url: uploaded.og.url,
       sq_url: uploaded.sq.url,
       meta: { width: variants.meta.width, height: variants.meta.height, format: variants.meta.format },
+      warning: variants.warning || undefined,
     });
   } catch (err) {
     console.error("❌ [admin media] uploadOne:", err);
@@ -633,7 +627,6 @@ exports.overwriteById = async (req, res) => {
     const keys = deriveStemFromKey(key);
     const variants = await generateVariants(file.buffer);
 
-    // overwrite: no-cache para que scrapers y browser no te claven el viejo por horas
     const uploaded = await uploadVariantsToS3({
       webpKey: keys.webpKey,
       ogKey: keys.ogKey,
@@ -654,6 +647,7 @@ exports.overwriteById = async (req, res) => {
       og_url: uploaded.og.url,
       sq_url: uploaded.sq.url,
       meta: { width: variants.meta.width, height: variants.meta.height, format: variants.meta.format },
+      warning: variants.warning || undefined,
     });
   } catch (err) {
     console.error("❌ [admin media] overwriteById:", err);
@@ -676,7 +670,6 @@ exports.removeById = async (req, res) => {
     if (!raw) return res.status(400).json({ ok: false, message: "Falta id" });
 
     // ✅ Bloqueo por STEM:
-    // Si piden borrar abc_og.jpg o abc_sq.jpg, igual bloqueamos mirando abc.webp
     const keyForCheck = normalizeKeyFromRaw(raw) || raw;
     const fn = pickFilename(keyForCheck);
     const base = stripExt(fn).replace(/(_og|_sq)$/i, "");
@@ -697,12 +690,10 @@ exports.removeById = async (req, res) => {
 
     const s3 = s3Client();
 
-    // resolvemos el key real si existe
     let key = await resolveKeyForOverwrite(raw);
     if (!key) key = normalizeKeyFromRaw(raw);
 
     if (!key) {
-      // fallback por filename en upload_prefix
       const fallbackKey = UPLOAD_PREFIX ? `${UPLOAD_PREFIX}/${fn}` : fn;
       await s3.deleteObject({ Bucket: BUCKET, Key: fallbackKey }).promise();
       return res.json({ ok: true, deleted: true, filename: fn, key: fallbackKey });
