@@ -8,8 +8,8 @@
 // Mejora clave:
 // - Subida/overwrite: genera 3 variantes:
 //   1) WEBP (UI):          <stem>.webp
-//   2) OG Preview (JPG):   <stem>_og.jpg   (1200x630, ideal WhatsApp/Facebook/IG preview)
-//   3) Square (JPG):       <stem>_sq.jpg   (1080x1080)
+//   2) OG Preview (PNG):   <stem>_og.png   (1200x630, ideal preview)
+//   3) Square (PNG):       <stem>_sq.png   (1080x1080)
 //
 // Endpoints:
 // - GET    /api/v1/admin/media/images?page&limit&q&used&product_id&category_id&subcategory_id
@@ -18,9 +18,11 @@
 // - DELETE /api/v1/admin/media/images/:id
 // - GET    /api/v1/admin/media/images/used-by/:filename
 //
-// ✅ FIX PEDIDO: NO BLOQUEA imágenes chicas (quita ensureMinimum duro)
-// - Si es chica, se permite.
-// - Si querés aviso, devolvemos meta + optional warning (sin 400).
+// ✅ FIXES:
+// - NO BLOQUEA imágenes chicas (quita ensureMinimum duro). Devuelve warning si es chica.
+// - CALIDAD: OG/SQ ahora son PNG lossless (JPG destruía logos/texto)
+// - Foreground (contain) SIEMPRE withoutEnlargement:true (NO upscaling)
+// - WEBP: lossless para imágenes chicas o con alpha (logos); grandes usa calidad alta
 
 const crypto = require("crypto");
 const { Sequelize } = require("sequelize");
@@ -126,7 +128,7 @@ function stripExt(name) {
 }
 
 /**
- * Dado cualquier key/filename/url (webp/jpg/_og/_sq),
+ * Dado cualquier key/filename/url (webp/png/_og/_sq),
  * devuelve el "stem" base (sin sufijos) y los keys esperados.
  */
 function deriveStemFromKey(key) {
@@ -142,8 +144,8 @@ function deriveStemFromKey(key) {
   return {
     stemKey,
     webpKey: `${stemKey}.webp`,
-    ogKey: `${stemKey}_og.jpg`,
-    sqKey: `${stemKey}_sq.jpg`,
+    ogKey: `${stemKey}_og.png`, // ✅ PNG lossless
+    sqKey: `${stemKey}_sq.png`, // ✅ PNG lossless
   };
 }
 
@@ -261,7 +263,7 @@ async function resolveKeyForOverwrite(rawId) {
 
   if (looksLikeStem) {
     const stem = maybeKey.replace(/^\/+/, "");
-    const stemCandidates = [`${stem}.webp`, `${stem}_og.jpg`, `${stem}_sq.jpg`];
+    const stemCandidates = [`${stem}.webp`, `${stem}_og.png`, `${stem}_sq.png`]; // ✅ PNG
     for (const k of stemCandidates) {
       try {
         await s3.headObject({ Bucket: BUCKET, Key: k }).promise();
@@ -320,12 +322,10 @@ async function resolveKeyForOverwrite(rawId) {
 
 // ====== IMAGE PIPELINE ======
 async function decodeImage(buffer) {
-  // ✅ rotate() respeta EXIF orientation
   return sharp(buffer, { failOnError: false, animated: false }).rotate();
 }
 
-// ✅ ANTES: bloqueaba con 400 si era chica.
-// ✅ AHORA: NO BLOQUEA. Solo devuelve un warning opcional.
+// ✅ NO BLOQUEA. Solo warning opcional.
 function getSizeWarning(meta) {
   const w = toInt(meta?.width, 0);
   const h = toInt(meta?.height, 0);
@@ -336,57 +336,34 @@ function getSizeWarning(meta) {
   return "";
 }
 
-// ✅ COPY-PASTE FINAL COMPLETO (REEMPLAZAR ESTAS FUNCIONES)
-// - buildOgJpg
-// - buildSquareJpg
-// - buildWebp
-//
-// ✅ FIX CALIDAD:
-// 1) Foreground (contain) => withoutEnlargement:true (NO upscaling)
-// 2) JPG => mejor calidad + chromaSubsampling 4:4:4 (texto/logos nítidos)
-// 3) WEBP => lossless para imágenes chicas o con alpha (logos), si no usa tu config normal
-
-async function buildOgJpg(buffer) {
+// ✅ OG PNG lossless + sin upscaling del foreground
+async function buildOgPng(buffer) {
   const W = 1200;
   const H = 630;
 
   const img = await decodeImage(buffer);
 
-  // fondo borroso (puede upscalear, da igual porque es blur)
   const bg = await img
     .clone()
     .resize(W, H, { fit: "cover" })
     .blur(28)
-    .jpeg({
-      quality: 78,
-      mozjpeg: true,
-      progressive: true,
-      chromaSubsampling: "4:4:4",
-    })
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 
-  // ✅ foreground SIN agrandar (clave para logos chicos)
   const fg = await img
     .clone()
     .resize(W, H, {
       fit: "contain",
-      withoutEnlargement: true, // ✅ FIX
+      withoutEnlargement: true, // ✅ NO agrandar (clave)
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
     .toBuffer();
 
-  return sharp(bg)
-    .composite([{ input: fg, top: 0, left: 0 }])
-    .jpeg({
-      quality: 92, // ✅ más calidad
-      mozjpeg: true,
-      progressive: true,
-      chromaSubsampling: "4:4:4", // ✅ texto mejor
-    })
-    .toBuffer();
+  return sharp(bg).composite([{ input: fg, top: 0, left: 0 }]).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
 }
 
-async function buildSquareJpg(buffer) {
+// ✅ Square PNG lossless + sin upscaling del foreground
+async function buildSquarePng(buffer) {
   const W = 1080;
   const H = 1080;
 
@@ -396,35 +373,22 @@ async function buildSquareJpg(buffer) {
     .clone()
     .resize(W, H, { fit: "cover" })
     .blur(28)
-    .jpeg({
-      quality: 78,
-      mozjpeg: true,
-      progressive: true,
-      chromaSubsampling: "4:4:4",
-    })
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
 
-  // ✅ foreground SIN agrandar
   const fg = await img
     .clone()
     .resize(W, H, {
       fit: "contain",
-      withoutEnlargement: true, // ✅ FIX
+      withoutEnlargement: true, // ✅ NO agrandar (clave)
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
     .toBuffer();
 
-  return sharp(bg)
-    .composite([{ input: fg, top: 0, left: 0 }])
-    .jpeg({
-      quality: 92,
-      mozjpeg: true,
-      progressive: true,
-      chromaSubsampling: "4:4:4",
-    })
-    .toBuffer();
+  return sharp(bg).composite([{ input: fg, top: 0, left: 0 }]).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
 }
 
+// ✅ WEBP: lossless para logos/chicas o con alpha
 async function buildWebp(buffer) {
   const img = await decodeImage(buffer);
   const meta = await img.metadata();
@@ -435,7 +399,6 @@ async function buildWebp(buffer) {
 
   let pipe = img.clone();
 
-  // ✅ solo baja tamaño si excede maxSide (nunca agranda)
   if (w > maxSide || h > maxSide) {
     pipe = pipe.resize({
       width: maxSide,
@@ -445,20 +408,13 @@ async function buildWebp(buffer) {
     });
   }
 
-  // ✅ logos/texto: si es chica o tiene alpha => lossless webp (queda MUCHO más nítido)
-  const isSmall = (w > 0 && h > 0 && Math.max(w, h) <= 1200);
+  const isSmall = w > 0 && h > 0 && Math.max(w, h) <= 1400;
   const hasAlpha = !!meta.hasAlpha;
 
   if (isSmall || hasAlpha) {
-    return pipe
-      .webp({
-        lossless: true, // ✅ FIX CALIDAD logos
-        effort: 6,
-      })
-      .toBuffer();
+    return pipe.webp({ lossless: true, effort: 6 }).toBuffer();
   }
 
-  // ✅ fotos/hero grandes => tu preset de calidad alta
   return pipe
     .webp({
       quality: WEBP_QUALITY,
@@ -474,11 +430,10 @@ async function generateVariants(fileBuffer) {
   const base = await decodeImage(fileBuffer);
   const meta = await base.metadata();
 
-  // ✅ NO ensureMinimum(meta)
   const warning = getSizeWarning(meta);
 
-  const og = await buildOgJpg(fileBuffer);
-  const sq = await buildSquareJpg(fileBuffer);
+  const og = await buildOgPng(fileBuffer);
+  const sq = await buildSquarePng(fileBuffer);
   const webp = await buildWebp(fileBuffer);
 
   return { meta, warning, og, sq, webp };
@@ -510,14 +465,14 @@ async function uploadVariantsToS3({ webpKey, ogKey, sqKey, variants, cacheContro
   const ogUp = await putObject({
     key: ogKey,
     body: variants.og,
-    contentType: "image/jpeg",
+    contentType: "image/png", // ✅ PNG
     cacheControl,
   });
 
   const sqUp = await putObject({
     key: sqKey,
     body: variants.sq,
-    contentType: "image/jpeg",
+    contentType: "image/png", // ✅ PNG
     cacheControl,
   });
 
@@ -608,8 +563,6 @@ exports.usedByFilename = async (req, res) => {
 
 /**
  * POST /api/v1/admin/media/images  (sube nuevo)
- * ✅ genera variantes y guarda:
- *   <stem>.webp, <stem>_og.jpg, <stem>_sq.jpg
  */
 exports.uploadOne = async (req, res) => {
   try {
@@ -658,8 +611,6 @@ exports.uploadOne = async (req, res) => {
 
 /**
  * PUT /api/v1/admin/media/images/:id
- * ✅ Overwrite real: resuelve key existente (key/url/filename/stem), deriva stem, regenera y pisa:
- *   .webp + _og.jpg + _sq.jpg
  */
 exports.overwriteById = async (req, res) => {
   try {
@@ -714,8 +665,6 @@ exports.overwriteById = async (req, res) => {
 
 /**
  * DELETE /api/v1/admin/media/images/:id
- * Bloquea si está usada por productos (409).
- * ✅ Borra el paquete completo (webp + og + sq), aunque le pases og/sq como id.
  */
 exports.removeById = async (req, res) => {
   try {
@@ -724,7 +673,6 @@ exports.removeById = async (req, res) => {
     const raw = String(req.params.id || "").trim();
     if (!raw) return res.status(400).json({ ok: false, message: "Falta id" });
 
-    // ✅ Bloqueo por STEM:
     const keyForCheck = normalizeKeyFromRaw(raw) || raw;
     const fn = pickFilename(keyForCheck);
     const base = stripExt(fn).replace(/(_og|_sq)$/i, "");
