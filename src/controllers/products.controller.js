@@ -1,6 +1,13 @@
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (ALINEADO A DB REAL: products.subcategory_id -> subcategories.id)
 // Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
+//
+// ✅ FIX QUE PEDISTE (0 productos por scope):
+// - Scope por sucursal ahora es: habilitado en product_branches OR legacy products.branch_id = branchId
+//   => evita quedar en 0 cuando hay productos viejos sin filas en product_branches
+//
+// Nota: NO rompe admin ni filtros, solo amplía el scope legacy.
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
@@ -246,7 +253,6 @@ async function sanitizeCategoryFKs(payload) {
  * 3) Si no cierra => null
  */
 async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
-
   if (!payload) return payload;
   if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return payload;
 
@@ -310,9 +316,6 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
   payload.subcategory_id = null;
   return payload;
 }
-
-
-
 
 // =====================
 // Validación
@@ -525,6 +528,23 @@ function enabledInBranchLiteral(branchId) {
   )`);
 }
 
+// ✅ FIX: scope legacy (pb OR products.branch_id)
+function enabledInBranchOrOwnerLiteral(branchId) {
+  const bid = toInt(branchId, 0);
+  if (!bid) return Sequelize.literal("1=1");
+
+  return Sequelize.literal(`(
+    EXISTS (
+      SELECT 1
+      FROM product_branches pb
+      WHERE pb.product_id = Product.id
+        AND pb.branch_id = ${bid}
+        AND pb.is_active = 1
+    )
+    OR COALESCE(Product.branch_id, 0) = ${bid}
+  )`);
+}
+
 function stockQtyLiteralByBranch(branchId = 0) {
   const bid = toInt(branchId, 0);
 
@@ -674,11 +694,8 @@ async function getBranchesMatrix(req, res, next) {
 
 // =====================
 // GET /api/v1/products
-// =====================
-// =====================
-// GET /api/v1/products
 // ✅ LIST REAL + OPTIMIZADO + FILTROS REALES (SQL)
-// - Scope por sucursal (product_branches)
+// - Scope por sucursal (product_branches) + legacy products.branch_id
 // - Admin puede ver todo o filtrar por branch_id
 // - Soporta: q, category_id, subcategory_id, in_stock, sellable,
 //            is_active/include_inactive, has_images, price_min/max,
@@ -765,11 +782,11 @@ async function list(req, res, next) {
     // AND literals
     where[Op.and] = where[Op.and] || [];
 
-    // Scope habilitación por sucursal (product_branches)
+    // ✅ Scope habilitación por sucursal (product_branches) + legacy products.branch_id
     if (!admin) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+      where[Op.and].push(enabledInBranchOrOwnerLiteral(branchIdScope));
     } else if (branchIdScope) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+      where[Op.and].push(enabledInBranchOrOwnerLiteral(branchIdScope));
     }
 
     // Stock filters
