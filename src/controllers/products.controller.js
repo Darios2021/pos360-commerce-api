@@ -1,16 +1,15 @@
-// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/products.controller.js
 // ✅ COPY-PASTE FINAL COMPLETO (ALINEADO A DB REAL: products.subcategory_id -> subcategories.id)
 // Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
 //
-// ✅ FIX QUE PEDISTE (0 productos por scope):
-// - Scope por sucursal ahora es: habilitado en product_branches OR legacy products.branch_id = branchId
-//   => evita quedar en 0 cuando hay productos viejos sin filas en product_branches
-//
-// Nota: NO rompe admin ni filtros, solo amplía el scope legacy.
+// ✅ DEBUG TEMPORAL AGREGADO (para ver por qué devuelve 0 items)
+// - Logs: [PRODUCTS/LIST] hit / computed / result
+// - Si querés apagarlo: poné DEBUG_PRODUCTS=false en env o borrá los console.log
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
+
+const DEBUG_PRODUCTS = String(process.env.DEBUG_PRODUCTS ?? "true").toLowerCase() === "true";
 
 // =====================
 // Helpers básicos
@@ -528,23 +527,6 @@ function enabledInBranchLiteral(branchId) {
   )`);
 }
 
-// ✅ FIX: scope legacy (pb OR products.branch_id)
-function enabledInBranchOrOwnerLiteral(branchId) {
-  const bid = toInt(branchId, 0);
-  if (!bid) return Sequelize.literal("1=1");
-
-  return Sequelize.literal(`(
-    EXISTS (
-      SELECT 1
-      FROM product_branches pb
-      WHERE pb.product_id = Product.id
-        AND pb.branch_id = ${bid}
-        AND pb.is_active = 1
-    )
-    OR COALESCE(Product.branch_id, 0) = ${bid}
-  )`);
-}
-
 function stockQtyLiteralByBranch(branchId = 0) {
   const bid = toInt(branchId, 0);
 
@@ -695,7 +677,7 @@ async function getBranchesMatrix(req, res, next) {
 // =====================
 // GET /api/v1/products
 // ✅ LIST REAL + OPTIMIZADO + FILTROS REALES (SQL)
-// - Scope por sucursal (product_branches) + legacy products.branch_id
+// - Scope por sucursal (product_branches)
 // - Admin puede ver todo o filtrar por branch_id
 // - Soporta: q, category_id, subcategory_id, in_stock, sellable,
 //            is_active/include_inactive, has_images, price_min/max,
@@ -714,6 +696,19 @@ async function list(req, res, next) {
     const q = String(req.query.q || "").trim();
 
     const ctxBranchId = getBranchId(req);
+
+    // ✅ DEBUG: confirma hit + scope base
+    if (DEBUG_PRODUCTS) {
+      console.log("[PRODUCTS/LIST] hit", {
+        url: req.originalUrl,
+        query: req.query,
+        headers_branch: req.headers["x-branch-id"],
+        ctxBranchId,
+        isAdmin: admin,
+        user: req?.user ? { id: req.user.id, branch_id: req.user.branch_id, role: req.user.role } : null,
+      });
+    }
+
     if (!admin && !ctxBranchId) {
       return res.status(400).json({
         ok: false,
@@ -782,11 +777,11 @@ async function list(req, res, next) {
     // AND literals
     where[Op.and] = where[Op.and] || [];
 
-    // ✅ Scope habilitación por sucursal (product_branches) + legacy products.branch_id
+    // Scope habilitación por sucursal (product_branches)
     if (!admin) {
-      where[Op.and].push(enabledInBranchOrOwnerLiteral(branchIdScope));
+      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
     } else if (branchIdScope) {
-      where[Op.and].push(enabledInBranchOrOwnerLiteral(branchIdScope));
+      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
     }
 
     // Stock filters
@@ -865,6 +860,22 @@ async function list(req, res, next) {
       );
     }
 
+    // ✅ DEBUG: scope final + where serializado
+    if (DEBUG_PRODUCTS) {
+      try {
+        console.log("[PRODUCTS/LIST] computed", {
+          branchIdQuery,
+          branchIdScope,
+          ownerBranchId,
+          includeInactive,
+          where_keys: Object.keys(where || {}),
+          where: JSON.stringify(where, (k, v) => (typeof v === "function" ? "[Function]" : v), 2),
+        });
+      } catch (e) {
+        console.log("[PRODUCTS/LIST] computed (json fail)", e?.message);
+      }
+    }
+
     // -------------------------
     // Includes
     // -------------------------
@@ -908,6 +919,15 @@ async function list(req, res, next) {
       distinct: true,
       attributes: { include: attrsInclude },
     });
+
+    // ✅ DEBUG: resultado
+    if (DEBUG_PRODUCTS) {
+      console.log("[PRODUCTS/LIST] result", {
+        count_type: typeof count,
+        count,
+        rows: rows?.length || 0,
+      });
+    }
 
     const data = (rows || []).map((r) => {
       const x = r?.toJSON ? r.toJSON() : r;
