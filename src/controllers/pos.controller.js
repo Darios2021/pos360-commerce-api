@@ -18,8 +18,14 @@
 // - Soporta registrar cuotas hasta 12 (installments 1..12)
 // - El cálculo de cuotas se hace con PRECIO LISTA (lo hace el front) y el backend lo REGISTRA:
 //   - Guarda metadata en Payment.note (JSON) con:
-//     { provider_code, installments, price_basis:"LIST", list_total, per_installment_list }
-// - Método ecom "credit_sjt" => se guarda en DB como Payment.method = "OTHER" + note/provider_code
+//     { provider_code, installments, price_basis:"LIST", list_total, per_installment_list, card_kind }
+// - Método ecom "credit_sjt" => se guarda en DB como Payment.method = "OTHER" + reference="SJCREDIT" + provider_code
+//
+// ✅ FIX DB (importante):
+// - payments ahora tiene columna installments INT NOT NULL DEFAULT 1
+// - payments.method enum incluye MERCADOPAGO (según tu SHOW CREATE TABLE)
+// - MercadoPago / Transfer / Débito => SIEMPRE contado (installments=1)
+// - Cuotas SOLO cuando es TARJETA CRÉDITO (CARD y NO debit) o Crédito San Juan (OTHER + provider_code=credit_sjt)
 
 const { literal } = require("sequelize");
 const {
@@ -207,7 +213,6 @@ function safeJsonParse(s) {
 function mergePaymentNote(existingNote, metaObj) {
   const prev = safeJsonParse(existingNote) || {};
   const merged = { ...prev, ...metaObj };
-  // recortamos tamaño por si acaso
   let out = "";
   try {
     out = JSON.stringify(merged);
@@ -216,6 +221,60 @@ function mergePaymentNote(existingNote, metaObj) {
   }
   if (out.length > 800) out = out.slice(0, 800);
   return out;
+}
+
+/* =========================
+   ✅ Método de pago: mapping a enum DB
+========================= */
+/**
+ * payments.method enum: CASH, TRANSFER, CARD, QR, MERCADOPAGO, OTHER
+ * Reglas:
+ * - Crédito San Juan => OTHER + provider_code=credit_sjt + reference="SJCREDIT"
+ * - MercadoPago => MERCADOPAGO (contado)
+ * - Débito => CARD + providerCode="debit" (pero installments=1 siempre)
+ */
+function mapPayMethodDetailed(raw) {
+  const rawStr = String(raw || "").trim();
+  const m = rawStr.toUpperCase();
+
+  // ✅ Crédito San Juan
+  if (
+    rawStr === "credit_sjt" ||
+    m === "CREDIT_SJT" ||
+    m === "CREDITO_SJT" ||
+    m === "CREDITO SAN JUAN" ||
+    m === "CRÉDITO SAN JUAN" ||
+    m === "SJCREDIT"
+  ) {
+    return { dbMethod: "OTHER", providerCode: "credit_sjt" };
+  }
+
+  // ✅ MercadoPago (tu enum DB lo soporta)
+  if (m === "MERCADOPAGO" || m === "MERCADO_PAGO" || m === "MERCADO PAGO" || m === "MP") {
+    return { dbMethod: "MERCADOPAGO", providerCode: "mercadopago" };
+  }
+
+  // ✅ alias comunes
+  if (m === "EFECTIVO") return { dbMethod: "CASH", providerCode: "cash" };
+  if (m === "TRANSFERENCIA") return { dbMethod: "TRANSFER", providerCode: "transfer" };
+  if (m === "TARJETA" || m === "CREDITO" || m === "CRÉDITO") return { dbMethod: "CARD", providerCode: "card" };
+  if (m === "DEBITO" || m === "DÉBITO") return { dbMethod: "CARD", providerCode: "debit" };
+  if (m === "QR") return { dbMethod: "QR", providerCode: "qr" };
+
+  // ✅ enums ya válidos
+  if (m === "CASH") return { dbMethod: "CASH", providerCode: "cash" };
+  if (m === "TRANSFER") return { dbMethod: "TRANSFER", providerCode: "transfer" };
+  if (m === "CARD") return { dbMethod: "CARD", providerCode: "card" };
+  if (m === "QR") return { dbMethod: "QR", providerCode: "qr" };
+  if (m === "MERCADOPAGO") return { dbMethod: "MERCADOPAGO", providerCode: "mercadopago" };
+  if (m === "OTHER") return { dbMethod: "OTHER", providerCode: "other" };
+
+  return { dbMethod: "OTHER", providerCode: rawStr ? rawStr : "other" };
+}
+
+// Back-compat por si alguien llama mapPayMethod()
+function mapPayMethod(raw) {
+  return mapPayMethodDetailed(raw).dbMethod;
 }
 
 /* =========================
@@ -238,6 +297,10 @@ async function getContext(req, res) {
     let resolvedWarehouseId = admin ? toInt(explicit.warehouseId, 0) : toInt(fallback.warehouseId, 0);
 
     if (!admin && !resolvedWarehouseId && resolvedBranchId) {
+      resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
+    }
+    if (admin && !resolvedWarehouseId && resolvedBranchId) {
+      // admin: si no especifica, intentamos default del branch
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
 
@@ -549,9 +612,7 @@ async function createSale(req, res) {
   let t;
   try {
     const admin = isAdminReq(req);
-    if (admin) {
-      logPos(req, "info", "createSale admin allowed");
-    }
+    if (admin) logPos(req, "info", "createSale admin allowed");
 
     const body = req.body || {};
     const items = Array.isArray(body.items) ? body.items : [];
@@ -595,8 +656,6 @@ async function createSale(req, res) {
 
     const userId = toInt(req.user.id, 0);
 
-    // ✅ Para admin, dejamos que venga explícito (body/query) o ctx.
-    // Para user, usa su branch_id como antes.
     const userBranchId = toInt(req.user.branch_id, 0);
 
     const explicit = resolveExplicitPosContext(req);
@@ -607,12 +666,7 @@ async function createSale(req, res) {
       : userBranchId;
 
     if (!resolvedBranchId) {
-      logPos(req, "warn", "createSale blocked: missing branch (admin needs explicit branch_id)", {
-        admin,
-        userBranchId,
-        explicit,
-        ctx,
-      });
+      logPos(req, "warn", "createSale blocked: missing branch", { admin, userBranchId, explicit, ctx });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -630,17 +684,11 @@ async function createSale(req, res) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
     if (admin && !resolvedWarehouseId && resolvedBranchId) {
-      // admin: si no especifica, intentamos default del branch
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
 
     if (!resolvedWarehouseId) {
-      logPos(req, "warn", "createSale blocked: missing warehouse", {
-        resolvedBranchId,
-        admin,
-        explicit,
-        ctx,
-      });
+      logPos(req, "warn", "createSale blocked: missing warehouse", { resolvedBranchId, admin, explicit, ctx });
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
@@ -649,7 +697,6 @@ async function createSale(req, res) {
       });
     }
 
-    // (opcional) cross-check warehouse pertenece a branch cuando admin manda explícito
     if (admin) {
       const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
       if (!ok) {
@@ -673,21 +720,15 @@ async function createSale(req, res) {
     }));
 
     for (const it of normalizedItems) {
-      if (!it.product_id)
-        throw Object.assign(new Error("Item inválido: falta product_id"), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
-      if (!Number.isFinite(it.quantity) || it.quantity <= 0)
-        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
-      if (!Number.isFinite(it.unit_price) || it.unit_price <= 0)
-        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
+      if (!it.product_id) {
+        throw Object.assign(new Error("Item inválido: falta product_id"), { httpStatus: 400, code: "INVALID_ITEM" });
+      }
+      if (!Number.isFinite(it.quantity) || it.quantity <= 0) {
+        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), { httpStatus: 400, code: "INVALID_ITEM" });
+      }
+      if (!Number.isFinite(it.unit_price) || it.unit_price <= 0) {
+        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), { httpStatus: 400, code: "INVALID_ITEM" });
+      }
     }
 
     let subtotal = 0;
@@ -714,7 +755,6 @@ async function createSale(req, res) {
         status: "PAID",
         sale_number: null,
 
-        // ✅ GUARDA CLIENTE
         customer_name,
         customer_phone,
         customer_doc,
@@ -760,9 +800,7 @@ async function createSale(req, res) {
 
       if (!sb) {
         throw Object.assign(
-          new Error(
-            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
-          ),
+          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`),
           { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
         );
       }
@@ -806,6 +844,13 @@ async function createSale(req, res) {
       );
     }
 
+    // ======================================================
+    // ✅ PAGOS (FIX): guardar method real + installments en columna
+    // Reglas:
+    // - CASH/TRANSFER/QR/MERCADOPAGO => contado => installments=1
+    // - CARD => cuotas SOLO si CRÉDITO (si es débito => 1)
+    // - Crédito San Juan => OTHER + reference='SJCREDIT' + installments 1..12
+    // ======================================================
     let totalPaid = 0;
 
     for (const pay of payments) {
@@ -819,20 +864,40 @@ async function createSale(req, res) {
         });
       }
 
-      if (!["CASH", "TRANSFER", "CARD", "QR", "OTHER"].includes(dbMethod)) {
+      // ✅ enum real permitido (incluye MERCADOPAGO)
+      if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "OTHER"].includes(dbMethod)) {
         throw Object.assign(new Error(`Pago inválido: method=${dbMethod}`), {
           httpStatus: 400,
           code: "INVALID_PAYMENT_METHOD",
         });
       }
 
-      // ✅ cuotas: registrar 1..12 (solo metadata; el monto lo decide el front)
-      const installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
-      const priceBasis = String(pay.price_basis || pay.priceBasis || "").trim().toUpperCase() || null;
+      // 🔒 Detectar débito (contado)
+      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "").trim().toUpperCase();
+      const isDebit =
+        providerCode === "debit" ||
+        cardKind === "DEBIT" ||
+        cardKind === "DEBITO" ||
+        cardKind === "DÉBITO" ||
+        pay.is_debit === true ||
+        pay.isDebit === true;
 
-      // Para CARD con installments>1, forzamos basis LIST (lo que querés)
+      // ✅ installments según regla
+      let installments = 1;
+
+      if (providerCode === "credit_sjt") {
+        installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
+      } else if (dbMethod === "CARD") {
+        if (!isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
+        else installments = 1;
+      } else {
+        installments = 1;
+      }
+
+      // ✅ metadata opcional
+      const priceBasis = String(pay.price_basis || pay.priceBasis || "").trim().toUpperCase() || null;
       const effectiveBasis =
-        (dbMethod === "CARD" && installments > 1) || providerCode === "credit_sjt"
+        (dbMethod === "CARD" && installments > 1 && !isDebit) || providerCode === "credit_sjt"
           ? "LIST"
           : (priceBasis || null);
 
@@ -843,28 +908,31 @@ async function createSale(req, res) {
       const meta =
         installments > 1 || providerCode
           ? {
-              provider_code: providerCode || null, // "credit_sjt" / "mercadopago" / etc
+              provider_code: providerCode || null,
               installments,
-              price_basis: effectiveBasis, // "LIST" cuando corresponde
+              price_basis: effectiveBasis,
               list_total: listTotal,
               per_installment_list: perInstallmentList,
+              card_kind: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : null,
             }
           : null;
 
       totalPaid += amount;
 
-      const ref = pay.reference || null;
+      // ✅ reference: defaults útiles
+      let ref = pay.reference || null;
+      if (!ref && providerCode === "credit_sjt") ref = "SJCREDIT";
+      if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
 
       let notePay = pay.note || null;
-      if (meta) {
-        notePay = mergePaymentNote(notePay, meta);
-      }
+      if (meta) notePay = mergePaymentNote(notePay, meta);
 
       await Payment.create(
         {
           sale_id: sale.id,
           method: dbMethod,
           amount,
+          installments, // ✅ NUEVO CAMPO
           reference: ref,
           note: notePay,
           paid_at: new Date(),
@@ -897,7 +965,6 @@ async function createSale(req, res) {
         user_id: sale.user_id,
         warehouse_id: resolvedWarehouseId,
 
-        // ✅ DEVOLVEMOS CLIENTE (para front)
         customer_name: sale.customer_name,
         customer_phone: sale.customer_phone,
         customer_doc: sale.customer_doc,
@@ -922,56 +989,9 @@ async function createSale(req, res) {
 }
 
 /* ======================================================================
-   ✅ NUEVO: DEVOLUCIONES + CAMBIOS (sin tocar lo existente)
+   ✅ DEVOLUCIONES + CAMBIOS
    ====================================================================== */
 
-/**
- * Mapea métodos del frontend a enum real en DB:
- * payments.method enum: CASH, TRANSFER, CARD, QR, OTHER
- *
- * ✅ Nota:
- * - "credit_sjt" (Crédito San Juan) NO existe en enum => va como OTHER + provider_code=credit_sjt
- */
-function mapPayMethodDetailed(raw) {
-  const rawStr = String(raw || "").trim();
-  const m = rawStr.toUpperCase();
-
-  // ✅ Crédito San Juan (ecom_payment_methods.code = credit_sjt)
-  if (rawStr === "credit_sjt" || m === "CREDIT_SJT" || m === "CREDITO_SJT" || m === "CREDITO SAN JUAN" || m === "CRÉDITO SAN JUAN") {
-    return { dbMethod: "OTHER", providerCode: "credit_sjt" };
-  }
-
-  // ✅ MercadoPago / MP => QR (porque tu enum DB no tiene "MERCADOPAGO")
-  if (m === "MERCADOPAGO" || m === "MERCADO_PAGO" || m === "MERCADO PAGO" || m === "MP") {
-    return { dbMethod: "QR", providerCode: "mercadopago" };
-  }
-
-  // ✅ alias comunes
-  if (m === "EFECTIVO") return { dbMethod: "CASH", providerCode: "cash" };
-  if (m === "TRANSFERENCIA") return { dbMethod: "TRANSFER", providerCode: "transfer" };
-  if (m === "TARJETA" || m === "DEBITO" || m === "DÉBITO" || m === "CREDITO" || m === "CRÉDITO") {
-    return { dbMethod: "CARD", providerCode: "card" };
-  }
-
-  // ✅ enums ya válidos
-  if (m === "CASH") return { dbMethod: "CASH", providerCode: "cash" };
-  if (m === "TRANSFER") return { dbMethod: "TRANSFER", providerCode: "transfer" };
-  if (m === "CARD") return { dbMethod: "CARD", providerCode: "card" };
-  if (m === "QR") return { dbMethod: "QR", providerCode: "qr" };
-  if (m === "OTHER") return { dbMethod: "OTHER", providerCode: "other" };
-
-  return { dbMethod: "OTHER", providerCode: rawStr ? rawStr : "other" };
-}
-
-// Back-compat por si alguien llama mapPayMethod()
-function mapPayMethod(raw) {
-  return mapPayMethodDetailed(raw).dbMethod;
-}
-
-/**
- * Verifica que existan las tablas de devoluciones/cambios.
- * (Si no existen, devolvemos error claro sin romper nada.)
- */
 async function assertReturnsTablesExist() {
   const [[r1]] = await sequelize.query(`SHOW TABLES LIKE 'sale_returns'`);
   const [[r2]] = await sequelize.query(`SHOW TABLES LIKE 'sale_return_items'`);
@@ -996,9 +1016,6 @@ async function assertExchangesTableExist() {
   }
 }
 
-/**
- * Calcula total devuelto según items (qty * unit_price)
- */
 function calcReturnTotal(items) {
   let total = 0;
   for (const it of items || []) {
@@ -1034,16 +1051,11 @@ async function createSaleReturn(req, res) {
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
-    if (!saleId)
-      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
+    if (!saleId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
     if (!items.length)
-      return res
-        .status(400)
-        .json({ ok: false, code: "BAD_REQUEST", message: "items requerido (array no vacío)" });
+      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "items requerido (array no vacío)" });
     if (!payments.length)
-      return res
-        .status(400)
-        .json({ ok: false, code: "BAD_REQUEST", message: "payments requerido (array no vacío)" });
+      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "payments requerido (array no vacío)" });
 
     t = await sequelize.transaction();
 
@@ -1061,15 +1073,11 @@ async function createSaleReturn(req, res) {
     if (!admin) {
       if (!userBranchId) {
         await t.rollback();
-        return res
-          .status(400)
-          .json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
+        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
       }
       if (toInt(sale.branch_id, 0) !== userBranchId) {
         await t.rollback();
-        return res
-          .status(403)
-          .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
+        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
       }
     }
 
@@ -1119,7 +1127,6 @@ async function createSaleReturn(req, res) {
       throw e;
     }
 
-    // 1) registrar sale_returns
     const [insRet] = await sequelize.query(
       `
       INSERT INTO sale_returns
@@ -1148,7 +1155,6 @@ async function createSaleReturn(req, res) {
       throw e;
     }
 
-    // 2) items + stock (si restock)
     for (const it of normalizedItems) {
       await sequelize.query(
         `
@@ -1171,7 +1177,6 @@ async function createSaleReturn(req, res) {
       );
 
       if (restock) {
-        // stock movement IN
         const mv = await StockMovement.create(
           {
             type: "in",
@@ -1184,7 +1189,6 @@ async function createSaleReturn(req, res) {
           { transaction: t }
         );
 
-        // costo: tomamos cost del producto (si existe)
         const p = await Product.findByPk(it.product_id, { transaction: t });
         await StockMovementItem.create(
           {
@@ -1196,7 +1200,6 @@ async function createSaleReturn(req, res) {
           { transaction: t }
         );
 
-        // stock_balance: sumamos qty (si no existe registro, lo creamos)
         const sb = await StockBalance.findOne({
           where: { warehouse_id: it.warehouse_id, product_id: it.product_id },
           transaction: t,
@@ -1206,15 +1209,11 @@ async function createSaleReturn(req, res) {
         if (sb) {
           await sb.update({ qty: literal(`qty + ${it.qty}`) }, { transaction: t });
         } else {
-          await StockBalance.create(
-            { warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty },
-            { transaction: t }
-          );
+          await StockBalance.create({ warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty }, { transaction: t });
         }
       }
     }
 
-    // 3) payments
     for (const p of payments) {
       const { dbMethod, providerCode } = mapPayMethodDetailed(p.method);
       const amount = toNum(p.amount);
@@ -1225,7 +1224,9 @@ async function createSaleReturn(req, res) {
         throw e;
       }
 
+      // devolución: normalmente contado, pero si querés preservar meta de cuotas lo guardamos
       const installments = clampInstallments(p.installments ?? p.cuotas ?? 1, 1);
+
       const meta =
         installments > 1 || providerCode
           ? {
@@ -1233,8 +1234,7 @@ async function createSaleReturn(req, res) {
               installments,
               price_basis: "LIST",
               list_total: toNum(p.total_list ?? p.totalList ?? p.list_total ?? 0, 0) || null,
-              per_installment_list:
-                toNum(p.per_installment_list ?? p.perInstallmentList ?? 0, 0) || null,
+              per_installment_list: toNum(p.per_installment_list ?? p.perInstallmentList ?? 0, 0) || null,
             }
           : null;
 
@@ -1260,7 +1260,6 @@ async function createSaleReturn(req, res) {
       );
     }
 
-    // 4) estado venta si fue total
     if (Math.abs(totalReturn - paidTotal) <= 0.01) {
       await sale.update({ status: "REFUNDED" }, { transaction: t });
     }
@@ -1303,17 +1302,14 @@ async function createSaleExchange(req, res) {
     }
 
     const admin = isAdminReq(req);
-    if (admin) {
-      logPos(req, "info", "createSaleExchange admin allowed");
-    }
+    if (admin) logPos(req, "info", "createSaleExchange admin allowed");
 
     const userId = toInt(req.user.id, 0);
     const userBranchId = toInt(req.user.branch_id, 0);
 
     const body = req.body || {};
     const saleId = toInt(body.sale_id || body.id || req.params?.id, 0);
-    if (!saleId)
-      return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
+    if (!saleId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
 
     const returnPayload = body.return || body.returnData || {};
     const newSalePayload = body.new_sale || body.newSale || body.newSaleData || {};
@@ -1342,27 +1338,18 @@ async function createSaleExchange(req, res) {
       return res.status(404).json({ ok: false, code: "SALE_NOT_FOUND", message: "Venta no encontrada" });
     }
 
-    // ✅ Scope sucursal
     if (!admin) {
       if (!userBranchId) {
         await t.rollback();
-        return res.status(400).json({
-          ok: false,
-          code: "BRANCH_REQUIRED",
-          message: "El usuario no tiene sucursal asignada",
-        });
+        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
       }
       if (toInt(sale.branch_id, 0) !== userBranchId) {
         await t.rollback();
-        return res.status(403).json({
-          ok: false,
-          code: "CROSS_BRANCH_SALE",
-          message: "No podés operar una venta de otra sucursal",
-        });
+        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
       }
     }
 
-    // 1) Devolución dentro de la MISMA tx
+    // 1) Devolución en la MISMA tx
     const restock = parseBool(returnPayload.restock, true);
     const reason = returnPayload.reason ? String(returnPayload.reason).slice(0, 255) : null;
     const note = returnPayload.note ? String(returnPayload.note).slice(0, 255) : null;
@@ -1495,10 +1482,7 @@ async function createSaleExchange(req, res) {
         if (sb) {
           await sb.update({ qty: literal(`qty + ${it.qty}`) }, { transaction: t });
         } else {
-          await StockBalance.create(
-            { warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty },
-            { transaction: t }
-          );
+          await StockBalance.create({ warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty }, { transaction: t });
         }
       }
     }
@@ -1555,10 +1539,8 @@ async function createSaleExchange(req, res) {
     const items2 = Array.isArray(newSalePayload.items) ? newSalePayload.items : [];
     const pays2 = Array.isArray(newSalePayload.payments) ? newSalePayload.payments : [];
 
-    const extra2 =
-      newSalePayload.extra && typeof newSalePayload.extra === "object" ? newSalePayload.extra : {};
-    const c2 =
-      extra2.customer && typeof extra2.customer === "object" ? extra2.customer : (newSalePayload.customer || {});
+    const extra2 = newSalePayload.extra && typeof newSalePayload.extra === "object" ? newSalePayload.extra : {};
+    const c2 = extra2.customer && typeof extra2.customer === "object" ? extra2.customer : (newSalePayload.customer || {});
 
     const first2 = String(c2.first_name || "").trim();
     const last2 = String(c2.last_name || "").trim();
@@ -1612,7 +1594,6 @@ async function createSaleExchange(req, res) {
       }
     }
 
-    // warehouse para la nueva venta: mismo criterio que createSale (ctx o default)
     const { warehouseId: ctxWh2 } = resolvePosContext(req);
     let resolvedWarehouseId2 = toInt(ctxWh2, 0);
     if (!resolvedWarehouseId2) resolvedWarehouseId2 = await resolveWarehouseForBranch(userBranchId);
@@ -1736,19 +1717,38 @@ async function createSaleExchange(req, res) {
         throw e;
       }
 
-      totalPaid2 += amount;
+      // cuotas solo para crédito; MP/transfer contado
+      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "").trim().toUpperCase();
+      const isDebit =
+        providerCode === "debit" ||
+        cardKind === "DEBIT" ||
+        cardKind === "DEBITO" ||
+        cardKind === "DÉBITO" ||
+        pay.is_debit === true ||
+        pay.isDebit === true;
 
-      const installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
+      let installments = 1;
+      if (providerCode === "credit_sjt") installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
+      else if (dbMethod === "CARD" && !isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
+      else installments = 1;
+
       const meta =
         installments > 1 || providerCode
           ? {
               provider_code: providerCode || null,
               installments,
-              price_basis: (dbMethod === "CARD" && installments > 1) || providerCode === "credit_sjt" ? "LIST" : null,
+              price_basis: (dbMethod === "CARD" && installments > 1 && !isDebit) || providerCode === "credit_sjt" ? "LIST" : null,
               list_total: toNum(pay.total_list ?? pay.totalList ?? 0, 0) || null,
               per_installment_list: toNum(pay.per_installment_list ?? pay.perInstallmentList ?? 0, 0) || null,
+              card_kind: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : null,
             }
           : null;
+
+      totalPaid2 += amount;
+
+      let ref = pay.reference || null;
+      if (!ref && providerCode === "credit_sjt") ref = "SJCREDIT";
+      if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
 
       const notePay = meta ? mergePaymentNote(pay.note || null, meta) : (pay.note || null);
 
@@ -1757,7 +1757,8 @@ async function createSaleExchange(req, res) {
           sale_id: newSale.id,
           method: dbMethod,
           amount,
-          reference: pay.reference || null,
+          installments, // ✅ NUEVO CAMPO
+          reference: ref,
           note: notePay,
           paid_at: new Date(),
         },
@@ -1771,7 +1772,6 @@ async function createSaleExchange(req, res) {
     newSale.change_total = totalPaid2 - subtotal2;
     await newSale.save({ transaction: t });
 
-    // 3) Registrar exchange en tabla sale_exchanges
     const diff = Number(newSale.total || 0) - Number(totalReturn || 0);
 
     await sequelize.query(
@@ -1824,8 +1824,6 @@ module.exports = {
   getContext,
   listProductsForPos,
   createSale,
-
-  // ✅ NUEVO (sin tocar lo existente)
   createSaleReturn,
   createSaleExchange,
 };
