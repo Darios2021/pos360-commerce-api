@@ -688,6 +688,14 @@ async function getBranchesMatrix(req, res, next) {
 // =====================
 // GET /api/v1/products
 // =====================
+// =====================
+// GET /api/v1/products
+// ✅ LIST REAL + FIX AND VACÍO (evita 0 resultados fantasma)
+// =====================
+// =====================
+// GET /api/v1/products
+// ✅ LIST REAL + FIX AND VACÍO (evita 0 resultados fantasma)
+// =====================
 async function list(req, res, next) {
   try {
     const admin = isAdminReq(req);
@@ -707,17 +715,16 @@ async function list(req, res, next) {
       });
     }
 
-    // Scope sucursal (habilitados)
+    // Scope sucursal
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
     const branchIdScope = admin ? (branchIdQuery || 0) : ctxBranchId;
 
     // Dueña (solo admin)
     const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
 
-    // Para stock_qty (si no viene branch => total global)
+    // Para stock_qty
     const stockBranchId = admin ? (branchIdScope || 0) : branchIdScope;
 
-    // Filtros
     const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || 0;
     const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || 0;
 
@@ -730,6 +737,7 @@ async function list(req, res, next) {
 
     const where = {};
 
+    // Por defecto: activos
     if (!includeInactive && !hasExplicitIsActive) {
       where.is_active = 1;
     } else if (hasExplicitIsActive) {
@@ -756,13 +764,14 @@ async function list(req, res, next) {
     if (categoryId) where.category_id = categoryId;
     if (subcategoryId) where.subcategory_id = subcategoryId;
 
-    where[Op.and] = where[Op.and] || [];
+    // AND literals (solo si hay algo)
+    const andLits = [];
 
     // Scope habilitación por sucursal (product_branches)
     if (!admin) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+      andLits.push(enabledInBranchLiteral(branchIdScope));
     } else if (branchIdScope) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
+      andLits.push(enabledInBranchLiteral(branchIdScope));
     }
 
     // Stock filters
@@ -774,11 +783,11 @@ async function list(req, res, next) {
     const wantWithoutStock = stockMode === "without";
 
     if (wantWithStock) {
-      if (!admin || branchIdScope) where[Op.and].push(existsStockInBranch(branchIdScope));
-      else where[Op.and].push(Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
+      if (!admin || branchIdScope) andLits.push(existsStockInBranch(branchIdScope));
+      else andLits.push(Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
     } else if (wantWithoutStock) {
       if (!admin || branchIdScope) {
-        where[Op.and].push(
+        andLits.push(
           Sequelize.literal(`NOT EXISTS (
             SELECT 1
             FROM stock_balances sb
@@ -789,12 +798,13 @@ async function list(req, res, next) {
           )`)
         );
       } else {
-        where[Op.and].push(Sequelize.literal(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
+        andLits.push(Sequelize.literal(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
       }
     }
 
+    // Sellable => algún precio > 0
     if (sellable) {
-      where[Op.and].push(
+      andLits.push(
         Sequelize.literal(`(
           GREATEST(
             COALESCE(Product.price,0),
@@ -806,23 +816,24 @@ async function list(req, res, next) {
       );
     }
 
+    // Precio lista filtros
     const priceMin = toFloat(req.query.price_min ?? req.query.priceMin, NaN);
     const priceMax = toFloat(req.query.price_max ?? req.query.priceMax, NaN);
 
     const pricePresence = String(req.query.price_presence || req.query.pricePresence || "").toLowerCase().trim();
-    if (pricePresence === "with") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) > 0`));
-    if (pricePresence === "without") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= 0`));
+    if (pricePresence === "with") andLits.push(Sequelize.literal(`COALESCE(Product.price_list,0) > 0`));
+    if (pricePresence === "without") andLits.push(Sequelize.literal(`COALESCE(Product.price_list,0) <= 0`));
 
-    if (Number.isFinite(priceMin)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) >= ${priceMin}`));
-    if (Number.isFinite(priceMax)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= ${priceMax}`));
+    if (Number.isFinite(priceMin)) andLits.push(Sequelize.literal(`COALESCE(Product.price_list,0) >= ${priceMin}`));
+    if (Number.isFinite(priceMax)) andLits.push(Sequelize.literal(`COALESCE(Product.price_list,0) <= ${priceMax}`));
 
-    // Imágenes
+    // Imágenes (EXISTS)
     const imagesMode = String(req.query.images || req.query.imagesFilter || "").toLowerCase().trim();
     const hasImages = imagesMode === "with" || String(req.query.has_images || "").toLowerCase() === "true";
     const noImages = imagesMode === "without" || String(req.query.no_images || "").toLowerCase() === "true";
 
     if (hasImages) {
-      where[Op.and].push(
+      andLits.push(
         Sequelize.literal(`EXISTS (
           SELECT 1 FROM product_images pi
           WHERE pi.product_id = Product.id
@@ -830,7 +841,7 @@ async function list(req, res, next) {
         )`)
       );
     } else if (noImages) {
-      where[Op.and].push(
+      andLits.push(
         Sequelize.literal(`NOT EXISTS (
           SELECT 1 FROM product_images pi
           WHERE pi.product_id = Product.id
@@ -838,6 +849,9 @@ async function list(req, res, next) {
         )`)
       );
     }
+
+    // ✅ solo asignar Op.and si hay condiciones
+    if (andLits.length) where[Op.and] = andLits;
 
     const include = buildProductIncludes({ includeBranch: admin });
 
@@ -873,6 +887,7 @@ async function list(req, res, next) {
       offset,
       include,
       distinct: true,
+      subQuery: false, // ✅ ayuda bastante cuando hay includes
       attributes: { include: attrsInclude },
     });
 
