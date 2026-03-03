@@ -737,11 +737,21 @@ async function list(req, res, next) {
     // ✅ Scope habilitación por sucursal:
     // - no admin => SIEMPRE
     // - admin => SOLO si vino branch_id explícito
-    if (!admin) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdScope));
-    } else if (branchIdQuery > 0) {
-      where[Op.and].push(enabledInBranchLiteral(branchIdQuery));
-    }
+// 🔥 FIX DEFINITIVO: usar JOIN en vez de EXISTS
+if (!admin || branchIdQuery > 0) {
+  const bid = !admin ? branchIdScope : branchIdQuery;
+
+  include.push({
+    model: sequelize.models.ProductBranch || sequelize.model("product_branches"),
+    as: "productBranches",
+    required: true,
+    where: {
+      branch_id: bid,
+      is_active: 1,
+    },
+    attributes: [],
+  });
+}
 
     // Stock filters
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
