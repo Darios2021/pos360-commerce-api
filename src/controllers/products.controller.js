@@ -1,12 +1,15 @@
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/products.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (ALINEADO A DB REAL: products.subcategory_id -> subcategories.id)
-// Mantiene: SKU auto + FIX CODE + SCOPE + Matriz sucursales STOCK UI + Delete PRO + Next Code
+// ✅ FIX LIST DEFINITIVO (sin bug Sequelize findAndCountAll + includes + EXISTS)
 //
-// ✅ FIX HOY (por tu curl debug):
-// - Admin: NO aplica scope por sucursal salvo que venga branch_id explícito
-// - Debug=1 agrega métricas reales de product_branches para detectar "no matchea nada"
-// - Fix NOT EXISTS stock
-// - Mantiene filters y meta real
+// Mantiene:
+// - SKU auto + FIX CODE + SCOPE
+// - Matriz sucursales STOCK UI + Delete PRO + Next Code
+// - sanitizeCategoryFKs + ensureSubcategoryFK
+//
+// Cambio CLAVE:
+// - list(): 2 pasos (SQL IDs paginados + hydrate con Product.findAll)
+//   => evita 0 resultados con totalNoScope>0 cuando hay scope por product_branches
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
@@ -161,7 +164,7 @@ function buildProductIncludes({ includeBranch = false } = {}) {
     inc.push(catInclude);
   }
 
-  // ✅ subcategory include (DEBE ser Subcategory)
+  // subcategory include
   const subAs = A.subcategory ? "subcategory" : A.Subcategory ? "Subcategory" : null;
   if (subAs) {
     const subInclude = { association: subAs, required: false };
@@ -228,7 +231,13 @@ async function sanitizeCategoryFKs(payload) {
   return payload;
 }
 
-// ✅ FIX DEFINITIVO (schema real + evita "se crea con cualquiera"):
+/**
+ * products.subcategory_id -> FK a subcategories.id
+ * Regla (anti colisión IDs):
+ * 1) PRIORIDAD: si incoming existe como Category HIJA (parent_id) => convertir a Subcategory real
+ * 2) Si NO es Category HIJA, permitir que sea Subcategory.id real
+ * 3) Si no cierra => null
+ */
 async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
   if (!payload) return payload;
   if (!Object.prototype.hasOwnProperty.call(payload, "subcategory_id")) return payload;
@@ -244,7 +253,7 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
 
   const catIncoming = toInt(payload.category_id, 0) || 0;
 
-  // 1) ✅ PRIORIDAD: interpretarlo como categories.id HIJA (legacy UI)
+  // 1) interpretarlo como categories.id HIJA (legacy UI)
   const catChild = await Category.findByPk(incoming, {
     attributes: ["id", "name", "parent_id"],
     transaction,
@@ -270,7 +279,7 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
     return payload;
   }
 
-  // 2) ✅ Si NO es category-hija, permitir que sea subcategories.id real
+  // 2) permitir que sea subcategories.id real
   const subByPk = await Subcategory.findByPk(incoming, {
     attributes: ["id", "category_id"],
     transaction,
@@ -426,7 +435,6 @@ function pickBody(body = {}) {
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
 
-  // 🚫 NO aceptamos code del cliente
   if (Object.prototype.hasOwnProperty.call(out, "code")) delete out.code;
 
   return out;
@@ -494,17 +502,6 @@ async function upsertProductBranches({ productId, branchIds, transaction = null 
   );
 }
 
-function enabledInBranchLiteral(branchId) {
-  const bid = toInt(branchId, 0);
-  return Sequelize.literal(`EXISTS (
-    SELECT 1
-    FROM product_branches pb
-    WHERE pb.product_id = Product.id
-      AND pb.branch_id = ${bid}
-      AND pb.is_active = 1
-  )`);
-}
-
 function stockQtyLiteralByBranch(branchId = 0) {
   const bid = toInt(branchId, 0);
 
@@ -522,18 +519,6 @@ function stockQtyLiteralByBranch(branchId = 0) {
     SELECT COALESCE(SUM(sb.qty), 0)
     FROM stock_balances sb
     WHERE sb.product_id = Product.id
-  )`);
-}
-
-function existsStockInBranch(branchId) {
-  const bid = toInt(branchId, 0);
-  return Sequelize.literal(`EXISTS (
-    SELECT 1
-    FROM stock_balances sb
-    JOIN warehouses w ON w.id = sb.warehouse_id
-    WHERE sb.product_id = Product.id
-      AND w.branch_id = ${bid}
-      AND sb.qty > 0
   )`);
 }
 
@@ -654,7 +639,7 @@ async function getBranchesMatrix(req, res, next) {
 
 // =====================
 // GET /api/v1/products
-// ✅ LIST REAL + DEBUG REAL
+// ✅ LIST 2-PASS (IDs + HYDRATE) => FIX definitivo
 // =====================
 async function list(req, res, next) {
   try {
@@ -675,25 +660,16 @@ async function list(req, res, next) {
       });
     }
 
-    // 🔥 branch_id SOLO si vino explícito (para admin)
+    // admin puede pasar branch_id (scope)
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
-
-    // scope real:
-    // - no admin => SIEMPRE ctxBranchId
-    // - admin => SOLO si vino branch_id explícito
     const branchIdScope = admin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
 
-    // Dueña (solo admin)
+    // owner branch (solo admin)
     const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
 
-    // Para stock_qty:
-    // - no admin => ctxBranchId
-    // - admin => si filtró por branch => stock por esa branch, si no => stock global (0)
+    // stock qty
     const stockBranchId = admin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
 
-    // -------------------------
-    // Filtros reales (SQL)
-    // -------------------------
     const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || 0;
     const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || 0;
 
@@ -704,138 +680,240 @@ async function list(req, res, next) {
     const isActiveFilterRaw = req.query.is_active;
     const hasExplicitIsActive = Object.prototype.hasOwnProperty.call(req.query || {}, "is_active");
 
-    const where = {};
-
-    if (!includeInactive && !hasExplicitIsActive) {
-      where.is_active = 1;
-    } else if (hasExplicitIsActive) {
-      const v = String(isActiveFilterRaw ?? "").toLowerCase().trim();
-      if (v === "1" || v === "true") where.is_active = 1;
-      else if (v === "0" || v === "false") where.is_active = 0;
-    }
-
-    if (q) {
-      const qNum = toFloat(q, NaN);
-      where[Op.or] = [
-        { name: { [Op.like]: `%${q}%` } },
-        { sku: { [Op.like]: `%${q}%` } },
-        { barcode: { [Op.like]: `%${q}%` } },
-        { code: { [Op.like]: `%${q}%` } },
-        { brand: { [Op.like]: `%${q}%` } },
-        { model: { [Op.like]: `%${q}%` } },
-      ];
-      if (Number.isFinite(qNum)) where[Op.or].push({ id: toInt(qNum, 0) });
-    }
-
-    if (admin && ownerBranchId) where.branch_id = ownerBranchId;
-    if (categoryId) where.category_id = categoryId;
-    if (subcategoryId) where.subcategory_id = subcategoryId;
-
-    // AND literals
-    where[Op.and] = where[Op.and] || [];
-
-    // ✅ Scope habilitación por sucursal:
-    // - no admin => SIEMPRE
-    // - admin => SOLO si vino branch_id explícito
-// 🔥 FIX DEFINITIVO: usar JOIN en vez de EXISTS
-if (!admin || branchIdQuery > 0) {
-  const bid = !admin ? branchIdScope : branchIdQuery;
-
-  include.push({
-    model: sequelize.models.ProductBranch || sequelize.model("product_branches"),
-    as: "productBranches",
-    required: true,
-    where: {
-      branch_id: bid,
-      is_active: 1,
-    },
-    attributes: [],
-  });
-}
-
-    // Stock filters
+    // filtros tipo stock/images/price
     const inStock = toInt(req.query.in_stock, 0) === 1 || String(req.query.in_stock || "").toLowerCase() === "true";
     const sellable = toInt(req.query.sellable, 0) === 1 || String(req.query.sellable || "").toLowerCase() === "true";
-
     const stockMode = String(req.query.stock || req.query.stockFilter || "").toLowerCase().trim();
     const wantWithStock = stockMode === "with" || inStock || sellable;
     const wantWithoutStock = stockMode === "without";
 
-    if (wantWithStock) {
-      if (!admin || (branchIdQuery > 0)) where[Op.and].push(existsStockInBranch(branchIdScope || branchIdQuery));
-      else where[Op.and].push(Sequelize.literal(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
-    } else if (wantWithoutStock) {
-      if (!admin || (branchIdQuery > 0)) {
-        const bid = branchIdScope || branchIdQuery;
-        where[Op.and].push(Sequelize.literal(`NOT EXISTS (
-          SELECT 1
-          FROM stock_balances sb
-          JOIN warehouses w ON w.id = sb.warehouse_id
-          WHERE sb.product_id = Product.id
-            AND w.branch_id = ${toInt(bid, 0)}
-            AND sb.qty > 0
-        )`));
-      } else {
-        where[Op.and].push(Sequelize.literal(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = Product.id AND sb.qty > 0)`));
-      }
-    }
-
-    // Sellable => algún precio > 0
-    if (sellable) {
-      where[Op.and].push(
-        Sequelize.literal(`(
-          GREATEST(
-            COALESCE(Product.price,0),
-            COALESCE(Product.price_list,0),
-            COALESCE(Product.price_discount,0),
-            COALESCE(Product.price_reseller,0)
-          ) > 0
-        )`)
-      );
-    }
-
-    // Precio lista filtros
     const priceMin = toFloat(req.query.price_min ?? req.query.priceMin, NaN);
     const priceMax = toFloat(req.query.price_max ?? req.query.priceMax, NaN);
-
     const pricePresence = String(req.query.price_presence || req.query.pricePresence || "").toLowerCase().trim();
-    if (pricePresence === "with") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) > 0`));
-    if (pricePresence === "without") where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= 0`));
 
-    if (Number.isFinite(priceMin)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) >= ${priceMin}`));
-    if (Number.isFinite(priceMax)) where[Op.and].push(Sequelize.literal(`COALESCE(Product.price_list,0) <= ${priceMax}`));
-
-    // Imágenes (EXISTS)
     const imagesMode = String(req.query.images || req.query.imagesFilter || "").toLowerCase().trim();
     const hasImages = imagesMode === "with" || String(req.query.has_images || "").toLowerCase() === "true";
     const noImages = imagesMode === "without" || String(req.query.no_images || "").toLowerCase() === "true";
 
-    if (hasImages) {
-      where[Op.and].push(
-        Sequelize.literal(`EXISTS (
-          SELECT 1 FROM product_images pi
-          WHERE pi.product_id = Product.id
-          LIMIT 1
-        )`)
+    // -------------------------
+    // 1) ARMAR SQL base (solo IDs)
+    // -------------------------
+    const whereSql = [];
+    const repl = {};
+
+    // is_active default
+    if (!includeInactive && !hasExplicitIsActive) {
+      whereSql.push("p.is_active = 1");
+    } else if (hasExplicitIsActive) {
+      const v = String(isActiveFilterRaw ?? "").toLowerCase().trim();
+      if (v === "1" || v === "true") whereSql.push("p.is_active = 1");
+      else if (v === "0" || v === "false") whereSql.push("p.is_active = 0");
+    }
+
+    if (q) {
+      repl.q = `%${q}%`;
+      const qNum = toFloat(q, NaN);
+      whereSql.push(
+        `(p.name LIKE :q OR p.sku LIKE :q OR p.barcode LIKE :q OR p.code LIKE :q OR p.brand LIKE :q OR p.model LIKE :q${
+          Number.isFinite(qNum) ? " OR p.id = :qid" : ""
+        })`
       );
-    } else if (noImages) {
-      where[Op.and].push(
-        Sequelize.literal(`NOT EXISTS (
-          SELECT 1 FROM product_images pi
-          WHERE pi.product_id = Product.id
-          LIMIT 1
-        )`)
-      );
+      if (Number.isFinite(qNum)) repl.qid = toInt(qNum, 0);
+    }
+
+    if (admin && ownerBranchId > 0) {
+      repl.ownerBranchId = ownerBranchId;
+      whereSql.push("p.branch_id = :ownerBranchId");
+    }
+
+    if (categoryId > 0) {
+      repl.categoryId = categoryId;
+      whereSql.push("p.category_id = :categoryId");
+    }
+    if (subcategoryId > 0) {
+      repl.subcategoryId = subcategoryId;
+      whereSql.push("p.subcategory_id = :subcategoryId");
+    }
+
+    // ✅ SCOPE por product_branches:
+    // - no admin => SIEMPRE branchIdScope
+    // - admin => SOLO si vino branch_id explícito (branchIdQuery>0)
+    let joinPb = "";
+    if (!admin || branchIdQuery > 0) {
+      const bid = toInt(branchIdScope, 0);
+      repl.scopeBranchId = bid;
+      joinPb = `JOIN product_branches pb ON pb.product_id = p.id AND pb.branch_id = :scopeBranchId AND pb.is_active = 1`;
+    }
+
+    // Stock filters
+    if (wantWithStock) {
+      if (!admin || branchIdQuery > 0) {
+        repl.stockBranchId = toInt(branchIdScope, 0);
+        whereSql.push(`EXISTS (
+          SELECT 1
+          FROM stock_balances sb
+          JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE sb.product_id = p.id
+            AND w.branch_id = :stockBranchId
+            AND sb.qty > 0
+        )`);
+      } else {
+        whereSql.push(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = p.id AND sb.qty > 0)`);
+      }
+    } else if (wantWithoutStock) {
+      if (!admin || branchIdQuery > 0) {
+        repl.stockBranchId = toInt(branchIdScope, 0);
+        whereSql.push(`NOT EXISTS (
+          SELECT 1
+          FROM stock_balances sb
+          JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE sb.product_id = p.id
+            AND w.branch_id = :stockBranchId
+            AND sb.qty > 0
+        )`);
+      } else {
+        whereSql.push(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = p.id AND sb.qty > 0)`);
+      }
+    }
+
+    // Sellable
+    if (sellable) {
+      whereSql.push(`(
+        GREATEST(
+          COALESCE(p.price,0),
+          COALESCE(p.price_list,0),
+          COALESCE(p.price_discount,0),
+          COALESCE(p.price_reseller,0)
+        ) > 0
+      )`);
+    }
+
+    // price presence + min/max
+    if (pricePresence === "with") whereSql.push(`COALESCE(p.price_list,0) > 0`);
+    if (pricePresence === "without") whereSql.push(`COALESCE(p.price_list,0) <= 0`);
+    if (Number.isFinite(priceMin)) {
+      repl.priceMin = priceMin;
+      whereSql.push(`COALESCE(p.price_list,0) >= :priceMin`);
+    }
+    if (Number.isFinite(priceMax)) {
+      repl.priceMax = priceMax;
+      whereSql.push(`COALESCE(p.price_list,0) <= :priceMax`);
+    }
+
+    // images exists
+    if (hasImages) whereSql.push(`EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id LIMIT 1)`);
+    if (noImages) whereSql.push(`NOT EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id LIMIT 1)`);
+
+    const whereClause = whereSql.length ? `WHERE ${whereSql.join(" AND ")}` : "";
+
+    // COUNT total
+    const [[countRow]] = await sequelize.query(
+      `
+      SELECT COUNT(*) AS total
+      FROM products p
+      ${joinPb}
+      ${whereClause}
+      `,
+      { replacements: repl }
+    );
+
+    const total = toInt(countRow?.total, 0);
+    const pages = Math.max(1, Math.ceil(total / limit));
+
+    // IDs paginados
+    repl.limit = limit;
+    repl.offset = offset;
+
+    const [idRows] = await sequelize.query(
+      `
+      SELECT p.id
+      FROM products p
+      ${joinPb}
+      ${whereClause}
+      ORDER BY p.id DESC
+      LIMIT :limit OFFSET :offset
+      `,
+      { replacements: repl }
+    );
+
+    const ids = (idRows || []).map((r) => toInt(r?.id, 0)).filter(Boolean);
+
+    if (!ids.length) {
+      const wantDebug = toInt(req.query.debug, 0) === 1 || String(req.query.debug || "").toLowerCase() === "true";
+      if (wantDebug) {
+        // debug extra como venías haciendo
+        const bid = toInt(branchIdScope || 0, 0);
+
+        const [[pbBranch]] = bid
+          ? await sequelize.query(
+              `
+              SELECT
+                COUNT(*) AS pbActiveForBranch,
+                COUNT(DISTINCT product_id) AS pbDistinctProductsForBranch
+              FROM product_branches
+              WHERE branch_id = :bid AND is_active = 1
+              `,
+              { replacements: { bid } }
+            )
+          : [[{ pbActiveForBranch: 0, pbDistinctProductsForBranch: 0 }]];
+
+        const [[pbJoin]] = bid
+          ? await sequelize.query(
+              `
+              SELECT COUNT(*) AS pbJoinActiveProductsForBranch
+              FROM product_branches pb
+              JOIN products p ON p.id = pb.product_id
+              WHERE pb.branch_id = :bid
+                AND pb.is_active = 1
+                AND p.is_active = 1
+              `,
+              { replacements: { bid } }
+            )
+          : [[{ pbJoinActiveProductsForBranch: 0 }]];
+
+        const [sampleRows] = bid
+          ? await sequelize.query(
+              `
+              SELECT pb.product_id
+              FROM product_branches pb
+              WHERE pb.branch_id = :bid AND pb.is_active = 1
+              ORDER BY pb.product_id DESC
+              LIMIT 10
+              `,
+              { replacements: { bid } }
+            )
+          : [[]];
+
+        return res.json({
+          ok: true,
+          data: [],
+          meta: { page, limit, total, pages },
+          debug: {
+            admin,
+            ctxBranchId,
+            branchIdQuery,
+            branchIdScope,
+            ownerBranchId,
+            stockBranchId,
+            includeInactive,
+            whereSql,
+            joinPb: !!joinPb,
+            pbActiveForBranch: toInt(pbBranch?.pbActiveForBranch, 0),
+            pbDistinctProductsForBranch: toInt(pbBranch?.pbDistinctProductsForBranch, 0),
+            pbJoinActiveProductsForBranch: toInt(pbJoin?.pbJoinActiveProductsForBranch, 0),
+            sampleProductIdsForBranch: (sampleRows || []).map((r) => toInt(r?.product_id, 0)).filter(Boolean),
+          },
+        });
+      }
+
+      return res.json({ ok: true, data: [], meta: { page, limit, total, pages } });
     }
 
     // -------------------------
-    // Includes
+    // 2) HYDRATE por Sequelize (includes + computed)
     // -------------------------
     const include = buildProductIncludes({ includeBranch: admin });
 
-    // -------------------------
-    // Attributes extra (stock + branches GC para chips)
-    // -------------------------
     const attrsInclude = [[stockQtyLiteralByBranch(stockBranchId), "stock_qty"]];
 
     if (admin) {
@@ -861,24 +939,12 @@ if (!admin || branchIdQuery > 0) {
       ]);
     }
 
-    // ✅ totalNoScope real (solo activos)
-    const [[totalNoScopeRow]] = await sequelize.query(
-      `
-      SELECT COUNT(*) AS total
-      FROM products
-      WHERE is_active = 1
-      `
-    );
-    const totalNoScope = toInt(totalNoScopeRow?.total, 0);
-
-    const { count, rows } = await Product.findAndCountAll({
-      where,
-      order: [["id", "DESC"]],
-      limit,
-      offset,
+    const rows = await Product.findAll({
+      where: { id: { [Op.in]: ids } },
       include,
-      distinct: true,
       attributes: { include: attrsInclude },
+      // mantener orden de ids (DESC)
+      order: [["id", "DESC"]],
     });
 
     const data = (rows || []).map((r) => {
@@ -887,74 +953,26 @@ if (!admin || branchIdQuery > 0) {
       return { ...x, created_by_user: creatorLabelFromUser(u) };
     });
 
-    const pages = Math.max(1, Math.ceil(count / limit));
-
-    // ✅ DEBUG REAL: ¿hay product_branches activos para esa branch? ¿matchean products activos?
     const wantDebug = toInt(req.query.debug, 0) === 1 || String(req.query.debug || "").toLowerCase() === "true";
-    let debug = null;
+    const debug = wantDebug
+      ? {
+          admin,
+          ctxBranchId,
+          branchIdQuery,
+          branchIdScope,
+          ownerBranchId,
+          stockBranchId,
+          includeInactive,
+          total,
+          pages,
+          idsCount: ids.length,
+          sampleIds: ids.slice(0, 10),
+          whereSql,
+          joinPb: !!joinPb,
+        }
+      : null;
 
-    if (wantDebug) {
-      const bid = toInt(branchIdScope || branchIdQuery || 0, 0);
-
-      const [[pbBranch]] = bid
-        ? await sequelize.query(
-            `
-            SELECT
-              COUNT(*) AS pbActiveForBranch,
-              COUNT(DISTINCT product_id) AS pbDistinctProductsForBranch
-            FROM product_branches
-            WHERE branch_id = :bid AND is_active = 1
-            `,
-            { replacements: { bid } }
-          )
-        : [[{ pbActiveForBranch: 0, pbDistinctProductsForBranch: 0 }]];
-
-      const [[pbJoin]] = bid
-        ? await sequelize.query(
-            `
-            SELECT COUNT(*) AS pbJoinActiveProductsForBranch
-            FROM product_branches pb
-            JOIN products p ON p.id = pb.product_id
-            WHERE pb.branch_id = :bid
-              AND pb.is_active = 1
-              AND p.is_active = 1
-            `,
-            { replacements: { bid } }
-          )
-        : [[{ pbJoinActiveProductsForBranch: 0 }]];
-
-      const [sampleRows] = bid
-        ? await sequelize.query(
-            `
-            SELECT pb.product_id
-            FROM product_branches pb
-            WHERE pb.branch_id = :bid AND pb.is_active = 1
-            ORDER BY pb.product_id DESC
-            LIMIT 10
-            `,
-            { replacements: { bid } }
-          )
-        : [[]];
-
-      debug = {
-        admin,
-        ctxBranchId,
-        branchIdQuery,
-        branchIdScope,
-        ownerBranchId,
-        stockBranchId,
-        includeInactive,
-        whereKeys: Object.keys(where || {}).filter((k) => k !== String(Op.and) && k !== String(Op.or)),
-        andCount: Array.isArray(where?.[Op.and]) ? where[Op.and].length : 0,
-        totalNoScope,
-        pbActiveForBranch: toInt(pbBranch?.pbActiveForBranch, 0),
-        pbDistinctProductsForBranch: toInt(pbBranch?.pbDistinctProductsForBranch, 0),
-        pbJoinActiveProductsForBranch: toInt(pbJoin?.pbJoinActiveProductsForBranch, 0),
-        sampleProductIdsForBranch: (sampleRows || []).map((r) => toInt(r?.product_id, 0)).filter(Boolean),
-      };
-    }
-
-    return res.json({ ok: true, data, meta: { page, limit, total: count, pages }, ...(debug ? { debug } : {}) });
+    return res.json({ ok: true, data, meta: { page, limit, total, pages }, ...(debug ? { debug } : {}) });
   } catch (e) {
     next(e);
   }
