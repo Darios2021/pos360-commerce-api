@@ -641,6 +641,9 @@ async function getBranchesMatrix(req, res, next) {
 // GET /api/v1/products
 // ✅ LIST 2-PASS (IDs + HYDRATE) => FIX definitivo
 // =====================
+// ✅ COPY-PASTE FINAL COMPLETO
+// REEMPLAZAR SOLO LA FUNCION list() EN src/controllers/products.controller.js
+
 async function list(req, res, next) {
   try {
     const admin = isAdminReq(req);
@@ -687,8 +690,28 @@ async function list(req, res, next) {
     const wantWithStock = stockMode === "with" || inStock || sellable;
     const wantWithoutStock = stockMode === "without";
 
-    const priceMin = toFloat(req.query.price_min ?? req.query.priceMin, NaN);
-    const priceMax = toFloat(req.query.price_max ?? req.query.priceMax, NaN);
+    // ✅ FIX: parse opcional (NO convertir "" => 0)
+    function hasQueryKey(key) {
+      return Object.prototype.hasOwnProperty.call(req.query || {}, key);
+    }
+    function parseOptionalFloat(raw) {
+      if (raw === undefined || raw === null) return null;
+      const s = String(raw).trim();
+      if (!s) return null;
+      if (s.toLowerCase() === "null" || s.toLowerCase() === "undefined") return null;
+      const n = Number(s.replace(",", "."));
+      return Number.isFinite(n) ? n : null;
+    }
+
+    // ✅ solo si vinieron realmente
+    const priceMin = hasQueryKey("price_min") || hasQueryKey("priceMin")
+      ? parseOptionalFloat(req.query.price_min ?? req.query.priceMin)
+      : null;
+
+    const priceMax = hasQueryKey("price_max") || hasQueryKey("priceMax")
+      ? parseOptionalFloat(req.query.price_max ?? req.query.priceMax)
+      : null;
+
     const pricePresence = String(req.query.price_presence || req.query.pricePresence || "").toLowerCase().trim();
 
     const imagesMode = String(req.query.images || req.query.imagesFilter || "").toLowerCase().trim();
@@ -696,7 +719,7 @@ async function list(req, res, next) {
     const noImages = imagesMode === "without" || String(req.query.no_images || "").toLowerCase() === "true";
 
     // -------------------------
-    // 1) ARMAR SQL base (solo IDs)
+    // 1) SQL base (solo IDs)
     // -------------------------
     const whereSql = [];
     const repl = {};
@@ -736,8 +759,6 @@ async function list(req, res, next) {
     }
 
     // ✅ SCOPE por product_branches:
-    // - no admin => SIEMPRE branchIdScope
-    // - admin => SOLO si vino branch_id explícito (branchIdQuery>0)
     let joinPb = "";
     if (!admin || branchIdQuery > 0) {
       const bid = toInt(branchIdScope, 0);
@@ -788,14 +809,15 @@ async function list(req, res, next) {
       )`);
     }
 
-    // price presence + min/max
+    // ✅ Precio lista filtros (FIXED)
     if (pricePresence === "with") whereSql.push(`COALESCE(p.price_list,0) > 0`);
     if (pricePresence === "without") whereSql.push(`COALESCE(p.price_list,0) <= 0`);
-    if (Number.isFinite(priceMin)) {
+
+    if (priceMin != null) {
       repl.priceMin = priceMin;
       whereSql.push(`COALESCE(p.price_list,0) >= :priceMin`);
     }
-    if (Number.isFinite(priceMax)) {
+    if (priceMax != null) {
       repl.priceMax = priceMax;
       whereSql.push(`COALESCE(p.price_list,0) <= :priceMax`);
     }
@@ -841,49 +863,6 @@ async function list(req, res, next) {
     if (!ids.length) {
       const wantDebug = toInt(req.query.debug, 0) === 1 || String(req.query.debug || "").toLowerCase() === "true";
       if (wantDebug) {
-        // debug extra como venías haciendo
-        const bid = toInt(branchIdScope || 0, 0);
-
-        const [[pbBranch]] = bid
-          ? await sequelize.query(
-              `
-              SELECT
-                COUNT(*) AS pbActiveForBranch,
-                COUNT(DISTINCT product_id) AS pbDistinctProductsForBranch
-              FROM product_branches
-              WHERE branch_id = :bid AND is_active = 1
-              `,
-              { replacements: { bid } }
-            )
-          : [[{ pbActiveForBranch: 0, pbDistinctProductsForBranch: 0 }]];
-
-        const [[pbJoin]] = bid
-          ? await sequelize.query(
-              `
-              SELECT COUNT(*) AS pbJoinActiveProductsForBranch
-              FROM product_branches pb
-              JOIN products p ON p.id = pb.product_id
-              WHERE pb.branch_id = :bid
-                AND pb.is_active = 1
-                AND p.is_active = 1
-              `,
-              { replacements: { bid } }
-            )
-          : [[{ pbJoinActiveProductsForBranch: 0 }]];
-
-        const [sampleRows] = bid
-          ? await sequelize.query(
-              `
-              SELECT pb.product_id
-              FROM product_branches pb
-              WHERE pb.branch_id = :bid AND pb.is_active = 1
-              ORDER BY pb.product_id DESC
-              LIMIT 10
-              `,
-              { replacements: { bid } }
-            )
-          : [[]];
-
         return res.json({
           ok: true,
           data: [],
@@ -898,19 +877,14 @@ async function list(req, res, next) {
             includeInactive,
             whereSql,
             joinPb: !!joinPb,
-            pbActiveForBranch: toInt(pbBranch?.pbActiveForBranch, 0),
-            pbDistinctProductsForBranch: toInt(pbBranch?.pbDistinctProductsForBranch, 0),
-            pbJoinActiveProductsForBranch: toInt(pbJoin?.pbJoinActiveProductsForBranch, 0),
-            sampleProductIdsForBranch: (sampleRows || []).map((r) => toInt(r?.product_id, 0)).filter(Boolean),
           },
         });
       }
-
       return res.json({ ok: true, data: [], meta: { page, limit, total, pages } });
     }
 
     // -------------------------
-    // 2) HYDRATE por Sequelize (includes + computed)
+    // 2) HYDRATE
     // -------------------------
     const include = buildProductIncludes({ includeBranch: admin });
 
@@ -943,7 +917,6 @@ async function list(req, res, next) {
       where: { id: { [Op.in]: ids } },
       include,
       attributes: { include: attrsInclude },
-      // mantener orden de ids (DESC)
       order: [["id", "DESC"]],
     });
 
