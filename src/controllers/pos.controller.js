@@ -19,7 +19,7 @@
 // - El cálculo de cuotas se hace con PRECIO LISTA (lo hace el front) y el backend lo REGISTRA:
 //   - Guarda metadata en Payment.note (JSON) con:
 //     { provider_code, installments, price_basis:"LIST", list_total, per_installment_list, card_kind }
-// - Método ecom "credit_sjt" => se guarda en DB como Payment.method = "CREDIT_SJT" (enum real)
+// - Método "credit_sjt" => se guarda en DB como Payment.method = "CREDIT_SJT" (enum real)
 //   + reference="SJCREDIT" + provider_code="credit_sjt"
 //
 // ✅ FIX DB (importante):
@@ -27,6 +27,11 @@
 // - payments.method enum incluye MERCADOPAGO y CREDIT_SJT (según tu SHOW COLUMNS)
 // - MercadoPago / Transfer / Débito => SIEMPRE contado (installments=1)
 // - Cuotas SOLO cuando es TARJETA CRÉDITO (CARD y NO debit) o Crédito San Juan (CREDIT_SJT)
+//
+// ✅ FIX CLAVE (por tu screenshot “sigue OTHER”):
+// - Aunque el frontend mande method="OTHER" o venga raro,
+//   si detectamos provider_code/reference/note/labels de SJ Crédito => forzamos CREDIT_SJT.
+// - Así NUNCA te queda SJ Crédito como OTHER por payload inconsistente.
 
 const { literal } = require("sequelize");
 const {
@@ -284,6 +289,43 @@ function mapPayMethod(raw) {
 }
 
 /* =========================
+   ✅ FIX CLAVE: detectar SJ Crédito aunque llegue “raro”
+========================= */
+function looksLikeCreditSjt(pay) {
+  const m0 = String(pay?.method ?? "").trim().toLowerCase();
+  const pc0 = String(pay?.provider_code ?? pay?.providerCode ?? "").trim().toLowerCase();
+  const ref0 = String(pay?.reference ?? pay?.ref ?? "").trim().toLowerCase();
+  const note0 = String(pay?.note ?? "").trim().toLowerCase();
+
+  if (m0 === "credit_sjt" || m0 === "sjcredit") return true;
+  if (pc0 === "credit_sjt" || pc0 === "sjcredit") return true;
+  if (ref0 === "sjcredit" || ref0 === "sj_credit" || ref0 === "sjcredito" || ref0 === "sjcrédito") return true;
+  if (ref0 === "sj credit" || ref0 === "sanjuancredito" || ref0 === "san juan credito" || ref0 === "san juan crédito")
+    return true;
+
+  // heurísticas por texto (para cuando el front manda OTHER)
+  const haySanJuan = note0.includes("san juan") || note0.includes("sanjuan");
+  const hayCredito = note0.includes("credito") || note0.includes("crédito") || note0.includes("credit");
+  if (haySanJuan && hayCredito) return true;
+
+  const hayProviderInNote = note0.includes("credit_sjt") || note0.includes('"provider_code":"credit_sjt"');
+  if (hayProviderInNote) return true;
+
+  // también por method en mayúsculas/labels
+  const mUp = String(pay?.method ?? "").trim().toUpperCase();
+  if (mUp === "CREDIT_SJT" || mUp === "SJCREDIT" || mUp.includes("CRÉDITO SAN JUAN") || mUp.includes("CREDITO SAN JUAN"))
+    return true;
+
+  return false;
+}
+
+function forceMethodForMapping(pay) {
+  // Si detectamos SJ Crédito aunque venga method=OTHER, forzamos el mapping correcto
+  if (looksLikeCreditSjt(pay)) return "credit_sjt";
+  return pay?.method;
+}
+
+/* =========================
    GET /pos/context
 ========================= */
 async function getContext(req, res) {
@@ -306,7 +348,6 @@ async function getContext(req, res) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
     if (admin && !resolvedWarehouseId && resolvedBranchId) {
-      // admin: si no especifica, intentamos default del branch
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
     }
 
@@ -863,7 +904,11 @@ async function createSale(req, res) {
 
     for (const pay of payments) {
       const amount = toNum(pay.amount);
-      const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method);
+
+      // ✅ FIX CLAVE: forzar SJ Crédito si viene method=OTHER pero se detecta por provider/reference/note
+      const forcedRawMethod = forceMethodForMapping(pay);
+
+      const { dbMethod, providerCode } = mapPayMethodDetailed(forcedRawMethod);
 
       if (!Number.isFinite(amount) || amount <= 0) {
         throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), {
@@ -929,7 +974,10 @@ async function createSale(req, res) {
 
       // ✅ reference: defaults útiles
       let ref = pay.reference || null;
-      if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
+
+      // ✅ FIX CLAVE: si es SJ Crédito, SIEMPRE reference=SJCREDIT aunque venga NULL
+      if (!ref && (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt")) ref = "SJCREDIT";
+
       if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
 
       let notePay = pay.note || null;
@@ -1232,7 +1280,9 @@ async function createSaleReturn(req, res) {
     }
 
     for (const p of payments) {
-      const { dbMethod, providerCode } = mapPayMethodDetailed(p.method);
+      const forcedRawMethod = forceMethodForMapping(p);
+      const { dbMethod, providerCode } = mapPayMethodDetailed(forcedRawMethod);
+
       const amount = toNum(p.amount);
       if (!Number.isFinite(amount) || amount <= 0) {
         const e = new Error(`Pago devolución inválido: amount=${p.amount}`);
@@ -1241,7 +1291,6 @@ async function createSaleReturn(req, res) {
         throw e;
       }
 
-      // devolución: normalmente contado, pero si querés preservar meta de cuotas lo guardamos
       const installments = clampInstallments(p.installments ?? p.cuotas ?? 1, 1);
 
       const meta =
@@ -1255,7 +1304,11 @@ async function createSaleReturn(req, res) {
             }
           : null;
 
-      const notePay = meta ? mergePaymentNote(p.note || null, meta) : p.note ? String(p.note).slice(0, 255) : null;
+      let notePay = p.note ? String(p.note) : null;
+      if (meta) notePay = mergePaymentNote(notePay, meta);
+
+      let ref = p.reference ? String(p.reference).slice(0, 120) : null;
+      if (!ref && (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt")) ref = "SJCREDIT";
 
       await sequelize.query(
         `
@@ -1270,7 +1323,7 @@ async function createSaleReturn(req, res) {
             return_id: returnId,
             method: dbMethod,
             amount,
-            reference: p.reference ? String(p.reference).slice(0, 120) : null,
+            reference: ref,
             note: notePay ? String(notePay).slice(0, 255) : null,
           },
         }
@@ -1514,7 +1567,9 @@ async function createSaleExchange(req, res) {
     }
 
     for (const p of returnPayload.payments || []) {
-      const { dbMethod, providerCode } = mapPayMethodDetailed(p.method);
+      const forcedRawMethod = forceMethodForMapping(p);
+      const { dbMethod, providerCode } = mapPayMethodDetailed(forcedRawMethod);
+
       const amount = toNum(p.amount);
       if (!Number.isFinite(amount) || amount <= 0) {
         const e = new Error(`Pago devolución inválido: amount=${p.amount}`);
@@ -1524,6 +1579,7 @@ async function createSaleExchange(req, res) {
       }
 
       const installments = clampInstallments(p.installments ?? p.cuotas ?? 1, 1);
+
       const meta =
         installments > 1 || providerCode
           ? {
@@ -1535,7 +1591,11 @@ async function createSaleExchange(req, res) {
             }
           : null;
 
-      const notePay = meta ? mergePaymentNote(p.note || null, meta) : p.note ? String(p.note).slice(0, 255) : null;
+      let notePay = p.note ? String(p.note) : null;
+      if (meta) notePay = mergePaymentNote(notePay, meta);
+
+      let ref = p.reference ? String(p.reference).slice(0, 120) : null;
+      if (!ref && (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt")) ref = "SJCREDIT";
 
       await sequelize.query(
         `
@@ -1550,7 +1610,7 @@ async function createSaleExchange(req, res) {
             return_id: returnId,
             method: dbMethod,
             amount,
-            reference: p.reference ? String(p.reference).slice(0, 120) : null,
+            reference: ref,
             note: notePay ? String(notePay).slice(0, 255) : null,
           },
         }
@@ -1731,7 +1791,9 @@ async function createSaleExchange(req, res) {
     let totalPaid2 = 0;
     for (const pay of pays2) {
       const amount = toNum(pay.amount);
-      const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method);
+
+      const forcedRawMethod = forceMethodForMapping(pay);
+      const { dbMethod, providerCode } = mapPayMethodDetailed(forcedRawMethod);
 
       if (!Number.isFinite(amount) || amount <= 0) {
         const e = new Error(`Pago inválido (cambio): amount=${pay.amount}`);
@@ -1751,7 +1813,6 @@ async function createSaleExchange(req, res) {
         pay.is_debit === true ||
         pay.isDebit === true;
 
-      // ✅ FIX: SJ Crédito también acá
       let installments = 1;
       if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
         installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
@@ -1777,10 +1838,11 @@ async function createSaleExchange(req, res) {
       totalPaid2 += amount;
 
       let ref = pay.reference || null;
-      if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
+      if (!ref && (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt")) ref = "SJCREDIT";
       if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
 
-      const notePay = meta ? mergePaymentNote(pay.note || null, meta) : pay.note || null;
+      let notePay = pay.note || null;
+      if (meta) notePay = mergePaymentNote(notePay, meta);
 
       await Payment.create(
         {
