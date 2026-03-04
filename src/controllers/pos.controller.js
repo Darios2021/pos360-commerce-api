@@ -19,13 +19,14 @@
 // - El cálculo de cuotas se hace con PRECIO LISTA (lo hace el front) y el backend lo REGISTRA:
 //   - Guarda metadata en Payment.note (JSON) con:
 //     { provider_code, installments, price_basis:"LIST", list_total, per_installment_list, card_kind }
-// - Método ecom "credit_sjt" => se guarda en DB como Payment.method = "OTHER" + reference="SJCREDIT" + provider_code
+// - Método ecom "credit_sjt" => se guarda en DB como Payment.method = "CREDIT_SJT" (enum real)
+//   + reference="SJCREDIT" + provider_code="credit_sjt"
 //
 // ✅ FIX DB (importante):
 // - payments ahora tiene columna installments INT NOT NULL DEFAULT 1
-// - payments.method enum incluye MERCADOPAGO (según tu SHOW CREATE TABLE)
+// - payments.method enum incluye MERCADOPAGO y CREDIT_SJT (según tu SHOW COLUMNS)
 // - MercadoPago / Transfer / Débito => SIEMPRE contado (installments=1)
-// - Cuotas SOLO cuando es TARJETA CRÉDITO (CARD y NO debit) o Crédito San Juan (OTHER + provider_code=credit_sjt)
+// - Cuotas SOLO cuando es TARJETA CRÉDITO (CARD y NO debit) o Crédito San Juan (CREDIT_SJT)
 
 const { literal } = require("sequelize");
 const {
@@ -136,14 +137,10 @@ function logPos(req, level, msg, extra = {}) {
  */
 function resolveExplicitPosContext(req) {
   const branchId =
-    toInt(req?.body?.branch_id, 0) ||
-    toInt(req?.query?.branch_id, 0) ||
-    toInt(req?.query?.branchId, 0);
+    toInt(req?.body?.branch_id, 0) || toInt(req?.query?.branch_id, 0) || toInt(req?.query?.branchId, 0);
 
   const warehouseId =
-    toInt(req?.body?.warehouse_id, 0) ||
-    toInt(req?.query?.warehouse_id, 0) ||
-    toInt(req?.query?.warehouseId, 0);
+    toInt(req?.body?.warehouse_id, 0) || toInt(req?.query?.warehouse_id, 0) || toInt(req?.query?.warehouseId, 0);
 
   return { branchId, warehouseId };
 }
@@ -224,12 +221,12 @@ function mergePaymentNote(existingNote, metaObj) {
 }
 
 /* =========================
-   ✅ Método de pago: mapping a enum DB
+   ✅ Método de pago: mapping a enum DB real
 ========================= */
 /**
- * payments.method enum: CASH, TRANSFER, CARD, QR, MERCADOPAGO, OTHER
+ * payments.method enum: CASH, TRANSFER, CARD, QR, MERCADOPAGO, CREDIT_SJT, OTHER
  * Reglas:
- * - Crédito San Juan => OTHER + provider_code=credit_sjt + reference="SJCREDIT"
+ * - Crédito San Juan => CREDIT_SJT (installments 1..12) + reference="SJCREDIT"
  * - MercadoPago => MERCADOPAGO (contado)
  * - Débito => CARD + providerCode="debit" (pero installments=1 siempre)
  */
@@ -237,7 +234,9 @@ function mapPayMethodDetailed(raw) {
   const rawStr = String(raw || "").trim();
   const m = rawStr.toUpperCase();
 
-  // ✅ Crédito San Juan
+  // =========================
+  // Crédito San Juan
+  // =========================
   if (
     rawStr === "credit_sjt" ||
     m === "CREDIT_SJT" ||
@@ -246,27 +245,34 @@ function mapPayMethodDetailed(raw) {
     m === "CRÉDITO SAN JUAN" ||
     m === "SJCREDIT"
   ) {
-    return { dbMethod: "OTHER", providerCode: "credit_sjt" };
+    return { dbMethod: "CREDIT_SJT", providerCode: "credit_sjt" };
   }
 
-  // ✅ MercadoPago (tu enum DB lo soporta)
+  // =========================
+  // MercadoPago
+  // =========================
   if (m === "MERCADOPAGO" || m === "MERCADO_PAGO" || m === "MERCADO PAGO" || m === "MP") {
     return { dbMethod: "MERCADOPAGO", providerCode: "mercadopago" };
   }
 
-  // ✅ alias comunes
+  // =========================
+  // Alias comunes
+  // =========================
   if (m === "EFECTIVO") return { dbMethod: "CASH", providerCode: "cash" };
   if (m === "TRANSFERENCIA") return { dbMethod: "TRANSFER", providerCode: "transfer" };
   if (m === "TARJETA" || m === "CREDITO" || m === "CRÉDITO") return { dbMethod: "CARD", providerCode: "card" };
   if (m === "DEBITO" || m === "DÉBITO") return { dbMethod: "CARD", providerCode: "debit" };
   if (m === "QR") return { dbMethod: "QR", providerCode: "qr" };
 
-  // ✅ enums ya válidos
+  // =========================
+  // ENUM directos DB
+  // =========================
   if (m === "CASH") return { dbMethod: "CASH", providerCode: "cash" };
   if (m === "TRANSFER") return { dbMethod: "TRANSFER", providerCode: "transfer" };
   if (m === "CARD") return { dbMethod: "CARD", providerCode: "card" };
   if (m === "QR") return { dbMethod: "QR", providerCode: "qr" };
   if (m === "MERCADOPAGO") return { dbMethod: "MERCADOPAGO", providerCode: "mercadopago" };
+  if (m === "CREDIT_SJT") return { dbMethod: "CREDIT_SJT", providerCode: "credit_sjt" };
   if (m === "OTHER") return { dbMethod: "OTHER", providerCode: "other" };
 
   return { dbMethod: "OTHER", providerCode: rawStr ? rawStr : "other" };
@@ -291,7 +297,7 @@ async function getContext(req, res) {
     const fallback = resolvePosContext(req);
 
     const resolvedBranchId = admin
-      ? (toInt(explicit.branchId, 0) || userBranchId || toInt(fallback.branchId, 0) || 0)
+      ? toInt(explicit.branchId, 0) || userBranchId || toInt(fallback.branchId, 0) || 0
       : userBranchId;
 
     let resolvedWarehouseId = admin ? toInt(explicit.warehouseId, 0) : toInt(fallback.warehouseId, 0);
@@ -622,17 +628,14 @@ async function createSale(req, res) {
     // ✅ Cliente: soportar dos formatos
     // ======================================================
     const extra = body.extra && typeof body.extra === "object" ? body.extra : {};
-    const c = extra.customer && typeof extra.customer === "object" ? extra.customer : (body.customer || {});
+    const c = extra.customer && typeof extra.customer === "object" ? extra.customer : body.customer || {};
 
     const first = String(c.first_name || "").trim();
     const last = String(c.last_name || "").trim();
     const fullName = String(`${first} ${last}`.trim());
 
     const customer_name =
-      String(body.customer_name || "").trim() ||
-      fullName ||
-      String(c.name || "").trim() ||
-      "Consumidor Final";
+      String(body.customer_name || "").trim() || fullName || String(c.name || "").trim() || "Consumidor Final";
 
     const customer_phone =
       String(body.customer_phone || "").trim() ||
@@ -655,14 +658,13 @@ async function createSale(req, res) {
     }
 
     const userId = toInt(req.user.id, 0);
-
     const userBranchId = toInt(req.user.branch_id, 0);
 
     const explicit = resolveExplicitPosContext(req);
     const ctx = resolvePosContext(req);
 
     const resolvedBranchId = admin
-      ? (toInt(explicit.branchId, 0) || userBranchId || toInt(ctx.branchId, 0) || 0)
+      ? toInt(explicit.branchId, 0) || userBranchId || toInt(ctx.branchId, 0) || 0
       : userBranchId;
 
     if (!resolvedBranchId) {
@@ -677,8 +679,8 @@ async function createSale(req, res) {
     }
 
     let resolvedWarehouseId = admin
-      ? (toInt(explicit.warehouseId, 0) || toInt(ctx.warehouseId, 0) || 0)
-      : (toInt(ctx.warehouseId, 0) || 0);
+      ? toInt(explicit.warehouseId, 0) || toInt(ctx.warehouseId, 0) || 0
+      : toInt(ctx.warehouseId, 0) || 0;
 
     if (!admin && !resolvedWarehouseId && resolvedBranchId) {
       resolvedWarehouseId = await resolveWarehouseForBranch(resolvedBranchId);
@@ -724,10 +726,16 @@ async function createSale(req, res) {
         throw Object.assign(new Error("Item inválido: falta product_id"), { httpStatus: 400, code: "INVALID_ITEM" });
       }
       if (!Number.isFinite(it.quantity) || it.quantity <= 0) {
-        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), { httpStatus: 400, code: "INVALID_ITEM" });
+        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       }
       if (!Number.isFinite(it.unit_price) || it.unit_price <= 0) {
-        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), { httpStatus: 400, code: "INVALID_ITEM" });
+        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       }
     }
 
@@ -845,11 +853,11 @@ async function createSale(req, res) {
     }
 
     // ======================================================
-    // ✅ PAGOS (FIX): guardar method real + installments en columna
+    // ✅ PAGOS: guardar method real + installments en columna
     // Reglas:
     // - CASH/TRANSFER/QR/MERCADOPAGO => contado => installments=1
     // - CARD => cuotas SOLO si CRÉDITO (si es débito => 1)
-    // - Crédito San Juan => OTHER + reference='SJCREDIT' + installments 1..12
+    // - Crédito San Juan => CREDIT_SJT + reference='SJCREDIT' + installments 1..12
     // ======================================================
     let totalPaid = 0;
 
@@ -864,8 +872,8 @@ async function createSale(req, res) {
         });
       }
 
-      // ✅ enum real permitido (incluye MERCADOPAGO)
-      if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "OTHER"].includes(dbMethod)) {
+      // ✅ enum real permitido
+      if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"].includes(dbMethod)) {
         throw Object.assign(new Error(`Pago inválido: method=${dbMethod}`), {
           httpStatus: 400,
           code: "INVALID_PAYMENT_METHOD",
@@ -873,7 +881,9 @@ async function createSale(req, res) {
       }
 
       // 🔒 Detectar débito (contado)
-      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "").trim().toUpperCase();
+      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
+        .trim()
+        .toUpperCase();
       const isDebit =
         providerCode === "debit" ||
         cardKind === "DEBIT" ||
@@ -885,7 +895,7 @@ async function createSale(req, res) {
       // ✅ installments según regla
       let installments = 1;
 
-      if (providerCode === "credit_sjt") {
+      if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
         installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
       } else if (dbMethod === "CARD") {
         if (!isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
@@ -897,9 +907,7 @@ async function createSale(req, res) {
       // ✅ metadata opcional
       const priceBasis = String(pay.price_basis || pay.priceBasis || "").trim().toUpperCase() || null;
       const effectiveBasis =
-        (dbMethod === "CARD" && installments > 1 && !isDebit) || providerCode === "credit_sjt"
-          ? "LIST"
-          : (priceBasis || null);
+        (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT" ? "LIST" : priceBasis || null;
 
       const listTotal = toNum(pay.total_list ?? pay.totalList ?? pay.list_total ?? 0, 0) || null;
       const perInstallmentList =
@@ -921,7 +929,7 @@ async function createSale(req, res) {
 
       // ✅ reference: defaults útiles
       let ref = pay.reference || null;
-      if (!ref && providerCode === "credit_sjt") ref = "SJCREDIT";
+      if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
       if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
 
       let notePay = pay.note || null;
@@ -1073,11 +1081,17 @@ async function createSaleReturn(req, res) {
     if (!admin) {
       if (!userBranchId) {
         await t.rollback();
-        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
+        return res
+          .status(400)
+          .json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
       }
       if (toInt(sale.branch_id, 0) !== userBranchId) {
         await t.rollback();
-        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_SALE",
+          message: "No podés operar una venta de otra sucursal",
+        });
       }
     }
 
@@ -1209,7 +1223,10 @@ async function createSaleReturn(req, res) {
         if (sb) {
           await sb.update({ qty: literal(`qty + ${it.qty}`) }, { transaction: t });
         } else {
-          await StockBalance.create({ warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty }, { transaction: t });
+          await StockBalance.create(
+            { warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty },
+            { transaction: t }
+          );
         }
       }
     }
@@ -1238,7 +1255,7 @@ async function createSaleReturn(req, res) {
             }
           : null;
 
-      const notePay = meta ? mergePaymentNote(p.note || null, meta) : (p.note ? String(p.note).slice(0, 255) : null);
+      const notePay = meta ? mergePaymentNote(p.note || null, meta) : p.note ? String(p.note).slice(0, 255) : null;
 
       await sequelize.query(
         `
@@ -1341,11 +1358,17 @@ async function createSaleExchange(req, res) {
     if (!admin) {
       if (!userBranchId) {
         await t.rollback();
-        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
+        return res
+          .status(400)
+          .json({ ok: false, code: "BRANCH_REQUIRED", message: "El usuario no tiene sucursal asignada" });
       }
       if (toInt(sale.branch_id, 0) !== userBranchId) {
         await t.rollback();
-        return res.status(403).json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés operar una venta de otra sucursal" });
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_SALE",
+          message: "No podés operar una venta de otra sucursal",
+        });
       }
     }
 
@@ -1482,7 +1505,10 @@ async function createSaleExchange(req, res) {
         if (sb) {
           await sb.update({ qty: literal(`qty + ${it.qty}`) }, { transaction: t });
         } else {
-          await StockBalance.create({ warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty }, { transaction: t });
+          await StockBalance.create(
+            { warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty },
+            { transaction: t }
+          );
         }
       }
     }
@@ -1509,7 +1535,7 @@ async function createSaleExchange(req, res) {
             }
           : null;
 
-      const notePay = meta ? mergePaymentNote(p.note || null, meta) : (p.note ? String(p.note).slice(0, 255) : null);
+      const notePay = meta ? mergePaymentNote(p.note || null, meta) : p.note ? String(p.note).slice(0, 255) : null;
 
       await sequelize.query(
         `
@@ -1540,17 +1566,14 @@ async function createSaleExchange(req, res) {
     const pays2 = Array.isArray(newSalePayload.payments) ? newSalePayload.payments : [];
 
     const extra2 = newSalePayload.extra && typeof newSalePayload.extra === "object" ? newSalePayload.extra : {};
-    const c2 = extra2.customer && typeof extra2.customer === "object" ? extra2.customer : (newSalePayload.customer || {});
+    const c2 = extra2.customer && typeof extra2.customer === "object" ? extra2.customer : newSalePayload.customer || {};
 
     const first2 = String(c2.first_name || "").trim();
     const last2 = String(c2.last_name || "").trim();
     const fullName2 = String(`${first2} ${last2}`.trim());
 
     const customer_name2 =
-      String(newSalePayload.customer_name || "").trim() ||
-      fullName2 ||
-      String(c2.name || "").trim() ||
-      "Consumidor Final";
+      String(newSalePayload.customer_name || "").trim() || fullName2 || String(c2.name || "").trim() || "Consumidor Final";
 
     const customer_phone2 =
       String(newSalePayload.customer_phone || "").trim() ||
@@ -1717,8 +1740,9 @@ async function createSaleExchange(req, res) {
         throw e;
       }
 
-      // cuotas solo para crédito; MP/transfer contado
-      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "").trim().toUpperCase();
+      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
+        .trim()
+        .toUpperCase();
       const isDebit =
         providerCode === "debit" ||
         cardKind === "DEBIT" ||
@@ -1727,17 +1751,23 @@ async function createSaleExchange(req, res) {
         pay.is_debit === true ||
         pay.isDebit === true;
 
+      // ✅ FIX: SJ Crédito también acá
       let installments = 1;
-      if (providerCode === "credit_sjt") installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
-      else if (dbMethod === "CARD" && !isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
-      else installments = 1;
+      if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
+        installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
+      } else if (dbMethod === "CARD" && !isDebit) {
+        installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
+      } else {
+        installments = 1;
+      }
 
       const meta =
         installments > 1 || providerCode
           ? {
               provider_code: providerCode || null,
               installments,
-              price_basis: (dbMethod === "CARD" && installments > 1 && !isDebit) || providerCode === "credit_sjt" ? "LIST" : null,
+              price_basis:
+                (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT" ? "LIST" : null,
               list_total: toNum(pay.total_list ?? pay.totalList ?? 0, 0) || null,
               per_installment_list: toNum(pay.per_installment_list ?? pay.perInstallmentList ?? 0, 0) || null,
               card_kind: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : null,
@@ -1747,17 +1777,17 @@ async function createSaleExchange(req, res) {
       totalPaid2 += amount;
 
       let ref = pay.reference || null;
-      if (!ref && providerCode === "credit_sjt") ref = "SJCREDIT";
+      if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
       if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
 
-      const notePay = meta ? mergePaymentNote(pay.note || null, meta) : (pay.note || null);
+      const notePay = meta ? mergePaymentNote(pay.note || null, meta) : pay.note || null;
 
       await Payment.create(
         {
           sale_id: newSale.id,
           method: dbMethod,
           amount,
-          installments, // ✅ NUEVO CAMPO
+          installments,
           reference: ref,
           note: notePay,
           paid_at: new Date(),
