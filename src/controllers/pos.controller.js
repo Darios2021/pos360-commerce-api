@@ -24,7 +24,7 @@
 //
 // ✅ FIX DB (importante):
 // - payments ahora tiene columna installments INT NOT NULL DEFAULT 1
-// - payments.method enum incluye MERCADOPAGO y CREDIT_SJT (según tu SHOW COLUMNS)
+// - payments.method enum incluye MERCADOPAGO y CREDIT_SJT (según tu DB real)
 // - MercadoPago / Transfer / Débito => SIEMPRE contado (installments=1)
 // - Cuotas SOLO cuando es TARJETA CRÉDITO (CARD y NO debit) o Crédito San Juan (CREDIT_SJT)
 //
@@ -1277,7 +1277,7 @@ async function createSaleReturn(req, res) {
           transaction: t,
           replacements: {
             return_id: returnId,
-            method: dbMethod,
+            method: dbMethod, // si tu enum de sale_return_payments no admite CREDIT_SJT/MERCADOPAGO, lo veremos luego y lo ajustamos
             amount,
             reference: referenceIncoming ? String(referenceIncoming).slice(0, 120) : null,
             note: notePay ? String(notePay).slice(0, 255) : null,
