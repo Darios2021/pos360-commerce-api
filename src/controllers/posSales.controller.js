@@ -96,7 +96,13 @@ function normalizePayMethod(v) {
   if (x === "MP" || x === "MERCADO PAGO" || x === "MERCADO_PAGO") return "MERCADOPAGO";
 
   // Alias Crédito SJT
-  if (x === "SJCREDIT" || x === "SJ_CREDIT" || x === "SANJUANCREDITO" || x === "CRÉDITO SAN JUAN" || x === "CREDITO SAN JUAN")
+  if (
+    x === "SJCREDIT" ||
+    x === "SJ_CREDIT" ||
+    x === "SANJUANCREDITO" ||
+    x === "CRÉDITO SAN JUAN" ||
+    x === "CREDITO SAN JUAN"
+  )
     return "CREDIT_SJT";
 
   // Mapeos comunes
@@ -109,7 +115,6 @@ function allowedSalePayMethodsSet() {
   return new Set(["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"]);
 }
 function allowedRefundPayMethodsSet() {
-  // Para sale_return_payments: intentamos con estos (si DB no acepta alguno, hacemos fallback a OTHER)
   return new Set(["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"]);
 }
 
@@ -388,8 +393,8 @@ function injectExistsFiltersIntoWhere(where, req) {
   if (pay_method) {
     ands.push(
       literal(`EXISTS (
-        SELECT 1 FROM ${payTable} p
-        WHERE p.sale_id = Sale.id AND UPPER(p.method) = ${sequelize.escape(pay_method)}
+        SELECT 1 FROM ${payTable} p2
+        WHERE p2.sale_id = Sale.id AND UPPER(p2.method) = ${sequelize.escape(pay_method)}
       )`)
     );
   }
@@ -399,19 +404,19 @@ function injectExistsFiltersIntoWhere(where, req) {
     if (pNum > 0) {
       ands.push(
         literal(`EXISTS (
-          SELECT 1 FROM ${itemsTable} si
-          WHERE si.sale_id = Sale.id AND si.product_id = ${sequelize.escape(pNum)}
+          SELECT 1 FROM ${itemsTable} si2
+          WHERE si2.sale_id = Sale.id AND si2.product_id = ${sequelize.escape(pNum)}
         )`)
       );
     } else {
       const like = `%${product}%`;
       ands.push(
         literal(`EXISTS (
-          SELECT 1 FROM ${itemsTable} si
-          WHERE si.sale_id = Sale.id AND (
-            si.product_name_snapshot LIKE ${sequelize.escape(like)} OR
-            si.product_sku_snapshot LIKE ${sequelize.escape(like)} OR
-            si.product_barcode_snapshot LIKE ${sequelize.escape(like)}
+          SELECT 1 FROM ${itemsTable} si2
+          WHERE si2.sale_id = Sale.id AND (
+            si2.product_name_snapshot LIKE ${sequelize.escape(like)} OR
+            si2.product_sku_snapshot LIKE ${sequelize.escape(like)} OR
+            si2.product_barcode_snapshot LIKE ${sequelize.escape(like)}
           )
         )`)
       );
@@ -579,29 +584,27 @@ async function statsSales(req, res, next) {
       conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
     }
 
+    // ✅ FIX: alias seguros para NO chocar con sqlPayments (que usa p)
     const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
     if (pay_method) {
       repl.pay_method = pay_method;
-      conds.push(
-        `EXISTS (SELECT 1 FROM ${payTable} p WHERE p.sale_id = s.id AND UPPER(p.method) = :pay_method)`
-      );
+      conds.push(`EXISTS (SELECT 1 FROM ${payTable} p2 WHERE p2.sale_id = s.id AND UPPER(p2.method) = :pay_method)`);
     }
 
+    // ✅ FIX: alias seguros para NO chocar si más adelante agregás joins con si
     const product = String(req.query.product || "").trim();
     if (product) {
       const pNum = toInt(product, 0);
       if (pNum > 0) {
-        conds.push(
-          `EXISTS (SELECT 1 FROM ${itemsTable} si WHERE si.sale_id = s.id AND si.product_id = :product_id)`
-        );
+        conds.push(`EXISTS (SELECT 1 FROM ${itemsTable} si2 WHERE si2.sale_id = s.id AND si2.product_id = :product_id)`);
         repl.product_id = pNum;
       } else {
         conds.push(`EXISTS (
-          SELECT 1 FROM ${itemsTable} si
-          WHERE si.sale_id = s.id AND (
-            si.product_name_snapshot LIKE :pLike OR
-            si.product_sku_snapshot LIKE :pLike OR
-            si.product_barcode_snapshot LIKE :pLike
+          SELECT 1 FROM ${itemsTable} si2
+          WHERE si2.sale_id = s.id AND (
+            si2.product_name_snapshot LIKE :pLike OR
+            si2.product_sku_snapshot LIKE :pLike OR
+            si2.product_barcode_snapshot LIKE :pLike
           )
         )`);
         repl.pLike = `%${product}%`;
