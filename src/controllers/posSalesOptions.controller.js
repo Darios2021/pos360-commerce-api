@@ -249,90 +249,59 @@ async function optionsCustomers(req, res) {
  * ✅ Devuelve productos vendidos de verdad.
  * Busca desde sale_items (+ sales para sucursal) y enriquece con products.
  */
+/**
+ * PRODUCTS (vendidos): busca productos que aparecen en ventas
+ * query: q, limit, branch_id (opcional)
+ */
 async function optionsProducts(req, res) {
   try {
     const q = req.query.q || "";
     const limit = Math.min(Math.max(toInt(req.query.limit, 25), 1), 100);
     const branchId = toInt(req.query.branch_id, 0) || null;
 
-    const Product = pickModel("Product", "Products", "Producto", "Productos");
-    const Sale = pickModel("Sale", "Sales", "PosSale", "PosSales");
-    const SaleItem = pickModel("SaleItem", "SaleItems", "PosSaleItem", "PosSaleItems");
-    const sequelize = models?.sequelize || models?.Sequelize?.sequelize;
-
-    if (!sequelize || !Sale || !SaleItem) {
-      return fail(res, 501, "No hay sequelize/Sale/SaleItem para optionsProducts");
-    }
-
-    const salesTable = getTableName(Sale, "sales");
-    const itemsTable = getTableName(SaleItem, "sale_items");
-    const productsTable = Product ? getTableName(Product, "products") : "products";
+    const sequelize = models?.sequelize;
+    if (!sequelize) return fail(res, 500, "Sequelize no disponible");
 
     const term = normStr(q);
     const like = `%${term}%`;
 
-    const whereParts = [];
-    const repl = { term, like, limit };
-
-    if (branchId > 0) {
-      whereParts.push("s.branch_id = :branch_id");
-      repl.branch_id = branchId;
-    }
-
-    whereParts.push(`(
-      :term = '' OR
-      si.product_name_snapshot LIKE :like OR
-      si.product_sku_snapshot LIKE :like OR
-      si.product_barcode_snapshot LIKE :like OR
-      p.name LIKE :like OR
-      p.title LIKE :like OR
-      p.sku LIKE :like OR
-      p.code LIKE :like OR
-      p.barcode LIKE :like
-    )`);
-
-    if (Product) {
-      if (hasAttr(Product, "is_active")) {
-        whereParts.push("(p.id IS NULL OR p.is_active = 1)");
-      }
-    }
-
-    const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-
     const sql = `
-      SELECT
-        x.product_id AS id,
-        x.name AS name,
-        x.sku AS sku,
-        x.barcode AS barcode
-      FROM (
-        SELECT
-          si.product_id AS product_id,
-          COALESCE(NULLIF(MAX(p.name), ''), NULLIF(MAX(p.title), ''), NULLIF(MAX(si.product_name_snapshot), ''), CONCAT('Producto #', si.product_id)) AS name,
-          COALESCE(NULLIF(MAX(p.sku), ''), NULLIF(MAX(p.code), ''), NULLIF(MAX(si.product_sku_snapshot), '')) AS sku,
-          COALESCE(NULLIF(MAX(p.barcode), ''), NULLIF(MAX(si.product_barcode_snapshot), '')) AS barcode,
-          MAX(s.id) AS last_sale_id
-        FROM ${itemsTable} si
-        INNER JOIN ${salesTable} s ON s.id = si.sale_id
-        LEFT JOIN ${productsTable} p ON p.id = si.product_id
-        ${whereSql}
-        GROUP BY si.product_id
-      ) x
-      ORDER BY x.name ASC, x.last_sale_id DESC
+      SELECT DISTINCT
+        si.product_id AS id,
+        COALESCE(si.product_name_snapshot, p.name, p.title) AS name,
+        COALESCE(si.product_sku_snapshot, p.sku, p.code) AS sku,
+        COALESCE(si.product_barcode_snapshot, p.barcode) AS barcode
+      FROM sale_items si
+      LEFT JOIN products p ON p.id = si.product_id
+      LEFT JOIN sales s ON s.id = si.sale_id
+      WHERE
+        (:branch_id = 0 OR s.branch_id = :branch_id)
+        AND (
+          :term = '' OR
+          si.product_name_snapshot LIKE :like OR
+          si.product_sku_snapshot LIKE :like OR
+          si.product_barcode_snapshot LIKE :like OR
+          p.name LIKE :like OR
+          p.sku LIKE :like
+        )
+      ORDER BY name ASC
       LIMIT :limit
     `;
 
-    const [rows] = await sequelize.query(sql, { replacements: repl });
+    const [rows] = await sequelize.query(sql, {
+      replacements: {
+        branch_id: branchId,
+        term,
+        like,
+        limit,
+      },
+    });
 
     const data = (rows || []).map((p) => {
-      const name = p.name || `Producto #${p.id}`;
-      const sku = p.sku || "";
-      const bc = p.barcode || "";
-
       const parts = [
-        name,
-        sku ? `SKU: ${sku}` : "",
-        bc ? `BAR: ${bc}` : "",
+        p.name || `Producto #${p.id}`,
+        p.sku ? `SKU: ${p.sku}` : "",
+        p.barcode ? `BAR: ${p.barcode}` : "",
       ].filter(Boolean);
 
       return {
