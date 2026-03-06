@@ -1,5 +1,5 @@
+// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/posSalesOptions.controller.js
-// ✅ COPY-PASTE FINAL COMPLETO (FULL)
 //
 // Endpoints:
 // - GET /pos/sales/options/sellers
@@ -9,18 +9,11 @@
 // Respuesta:
 // { ok:true, data:[ { title, value, stock? } ] }
 //
-// FIXES:
-// - ✅ /products: filtra SIEMPRE products.is_active=1 (si existe columna)
-// - ✅ /products: intenta usar VIEW v_stock_by_branch_product(branch_id, product_id, qty)
-//   y devuelve "stock" (qty) para el frontend
-// - ✅ /products: si existe track_stock:
-//      track_stock=1 => exige qty>0
-//      track_stock=0 => permite qty=0
-//   (si NO existe track_stock, exige qty>0 cuando usa view)
-// - ✅ fallback automático a Product.findAll si la view no existe o cambia
-//
-// NOTA:
-// - Este controller es "larga duración": tolera nombres/modelos distintos.
+// FIX AHORA:
+// ✅ /products devuelve PRODUCTOS VENDIDOS DE VERDAD (sale_items)
+// ✅ respeta branch_id
+// ✅ busca por snapshots + producto actual
+// ✅ evita mostrar catálogo entero que nunca apareció en ventas
 
 const { Op } = require("sequelize");
 const models = require("../models");
@@ -36,7 +29,6 @@ function ok(res, data) {
   return res.json({ ok: true, data });
 }
 function fail(res, status, message, e = null) {
-  // eslint-disable-next-line no-console
   console.error("❌ [posSalesOptions]", message, e?.message || e || "");
   return res.status(status).json({ ok: false, message });
 }
@@ -53,11 +45,18 @@ function likeWhereDynamic(q, cols) {
   const like = `%${term}%`;
   return { [Op.or]: cols.map((c) => ({ [c]: { [Op.like]: like } })) };
 }
+function getTableName(model, fallback) {
+  try {
+    const t = model?.getTableName?.();
+    if (!t) return fallback;
+    if (typeof t === "string") return t;
+    if (typeof t?.tableName === "string") return t.tableName;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
 
-/**
- * SELLERS: busca usuarios
- * query: q, limit, branch_id (opcional)
- */
 async function optionsSellers(req, res) {
   try {
     const q = req.query.q || "";
@@ -116,14 +115,6 @@ async function optionsSellers(req, res) {
   }
 }
 
-/**
- * CUSTOMERS: busca clientes
- * query: q, limit, branch_id (opcional)
- *
- * Prioridad:
- * 1) Model Customer/Client si existe
- * 2) Fallback: Sale agrupando por customer_name/doc/phone
- */
 async function optionsCustomers(req, res) {
   try {
     const q = req.query.q || "";
@@ -133,7 +124,6 @@ async function optionsCustomers(req, res) {
     const Customer = pickModel("Customer", "Customers", "Client", "Clients", "Cliente", "Clientes");
     const Sale = pickModel("Sale", "Sales", "PosSale", "PosSales");
 
-    // 1) Model Customer/Client
     if (Customer) {
       const where = {};
       const cols = [];
@@ -185,7 +175,6 @@ async function optionsCustomers(req, res) {
       return ok(res, data);
     }
 
-    // 2) Fallback: Sale
     if (!Sale) return fail(res, 501, "No existe modelo Customer/Client y tampoco Sale para optionsCustomers");
 
     const colName = hasAttr(Sale, "customer_name") ? "customer_name" : null;
@@ -256,8 +245,9 @@ async function optionsCustomers(req, res) {
 }
 
 /**
- * PRODUCTS: busca productos
- * query: q, limit, branch_id (opcional)
+ * PRODUCTS:
+ * ✅ Devuelve productos vendidos de verdad.
+ * Busca desde sale_items (+ sales para sucursal) y enriquece con products.
  */
 async function optionsProducts(req, res) {
   try {
@@ -266,139 +256,89 @@ async function optionsProducts(req, res) {
     const branchId = toInt(req.query.branch_id, 0) || null;
 
     const Product = pickModel("Product", "Products", "Producto", "Productos");
+    const Sale = pickModel("Sale", "Sales", "PosSale", "PosSales");
+    const SaleItem = pickModel("SaleItem", "SaleItems", "PosSaleItem", "PosSaleItems");
     const sequelize = models?.sequelize || models?.Sequelize?.sequelize;
 
-    if (!Product) return fail(res, 501, "Modelo Product no disponible para optionsProducts");
+    if (!sequelize || !Sale || !SaleItem) {
+      return fail(res, 501, "No hay sequelize/Sale/SaleItem para optionsProducts");
+    }
 
-    // ✅ Preferimos VIEW si hay branch
-    if (sequelize && branchId) {
-      try {
-        const term = normStr(q);
-        const like = `%${term}%`;
-        const hasTrack = hasAttr(Product, "track_stock");
+    const salesTable = getTableName(Sale, "sales");
+    const itemsTable = getTableName(SaleItem, "sale_items");
+    const productsTable = Product ? getTableName(Product, "products") : "products";
 
-        const sql = hasTrack
-          ? `
-            SELECT
-              p.id AS id,
-              p.name AS name,
-              p.title AS title,
-              p.sku AS sku,
-              p.code AS code,
-              p.barcode AS barcode,
-              p.track_stock AS track_stock,
-              COALESCE(v.qty,0) AS qty
-            FROM v_stock_by_branch_product v
-            INNER JOIN products p ON p.id = v.product_id
-            WHERE
-              v.branch_id = :branch_id
-              AND p.is_active = 1
-              AND (p.track_stock = 0 OR COALESCE(v.qty,0) > 0)
-              AND (
-                :term = '' OR
-                p.name LIKE :like OR
-                p.title LIKE :like OR
-                p.sku LIKE :like OR
-                p.code LIKE :like OR
-                p.barcode LIKE :like
-              )
-            ORDER BY p.name ASC, p.id DESC
-            LIMIT :limit
-          `
-          : `
-            SELECT
-              p.id AS id,
-              p.name AS name,
-              p.title AS title,
-              p.sku AS sku,
-              p.code AS code,
-              p.barcode AS barcode,
-              COALESCE(v.qty,0) AS qty
-            FROM v_stock_by_branch_product v
-            INNER JOIN products p ON p.id = v.product_id
-            WHERE
-              v.branch_id = :branch_id
-              AND p.is_active = 1
-              AND COALESCE(v.qty,0) > 0
-              AND (
-                :term = '' OR
-                p.name LIKE :like OR
-                p.title LIKE :like OR
-                p.sku LIKE :like OR
-                p.code LIKE :like OR
-                p.barcode LIKE :like
-              )
-            ORDER BY p.name ASC, p.id DESC
-            LIMIT :limit
-          `;
+    const term = normStr(q);
+    const like = `%${term}%`;
 
-        const [rows] = await sequelize.query(sql, {
-          replacements: { branch_id: branchId, term, like, limit },
-        });
+    const whereParts = [];
+    const repl = { term, like, limit };
 
-        const data = (rows || []).map((p) => {
-          const name = p.name || p.title || `Producto #${p.id}`;
-          const sku = p.sku || p.code || "";
-          const bc = p.barcode || "";
-          const stock = Number(p.qty || 0);
+    if (branchId > 0) {
+      whereParts.push("s.branch_id = :branch_id");
+      repl.branch_id = branchId;
+    }
 
-          const parts = [
-            name,
-            sku ? `SKU: ${sku}` : "",
-            bc ? `BAR: ${bc}` : "",
-            String(p.track_stock || 0) === "1" ? `Stock: ${stock}` : "Sin control stock",
-          ].filter(Boolean);
+    whereParts.push(`(
+      :term = '' OR
+      si.product_name_snapshot LIKE :like OR
+      si.product_sku_snapshot LIKE :like OR
+      si.product_barcode_snapshot LIKE :like OR
+      p.name LIKE :like OR
+      p.title LIKE :like OR
+      p.sku LIKE :like OR
+      p.code LIKE :like OR
+      p.barcode LIKE :like
+    )`);
 
-          return { title: parts.join(" · "), value: Number(p.id), stock };
-        });
-
-        return ok(res, data);
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn("⚠️ optionsProducts: no pude usar v_stock_by_branch_product, hago fallback. Motivo:", e?.message || e);
+    if (Product) {
+      if (hasAttr(Product, "is_active")) {
+        whereParts.push("(p.id IS NULL OR p.is_active = 1)");
       }
     }
 
-    // ✅ Fallback a Product directo (sin stock)
-    const where = {};
+    const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
-    if (branchId && hasAttr(Product, "branch_id")) where.branch_id = branchId;
-    if (hasAttr(Product, "is_active")) where.is_active = 1;
+    const sql = `
+      SELECT
+        x.product_id AS id,
+        x.name AS name,
+        x.sku AS sku,
+        x.barcode AS barcode
+      FROM (
+        SELECT
+          si.product_id AS product_id,
+          COALESCE(NULLIF(MAX(p.name), ''), NULLIF(MAX(p.title), ''), NULLIF(MAX(si.product_name_snapshot), ''), CONCAT('Producto #', si.product_id)) AS name,
+          COALESCE(NULLIF(MAX(p.sku), ''), NULLIF(MAX(p.code), ''), NULLIF(MAX(si.product_sku_snapshot), '')) AS sku,
+          COALESCE(NULLIF(MAX(p.barcode), ''), NULLIF(MAX(si.product_barcode_snapshot), '')) AS barcode,
+          MAX(s.id) AS last_sale_id
+        FROM ${itemsTable} si
+        INNER JOIN ${salesTable} s ON s.id = si.sale_id
+        LEFT JOIN ${productsTable} p ON p.id = si.product_id
+        ${whereSql}
+        GROUP BY si.product_id
+      ) x
+      ORDER BY x.name ASC, x.last_sale_id DESC
+      LIMIT :limit
+    `;
 
-    const cols = [];
-    if (hasAttr(Product, "name")) cols.push("name");
-    if (hasAttr(Product, "title")) cols.push("title");
-    if (hasAttr(Product, "sku")) cols.push("sku");
-    if (hasAttr(Product, "barcode")) cols.push("barcode");
-    if (hasAttr(Product, "code")) cols.push("code");
+    const [rows] = await sequelize.query(sql, { replacements: repl });
 
-    const qWhere = cols.length ? likeWhereDynamic(q, cols) : null;
-    if (qWhere) Object.assign(where, qWhere);
-
-    const attrs = ["id"];
-    if (hasAttr(Product, "name")) attrs.push("name");
-    if (hasAttr(Product, "title")) attrs.push("title");
-    if (hasAttr(Product, "sku")) attrs.push("sku");
-    if (hasAttr(Product, "code")) attrs.push("code");
-    if (hasAttr(Product, "barcode")) attrs.push("barcode");
-    if (hasAttr(Product, "track_stock")) attrs.push("track_stock");
-
-    const order = [];
-    if (hasAttr(Product, "name")) order.push(["name", "ASC"]);
-    order.push(["id", "DESC"]);
-
-    const rows = await Product.findAll({ where, limit, order, attributes: attrs });
-
-    const data = rows.map((p) => {
-      const name = p.name || p.title || `Producto #${p.id}`;
-      const sku = p.sku || p.code || "";
+    const data = (rows || []).map((p) => {
+      const name = p.name || `Producto #${p.id}`;
+      const sku = p.sku || "";
       const bc = p.barcode || "";
-      const trackTxt = hasAttr(Product, "track_stock")
-        ? (String(p.track_stock || 0) === "1" ? "Con control stock" : "Sin control stock")
-        : "";
 
-      const parts = [name, sku ? `SKU: ${sku}` : "", bc ? `BAR: ${bc}` : "", trackTxt].filter(Boolean);
-      return { title: parts.join(" · "), value: p.id };
+      const parts = [
+        name,
+        sku ? `SKU: ${sku}` : "",
+        bc ? `BAR: ${bc}` : "",
+      ].filter(Boolean);
+
+      return {
+        title: parts.join(" · "),
+        value: Number(p.id),
+      };
     });
 
     return ok(res, data);

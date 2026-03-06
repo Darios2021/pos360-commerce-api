@@ -1,28 +1,17 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/posSales.controller.js
 // ✅ ROBUSTO + DB MATCH
+//
+// FIX IMPORTANTE AHORA:
+// ✅ filtro producto acepta SIEMPRE:
+//    - product
+//    - product_id
+//    - productId
+// ✅ mismo criterio en:
+//    - GET /pos/sales
+//    - GET /pos/sales/stats
+//
 // NOTA: sale_refunds es VIEW => SOLO LECTURA
-//
-// FIX HOY (TU CASO REAL):
-// ✅ payments venían “recortados” => la UI NO podía detectar SJCREDIT / cuotas
-// ✅ Ahora SIEMPRE devolvemos en payments: reference + installments + note + paid_at + timestamps
-//
-// ✅ FIX IMPORTANTE (tu DB real):
-// - Soportar métodos: CASH, TRANSFER, CARD, QR, MERCADOPAGO, CREDIT_SJT, OTHER
-// - Stats / filtros / normalización ya contemplan MERCADOPAGO + CREDIT_SJT
-//
-// Incluye:
-// - GET /pos/sales (listSales) con filtros robustos SIN duplicar (payments separate)
-// - GET /pos/sales/stats (statsSales) bruto/neto + refunds + net_by_method ✅
-// - GET /pos/sales/:id (getSaleById) sale + refunds(view) + exchanges
-// - GET /pos/sales/:id/refunds (listRefundsBySale) ✅ desde VIEW
-// - GET /pos/sales/:id/exchanges (listExchangesBySale)
-// - DELETE /pos/sales/:id (deleteSale)
-// - POST /pos/sales/:id/refunds (createRefund) ✅ robusto (intenta insertar method real y si DB no lo acepta, cae a OTHER + meta en note)
-// - POST /pos/sales/:id/exchanges (createExchange) ✅ idem
-//
-// ⚠️ IMPORTANTE:
-// - NO duplicamos createSale acá para no pisar el flujo POS: el alta de venta POS vive en pos.controller.js (createSale).
 
 const { Op, literal } = require("sequelize");
 const {
@@ -34,7 +23,7 @@ const {
   Warehouse,
   Branch,
   User,
-  SaleRefund, // VIEW (solo lectura)
+  SaleRefund,
   SaleExchange,
 } = require("../models");
 
@@ -59,9 +48,6 @@ function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
-/* ============================================================
-   ✅ FIX: payments completos SIEMPRE
-============================================================ */
 const PAYMENTS_ATTRS_FULL = [
   "id",
   "sale_id",
@@ -75,37 +61,27 @@ const PAYMENTS_ATTRS_FULL = [
   "updated_at",
 ];
 
-/**
- * ✅ Normaliza métodos (acepta enum DB + labels UI)
- * DB:
- * - CASH, TRANSFER, CARD, QR, MERCADOPAGO, CREDIT_SJT, OTHER
- * UI (posible):
- * - EFECTIVO, TRANSFERENCIA, TARJETA, MP, MERCADOPAGO, SAN JUAN CREDITO, etc.
- */
 function normalizePayMethod(v) {
   const x = String(v || "").trim().toUpperCase();
   if (!x) return "";
 
-  // Mapeos UI ES -> enum DB
   if (x === "EFECTIVO") return "CASH";
   if (x === "TRANSFERENCIA") return "TRANSFER";
   if (x === "TARJETA") return "CARD";
   if (x === "OTRO" || x === "OTROS") return "OTHER";
 
-  // Alias MercadoPago
   if (x === "MP" || x === "MERCADO PAGO" || x === "MERCADO_PAGO") return "MERCADOPAGO";
 
-  // Alias Crédito SJT
   if (
     x === "SJCREDIT" ||
     x === "SJ_CREDIT" ||
     x === "SANJUANCREDITO" ||
     x === "CRÉDITO SAN JUAN" ||
     x === "CREDITO SAN JUAN"
-  )
+  ) {
     return "CREDIT_SJT";
+  }
 
-  // Mapeos comunes
   if (x === "DEBIT" || x === "CREDIT") return "CARD";
 
   return x;
@@ -133,9 +109,6 @@ function normalizeRefundMethod(v) {
   return allowed.has(m) ? m : "OTHER";
 }
 
-/**
- * 🔐 Obtiene user_id desde middleware o JWT (fallback)
- */
 function getAuthUserId(req) {
   const candidates = [
     req?.user?.id,
@@ -188,9 +161,6 @@ function getAuthUserId(req) {
   }
 }
 
-/**
- * ✅ branch_id desde el usuario/contexto
- */
 function getAuthBranchId(req) {
   return (
     toInt(req?.ctx?.branchId, 0) ||
@@ -234,11 +204,6 @@ function isAdminReq(req) {
   return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
 }
 
-/**
- * ✅ Permiso para post-venta:
- * - admin, o
- * - el mismo user_id (cajero/vendedor) de la venta
- */
 function canPostSale(req, sale) {
   if (isAdminReq(req)) return true;
   const uid = getAuthUserId(req);
@@ -295,9 +260,19 @@ function getTableName(model, fallback) {
   }
 }
 
-/**
- * ✅ Base where: branch/status/from/to/q + seller_id + customer
- */
+/* ============================================================
+   ✅ NUEVO: leer product/product_id/productId siempre
+============================================================ */
+function readProductFilter(req) {
+  const raw =
+    req?.query?.product_id ??
+    req?.query?.productId ??
+    req?.query?.product ??
+    "";
+
+  return String(raw || "").trim();
+}
+
 function buildWhereFromQuery(req) {
   const admin = isAdminReq(req);
 
@@ -309,7 +284,6 @@ function buildWhereFromQuery(req) {
 
   const where = {};
 
-  // branch
   if (admin) {
     const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
     if (requested > 0) where.branch_id = requested;
@@ -331,11 +305,9 @@ function buildWhereFromQuery(req) {
   else if (from) where.sold_at = { [Op.gte]: from };
   else if (to) where.sold_at = { [Op.lte]: to };
 
-  // seller
   const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
   if (seller_id > 0) where.user_id = seller_id;
 
-  // customer
   const customer = req.query.customer;
   if (customer != null && String(customer).trim()) {
     const cStr = String(customer).trim();
@@ -356,7 +328,6 @@ function buildWhereFromQuery(req) {
     }
   }
 
-  // q (buscador general)
   if (q) {
     const qNum = toFloat(q, NaN);
     where[Op.or] = [
@@ -376,14 +347,9 @@ function buildWhereFromQuery(req) {
   return { ok: true, where };
 }
 
-/**
- * ✅ List filters SIN duplicar por joins:
- * - pay_method: EXISTS payments
- * - product: EXISTS sale_items
- */
 function injectExistsFiltersIntoWhere(where, req) {
   const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
-  const product = String(req.query.product || "").trim();
+  const product = readProductFilter(req);
 
   const payTable = getTableName(Payment, "payments");
   const itemsTable = getTableName(SaleItem, "sale_items");
@@ -465,8 +431,6 @@ async function listSales(req, res, next) {
       });
     }
 
-    // ✅ CRÍTICO: payments hasMany => separate para NO duplicar filas ni romper paginado
-    // ✅ FIX: attributes completos para que UI vea reference/installments/note
     if (Payment && salePaymentsAs) {
       include.push({
         model: Payment,
@@ -478,7 +442,6 @@ async function listSales(req, res, next) {
       });
     }
 
-    // ✅ items hasMany => separate para poder mostrar PRODUCTOS sin romper paginado
     if (SaleItem && saleItemsAs) {
       include.push({
         model: SaleItem,
@@ -519,14 +482,6 @@ async function listSales(req, res, next) {
   }
 }
 
-/**
- * ✅ Stats:
- * - total vendido NETO (SUM(total) - SUM(refunds))
- * - total cobrado NETO (SUM(paid_total) - SUM(refunds))
- * - payments_by_method BRUTO (payments)
- * - refunds_by_method (sale_refunds.refund_method)
- * - net_by_method = payments_by_method - refunds_by_method ✅
- */
 async function statsSales(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
@@ -584,15 +539,13 @@ async function statsSales(req, res, next) {
       conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
     }
 
-    // ✅ FIX: alias seguros para NO chocar con sqlPayments (que usa p)
     const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
     if (pay_method) {
       repl.pay_method = pay_method;
       conds.push(`EXISTS (SELECT 1 FROM ${payTable} p2 WHERE p2.sale_id = s.id AND UPPER(p2.method) = :pay_method)`);
     }
 
-    // ✅ FIX: alias seguros para NO chocar si más adelante agregás joins con si
-    const product = String(req.query.product || "").trim();
+    const product = readProductFilter(req);
     if (product) {
       const pNum = toInt(product, 0);
       if (pNum > 0) {
@@ -613,7 +566,6 @@ async function statsSales(req, res, next) {
 
     const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
-    // refunds agregados por sale_id (para netear totals)
     const refundsJoin = `
       LEFT JOIN (
         SELECT r.sale_id, COALESCE(SUM(r.amount),0) AS refunds_sum
@@ -635,7 +587,6 @@ async function statsSales(req, res, next) {
       ${whereSql}
     `;
 
-    // payments by method (BRUTO)
     const sqlPayments = `
       SELECT
         UPPER(p.method) AS method,
@@ -647,7 +598,6 @@ async function statsSales(req, res, next) {
       ORDER BY UPPER(p.method) ASC
     `;
 
-    // refunds by method (sale_refunds VIEW)
     const sqlRefundsByMethod = `
       SELECT
         COALESCE(UPPER(r.refund_method), 'OTHER') AS method,
@@ -677,7 +627,6 @@ async function statsSales(req, res, next) {
       refundsByMethod[k] = Number(r.amount_sum || 0);
     }
 
-    // net_by_method = payments - refunds
     const allKeys = new Set([
       ...Object.keys(paymentsByMethod),
       ...Object.keys(refundsByMethod),
@@ -701,13 +650,9 @@ async function statsSales(req, res, next) {
       ok: true,
       data: {
         sales_count: toInt(t.sales_count, 0),
-
-        // NETOS
         total_sum: Number(t.total_sum || 0),
         paid_sum: Number(t.paid_sum || 0),
         refunds_sum: Number(t.refunds_sum || 0),
-
-        // BRUTOS
         gross_total_sum: Number(t.gross_total_sum || 0),
         gross_paid_sum: Number(t.gross_paid_sum || 0),
 
@@ -772,7 +717,6 @@ async function getSaleById(req, res, next) {
       include.push({ model: User, as: saleUserAs, required: false, attributes: pickUserAttributes() });
     if (SaleItem && saleItemsAs) include.push({ model: SaleItem, as: saleItemsAs, required: false });
 
-    // ✅ FIX: payments completos en detalle también
     if (Payment && salePaymentsAs)
       include.push({
         model: Payment,
@@ -806,13 +750,11 @@ async function getSaleById(req, res, next) {
       }
     }
 
-    // Refunds desde VIEW
     let refunds = [];
     if (SaleRefund) {
       refunds = await SaleRefund.findAll({ where: { sale_id: id }, order: [["created_at", "DESC"]] });
     }
 
-    // Exchanges
     let exchanges = [];
     if (SaleExchange) {
       exchanges = await SaleExchange.findAll({
@@ -827,9 +769,6 @@ async function getSaleById(req, res, next) {
   }
 }
 
-// ============================
-// GET /api/v1/pos/sales/:id/refunds
-// ============================
 async function listRefundsBySale(req, res, next) {
   try {
     const sale_id = toInt(req.params.id, 0);
@@ -850,16 +789,12 @@ async function listRefundsBySale(req, res, next) {
     }
 
     const data = SaleRefund ? await SaleRefund.findAll({ where: { sale_id }, order: [["created_at", "DESC"]] }) : [];
-
     return res.json({ ok: true, data });
   } catch (e) {
     next(e);
   }
 }
 
-// ============================
-// GET /api/v1/pos/sales/:id/exchanges
-// ============================
 async function listExchangesBySale(req, res, next) {
   try {
     const sale_id = toInt(req.params.id, 0);
@@ -892,9 +827,6 @@ async function listExchangesBySale(req, res, next) {
   }
 }
 
-/* ============================================================
-   ✅ HELPERS BLINDADOS para INSERT según columnas reales
-============================================================ */
 function safeJsonParse(s) {
   try {
     const x = JSON.parse(String(s || ""));
@@ -1044,9 +976,6 @@ async function insertSaleExchange({
   return true;
 }
 
-// ============================
-// POST /api/v1/pos/sales/:id/refunds
-// ============================
 async function createRefund(req, res) {
   const t = await sequelize.transaction();
   try {
@@ -1086,7 +1015,6 @@ async function createRefund(req, res) {
     const note = String(req.body?.note || "").trim() || null;
     const reference = String(req.body?.reference || "").trim() || null;
 
-    // total ya devuelto (VIEW)
     const refundsTable = getTableName(SaleRefund, "sale_refunds");
     const [rf] = await sequelize.query(
       `SELECT COALESCE(SUM(r.amount),0) AS refunded_sum FROM ${refundsTable} r WHERE r.sale_id = :sale_id`,
@@ -1109,7 +1037,6 @@ async function createRefund(req, res) {
 
     const created_by = getAuthUserId(req) || null;
 
-    // 1) sale_returns
     const return_id = await insertSaleReturn({
       sale_id,
       amount,
@@ -1129,7 +1056,6 @@ async function createRefund(req, res) {
       });
     }
 
-    // 2) sale_return_payments (intento con methodWanted; si DB enum no lo acepta => fallback a OTHER + meta)
     const baseNote = note || null;
     let payMethodToInsert = methodWanted;
     let payNoteToInsert = baseNote;
@@ -1144,7 +1070,6 @@ async function createRefund(req, res) {
         transaction: t,
       });
     } catch (e) {
-      // fallback robusto: OTHER y guardamos el método deseado en note JSON
       payMethodToInsert = "OTHER";
       payNoteToInsert = mergeNote(baseNote, { wanted_method: methodWanted });
       await insertSaleReturnPayment({
@@ -1157,7 +1082,6 @@ async function createRefund(req, res) {
       });
     }
 
-    // 3) items opcionales
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length) {
       for (const it of items) {
@@ -1205,7 +1129,6 @@ async function createRefund(req, res) {
       }
     }
 
-    // 4) status REFUNDED si quedó total
     const newRefunded = refundedSum + amount;
     const fullyRefunded = newRefunded >= paidTotal - 0.00001;
     if (fullyRefunded && Sale?.rawAttributes?.status) {
@@ -1245,10 +1168,6 @@ async function createRefund(req, res) {
   }
 }
 
-/**
- * ✅ Util: stock check vía v_stock_by_branch_product (columna qty)
- * Solo cuando product.track_stock=1 (si existe la columna)
- */
 async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
   if (!items.length) return;
 
@@ -1301,9 +1220,6 @@ async function assertStockAvailableOrThrow({ branch_id, items, transaction }) {
   }
 }
 
-// ============================
-// POST /api/v1/pos/sales/:id/exchanges
-// ============================
 async function createExchange(req, res) {
   const t = await sequelize.transaction();
   try {
@@ -1398,10 +1314,8 @@ async function createExchange(req, res) {
 
     const created_by = getAuthUserId(req) || null;
 
-    // Reintegro del cambio (solo si diff < 0)
     const refund_amount = diff < 0 ? Math.abs(diff) : 0;
 
-    // 1) sale_returns (auditoría del cambio)
     const return_id = await insertSaleReturn({
       sale_id: original_sale_id,
       amount: refund_amount,
@@ -1417,7 +1331,6 @@ async function createExchange(req, res) {
       return res.status(500).json({ ok: false, code: "RETURN_INSERT_FAILED", message: "No se pudo crear sale_returns (cambio)" });
     }
 
-    // 2) sale_return_items (lo que vuelve)
     for (const it of normReturnItems) {
       const line_total = Math.max(0, it.qty * it.unit_price);
       await insertSaleReturnItem({
@@ -1432,7 +1345,6 @@ async function createExchange(req, res) {
       });
     }
 
-    // 3) sale_return_payments (solo si hay reintegro)
     if (refund_amount > 0) {
       let payMethodToInsert = methodWanted;
       let payNoteToInsert = note || null;
@@ -1460,7 +1372,6 @@ async function createExchange(req, res) {
       }
     }
 
-    // 4) Nueva venta por lo que se lleva
     const sold_at = nowDate();
     const status = "PAID";
 
@@ -1487,7 +1398,6 @@ async function createExchange(req, res) {
       { transaction: t }
     );
 
-    // snapshots desde Product
     const takeIds = [...new Set(normTakeItems.map((x) => x.product_id))];
     const prods = await Product.findAll({
       where: { id: takeIds },
@@ -1514,7 +1424,6 @@ async function createExchange(req, res) {
       { transaction: t }
     );
 
-    // 5) Si diff>0 => payment en nueva sale (DB enum)
     if (diff > 0) {
       await Payment.create(
         { sale_id: newSale.id, method: normalizeCardMappedMethod(methodWanted), amount: diff, paid_at: sold_at, reference, note },
@@ -1522,7 +1431,6 @@ async function createExchange(req, res) {
       );
     }
 
-    // 6) sale_exchanges
     await insertSaleExchange({
       original_sale_id,
       return_id,
@@ -1571,9 +1479,6 @@ async function createExchange(req, res) {
   }
 }
 
-// ============================
-// DELETE /api/v1/pos/sales/:id
-// ============================
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
