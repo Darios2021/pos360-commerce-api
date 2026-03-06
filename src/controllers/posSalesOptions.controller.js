@@ -9,11 +9,12 @@
 // Respuesta:
 // { ok:true, data:[ { title, value, stock? } ] }
 //
-// FIX AHORA:
-// ✅ /products devuelve PRODUCTOS VENDIDOS DE VERDAD (sale_items)
+// FIX REAL:
+// ✅ /products ahora devuelve PRODUCTOS VENDIDOS DE VERDAD
+// ✅ usa sale_items + sales (+ products opcional)
 // ✅ respeta branch_id
-// ✅ busca por snapshots + producto actual
-// ✅ evita mostrar catálogo entero que nunca apareció en ventas
+// ✅ usa nombres reales de tabla con getTableName
+// ✅ fallback robusto si el SQL principal falla
 
 const { Op } = require("sequelize");
 const models = require("../models");
@@ -245,12 +246,7 @@ async function optionsCustomers(req, res) {
 }
 
 /**
- * PRODUCTS:
- * ✅ Devuelve productos vendidos de verdad.
- * Busca desde sale_items (+ sales para sucursal) y enriquece con products.
- */
-/**
- * PRODUCTS (vendidos): busca productos que aparecen en ventas
+ * PRODUCTS: devuelve productos que APARECEN EN VENTAS
  * query: q, limit, branch_id (opcional)
  */
 async function optionsProducts(req, res) {
@@ -260,57 +256,177 @@ async function optionsProducts(req, res) {
     const branchId = toInt(req.query.branch_id, 0) || null;
 
     const sequelize = models?.sequelize;
+    const Product = pickModel("Product", "Products", "Producto", "Productos");
+    const Sale = pickModel("Sale", "Sales", "PosSale", "PosSales");
+    const SaleItem = pickModel("SaleItem", "SaleItems", "PosSaleItem", "PosSaleItems");
+
     if (!sequelize) return fail(res, 500, "Sequelize no disponible");
+    if (!Sale || !SaleItem) {
+      return fail(res, 501, "Modelos Sale/SaleItem no disponibles para optionsProducts");
+    }
+
+    const salesTable = getTableName(Sale, "sales");
+    const saleItemsTable = getTableName(SaleItem, "sale_items");
+    const productsTable = Product ? getTableName(Product, "products") : "products";
 
     const term = normStr(q);
     const like = `%${term}%`;
 
-    const sql = `
-      SELECT DISTINCT
-        si.product_id AS id,
-        COALESCE(si.product_name_snapshot, p.name, p.title) AS name,
-        COALESCE(si.product_sku_snapshot, p.sku, p.code) AS sku,
-        COALESCE(si.product_barcode_snapshot, p.barcode) AS barcode
-      FROM sale_items si
-      LEFT JOIN products p ON p.id = si.product_id
-      LEFT JOIN sales s ON s.id = si.sale_id
-      WHERE
-        (:branch_id = 0 OR s.branch_id = :branch_id)
-        AND (
-          :term = '' OR
-          si.product_name_snapshot LIKE :like OR
-          si.product_sku_snapshot LIKE :like OR
-          si.product_barcode_snapshot LIKE :like OR
-          p.name LIKE :like OR
-          p.sku LIKE :like
-        )
-      ORDER BY name ASC
-      LIMIT :limit
-    `;
+    // =========================================================
+    // 1) SQL principal robusto
+    // =========================================================
+    try {
+      const sql = `
+        SELECT
+          x.id,
+          x.name,
+          x.sku,
+          x.barcode
+        FROM (
+          SELECT
+            si.product_id AS id,
+            COALESCE(
+              NULLIF(MAX(si.product_name_snapshot), ''),
+              NULLIF(MAX(p.name), ''),
+              NULLIF(MAX(p.title), ''),
+              CONCAT('Producto #', si.product_id)
+            ) AS name,
+            COALESCE(
+              NULLIF(MAX(si.product_sku_snapshot), ''),
+              NULLIF(MAX(p.sku), ''),
+              NULLIF(MAX(p.code), '')
+            ) AS sku,
+            COALESCE(
+              NULLIF(MAX(si.product_barcode_snapshot), ''),
+              NULLIF(MAX(p.barcode), '')
+            ) AS barcode,
+            MAX(s.id) AS last_sale_id
+          FROM ${saleItemsTable} si
+          INNER JOIN ${salesTable} s
+            ON s.id = si.sale_id
+          LEFT JOIN ${productsTable} p
+            ON p.id = si.product_id
+          WHERE
+            (:branch_id = 0 OR s.branch_id = :branch_id)
+            AND (
+              :term = '' OR
+              si.product_name_snapshot LIKE :like OR
+              si.product_sku_snapshot LIKE :like OR
+              si.product_barcode_snapshot LIKE :like OR
+              p.name LIKE :like OR
+              p.title LIKE :like OR
+              p.sku LIKE :like OR
+              p.code LIKE :like OR
+              p.barcode LIKE :like
+            )
+            ${Product && hasAttr(Product, "is_active") ? "AND (p.id IS NULL OR p.is_active = 1)" : ""}
+          GROUP BY si.product_id
+        ) x
+        ORDER BY x.name ASC, x.last_sale_id DESC
+        LIMIT :limit
+      `;
 
-    const [rows] = await sequelize.query(sql, {
-      replacements: {
-        branch_id: branchId,
-        term,
-        like,
-        limit,
-      },
+      const [rows] = await sequelize.query(sql, {
+        replacements: {
+          branch_id: branchId || 0,
+          term,
+          like,
+          limit,
+        },
+      });
+
+      const data = (rows || []).map((p) => {
+        const parts = [
+          p.name || `Producto #${p.id}`,
+          p.sku ? `SKU: ${p.sku}` : "",
+          p.barcode ? `BAR: ${p.barcode}` : "",
+        ].filter(Boolean);
+
+        return {
+          title: parts.join(" · "),
+          value: Number(p.id),
+        };
+      });
+
+      return ok(res, data);
+    } catch (sqlErr) {
+      console.warn("⚠️ optionsProducts SQL principal falló, voy a fallback:", sqlErr?.message || sqlErr);
+    }
+
+    // =========================================================
+    // 2) Fallback con Sequelize sobre sale_items
+    // =========================================================
+    const whereSale = {};
+    if (branchId && hasAttr(Sale, "branch_id")) whereSale.branch_id = branchId;
+
+    const saleRows = await Sale.findAll({
+      where: whereSale,
+      attributes: ["id"],
+      order: [["id", "DESC"]],
+      limit: 500,
     });
 
-    const data = (rows || []).map((p) => {
+    const saleIds = saleRows.map((s) => Number(s.id)).filter((n) => Number.isFinite(n) && n > 0);
+    if (!saleIds.length) return ok(res, []);
+
+    const saleItemAttrs = ["product_id"];
+    if (hasAttr(SaleItem, "product_name_snapshot")) saleItemAttrs.push("product_name_snapshot");
+    if (hasAttr(SaleItem, "product_sku_snapshot")) saleItemAttrs.push("product_sku_snapshot");
+    if (hasAttr(SaleItem, "product_barcode_snapshot")) saleItemAttrs.push("product_barcode_snapshot");
+    if (hasAttr(SaleItem, "sale_id")) saleItemAttrs.push("sale_id");
+    if (hasAttr(SaleItem, "id")) saleItemAttrs.push("id");
+
+    const whereItems = { sale_id: { [Op.in]: saleIds } };
+
+    if (term) {
+      const ors = [];
+      if (hasAttr(SaleItem, "product_name_snapshot")) {
+        ors.push({ product_name_snapshot: { [Op.like]: like } });
+      }
+      if (hasAttr(SaleItem, "product_sku_snapshot")) {
+        ors.push({ product_sku_snapshot: { [Op.like]: like } });
+      }
+      if (hasAttr(SaleItem, "product_barcode_snapshot")) {
+        ors.push({ product_barcode_snapshot: { [Op.like]: like } });
+      }
+      if (ors.length) whereItems[Op.or] = ors;
+    }
+
+    const itemRows = await SaleItem.findAll({
+      where: whereItems,
+      attributes: saleItemAttrs,
+      order: [["id", "DESC"]],
+      limit: limit * 20,
+    });
+
+    const seen = new Set();
+    const out = [];
+
+    for (const it of itemRows) {
+      const pid = Number(it.product_id || 0);
+      if (!Number.isFinite(pid) || pid <= 0) continue;
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+
+      const name = String(it.product_name_snapshot || "").trim() || `Producto #${pid}`;
+      const sku = String(it.product_sku_snapshot || "").trim();
+      const barcode = String(it.product_barcode_snapshot || "").trim();
+
       const parts = [
-        p.name || `Producto #${p.id}`,
-        p.sku ? `SKU: ${p.sku}` : "",
-        p.barcode ? `BAR: ${p.barcode}` : "",
+        name,
+        sku ? `SKU: ${sku}` : "",
+        barcode ? `BAR: ${barcode}` : "",
       ].filter(Boolean);
 
-      return {
+      out.push({
         title: parts.join(" · "),
-        value: Number(p.id),
-      };
-    });
+        value: pid,
+      });
 
-    return ok(res, data);
+      if (out.length >= limit) break;
+    }
+
+    return ok(res, out);
   } catch (e) {
     return fail(res, 500, e?.message || "Error optionsProducts", e);
   }
