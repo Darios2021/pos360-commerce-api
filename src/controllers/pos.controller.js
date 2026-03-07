@@ -633,33 +633,102 @@ async function createSale(req, res) {
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
+    // ✅ DEBUG REAL: ver exactamente qué llega al backend
+    console.log("[POS][createSale][body]", JSON.stringify(body, null, 2));
+
     // ======================================================
-    // ✅ Cliente: soportar dos formatos
+    // ✅ Cliente: soporte ULTRA ROBUSTO
+    // - top-level
+    // - body.customer
+    // - body.extra.customer
+    // - payments[0] fallback
     // ======================================================
     const extra = body.extra && typeof body.extra === "object" ? body.extra : {};
-    const c = extra.customer && typeof extra.customer === "object" ? extra.customer : body.customer || {};
+    const c =
+      extra.customer && typeof extra.customer === "object"
+        ? extra.customer
+        : body.customer && typeof body.customer === "object"
+          ? body.customer
+          : {};
 
-    const first = String(c.first_name || "").trim();
-    const last = String(c.last_name || "").trim();
-    const fullName = String(`${first} ${last}`.trim());
+    const p0 = payments[0] && typeof payments[0] === "object" ? payments[0] : {};
+
+    function pickFirst(...vals) {
+      for (const v of vals) {
+        const s = String(v ?? "").trim();
+        if (s) return s;
+      }
+      return "";
+    }
+
+    function normalizePhone(v) {
+      const s = String(v ?? "").trim();
+      if (!s) return "";
+      return s.replace(/[^\d+]/g, "");
+    }
+
+    const first = pickFirst(c.first_name, c.firstname, c.firstName, c.nombre);
+    const last = pickFirst(c.last_name, c.lastname, c.lastName, c.apellido);
+    const fullName = `${first} ${last}`.trim();
 
     const customer_name =
-      String(body.customer_name || "").trim() || fullName || String(c.name || "").trim() || "Consumidor Final";
-
-    const customer_phone =
-      String(body.customer_phone || "").trim() ||
-      String(c.phone || "").trim() ||
-      String(c.whatsapp || "").trim() ||
-      null;
+      pickFirst(
+        body.customer_name,
+        c.customer_name,
+        c.name,
+        c.full_name,
+        c.fullName,
+        c.razon_social,
+        c.razonSocial,
+        fullName,
+        p0.customer_name
+      ) || "Consumidor Final";
 
     const customer_doc =
-      String(body.customer_doc || "").trim() ||
-      String(c.doc || "").trim() ||
-      String(c.dni || "").trim() ||
-      String(c.cuit || "").trim() ||
-      null;
+      pickFirst(
+        body.customer_doc,
+        c.customer_doc,
+        c.doc,
+        c.dni,
+        c.cuit,
+        c.cuil,
+        c.document,
+        c.documento,
+        p0.customer_doc,
+        p0.doc,
+        p0.dni,
+        p0.cuit,
+        p0.cuil
+      ) || null;
+
+    const customer_phone =
+      normalizePhone(
+        pickFirst(
+          body.customer_phone,
+          c.customer_phone,
+          c.phone,
+          c.tel,
+          c.telefono,
+          c.celular,
+          c.mobile,
+          c.whatsapp,
+          c.wa,
+          p0.customer_phone,
+          p0.phone,
+          p0.tel,
+          p0.telefono,
+          p0.whatsapp,
+          p0.wa
+        )
+      ) || null;
 
     const note = body.note || null;
+
+    console.log("[POS][createSale][customer resolved]", {
+      customer_name,
+      customer_doc,
+      customer_phone,
+    });
 
     if (!req.user?.id) {
       logPos(req, "warn", "createSale blocked: unauthorized");
@@ -869,7 +938,14 @@ async function createSale(req, res) {
 
     for (const pay of payments) {
       const amount = toNum(pay.amount);
-      const referenceIncoming = pay.reference || pay.proof || null;
+
+      const referenceIncoming =
+        pay.reference ||
+        pay.proof ||
+        body.reference ||
+        body.proof ||
+        body.payment_reference ||
+        null;
 
       const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method, referenceIncoming);
 
@@ -880,7 +956,6 @@ async function createSale(req, res) {
         });
       }
 
-      // ✅ enum real permitido
       if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"].includes(dbMethod)) {
         throw Object.assign(new Error(`Pago inválido: method=${dbMethod}`), {
           httpStatus: 400,
@@ -888,7 +963,6 @@ async function createSale(req, res) {
         });
       }
 
-      // 🔒 Detectar débito (contado)
       const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
         .trim()
         .toUpperCase();
@@ -901,7 +975,6 @@ async function createSale(req, res) {
         pay.is_debit === true ||
         pay.isDebit === true;
 
-      // ✅ installments según regla
       let installments = 1;
 
       if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
@@ -913,10 +986,11 @@ async function createSale(req, res) {
         installments = 1;
       }
 
-      // ✅ metadata opcional
       const priceBasis = String(pay.price_basis || pay.priceBasis || "").trim().toUpperCase() || null;
       const effectiveBasis =
-        (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT" ? "LIST" : priceBasis || null;
+        (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT"
+          ? "LIST"
+          : priceBasis || null;
 
       const listTotal = toNum(pay.total_list ?? pay.totalList ?? pay.list_total ?? 0, 0) || null;
       const perInstallmentList =
@@ -936,7 +1010,6 @@ async function createSale(req, res) {
 
       totalPaid += amount;
 
-      // ✅ reference: defaults útiles
       let ref = referenceIncoming || null;
       if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
       if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
@@ -949,7 +1022,7 @@ async function createSale(req, res) {
           sale_id: sale.id,
           method: dbMethod,
           amount,
-          installments, // ✅ CAMPO
+          installments,
           reference: ref,
           note: notePay,
           paid_at: new Date(),
