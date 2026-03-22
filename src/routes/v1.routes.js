@@ -27,6 +27,12 @@
 //    - PUBLIC:  GET /public/videos/feed             (sin auth)
 //    - ADMIN:   GET/POST/DELETE/UPLOAD en /admin/products/:id/videos/* (con auth)
 // ✅ OPCIONAL (compat): GET /products/:id/videos (sin auth) como ALIAS al public
+// ✅ NUEVO: CAJA POS
+//    - GET  /api/v1/pos/cash-registers/current
+//    - POST /api/v1/pos/cash-registers/open
+//    - GET  /api/v1/pos/cash-registers/:id/summary
+//    - POST /api/v1/pos/cash-registers/:id/movements
+//    - POST /api/v1/pos/cash-registers/:id/close
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -234,6 +240,9 @@ const dashboardRoutes = loadRoute("./dashboard.routes", { optional: false });
 const posRoutes = loadRoute("./pos.routes", { optional: false });
 const meRoutes = loadRoute("./me.routes", { optional: false });
 
+// ✅ NUEVO: caja POS
+const cashRegistersRoutes = loadRoute("./cashRegisters.routes", { optional: true });
+
 // =========================
 // Admin
 // =========================
@@ -308,6 +317,11 @@ safeUse("/dashboard", requireAuth, dashboardRoutes);
 
 safeUse("/pos", requireAuth, posRoutes);
 safeUse("/me", requireAuth, meRoutes);
+
+// ✅ NUEVO: CAJA (POS)
+if (cashRegistersRoutes) {
+  safeUse("/pos/cash-registers", requireAuth, attachAccessContext, branchContext, cashRegistersRoutes);
+}
 
 // =========================
 // Mount: Admin

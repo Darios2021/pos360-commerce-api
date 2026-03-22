@@ -1,8 +1,9 @@
 // src/models/index.js
-// ✅ COPY-PASTE FINAL
+// ✅ COPY-PASTE FINAL COMPLETO
 // - Subcategory + Product->createdByUser + SaleRefund/SaleExchange
 // - blindado anti-crash + ShopLink opcional
 // - ✅ NUEVO: ProductVideo (opcional) + asociaciones Product ↔ ProductVideo
+// - ✅ NUEVO: CashRegister + CashMovement (opcionales) + asociaciones con Branch/User/Sale
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -71,6 +72,34 @@ try {
 } catch (e) {
   // eslint-disable-next-line no-console
   console.log("⚠️ SaleExchange no cargado (models/SaleExchange.js no encontrado o falló)");
+}
+
+// ===== CAJA =====
+let CashRegister = null;
+let CashMovement = null;
+
+try {
+  CashRegister = require("./CashRegister")(sequelize, DataTypes);
+} catch (e1) {
+  try {
+    CashRegister = require("./cashRegister.model")(sequelize, DataTypes);
+  } catch (e2) {
+    // eslint-disable-next-line no-console
+    console.log("⚠️ CashRegister no cargado (models/CashRegister.js no encontrado o falló)");
+    CashRegister = null;
+  }
+}
+
+try {
+  CashMovement = require("./CashMovement")(sequelize, DataTypes);
+} catch (e1) {
+  try {
+    CashMovement = require("./cashMovement.model")(sequelize, DataTypes);
+  } catch (e2) {
+    // eslint-disable-next-line no-console
+    console.log("⚠️ CashMovement no cargado (models/CashMovement.js no encontrado o falló)");
+    CashMovement = null;
+  }
 }
 
 // ✅ CAMINO B: ShopLink (puede no existir todavía)
@@ -210,6 +239,34 @@ safeBelongsTo(SaleItem, Warehouse, { foreignKey: "warehouse_id", as: "warehouse"
 safeHasMany(Sale, Payment, { foreignKey: "sale_id", as: "payments" });
 safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 
+// ✅ CAJA: CashRegister ↔ Branch/User
+if (CashRegister) {
+  safeBelongsTo(CashRegister, Branch, { foreignKey: "branch_id", as: "branch" });
+  safeHasMany(Branch, CashRegister, { foreignKey: "branch_id", as: "cashRegisters" });
+
+  safeBelongsTo(CashRegister, User, { foreignKey: "opened_by", as: "openedBy" });
+  safeHasMany(User, CashRegister, { foreignKey: "opened_by", as: "openedCashRegisters" });
+
+  safeBelongsTo(CashRegister, User, { foreignKey: "closed_by", as: "closedBy" });
+  safeHasMany(User, CashRegister, { foreignKey: "closed_by", as: "closedCashRegisters" });
+}
+
+// ✅ CAJA: CashMovement ↔ CashRegister/User
+if (CashMovement && CashRegister) {
+  safeBelongsTo(CashMovement, CashRegister, { foreignKey: "cash_register_id", as: "cashRegister" });
+  safeHasMany(CashRegister, CashMovement, { foreignKey: "cash_register_id", as: "movements" });
+}
+if (CashMovement) {
+  safeBelongsTo(CashMovement, User, { foreignKey: "user_id", as: "user" });
+  safeHasMany(User, CashMovement, { foreignKey: "user_id", as: "cashMovements" });
+}
+
+// ✅ VENTAS ↔ CAJA
+if (CashRegister) {
+  safeBelongsTo(Sale, CashRegister, { foreignKey: "cash_register_id", as: "cashRegister" });
+  safeHasMany(CashRegister, Sale, { foreignKey: "cash_register_id", as: "sales" });
+}
+
 // POS EXT: Refunds (VIEW) + Exchanges (TABLE)
 if (SaleRefund) {
   safeBelongsTo(SaleRefund, Sale, { foreignKey: "sale_id", as: "sale" });
@@ -241,7 +298,7 @@ module.exports = {
   Subcategory,
   Product,
   ProductImage,
-  ProductVideo, // ✅ NUEVO
+  ProductVideo,
   Branch,
   Warehouse,
   StockBalance,
@@ -256,6 +313,10 @@ module.exports = {
   // POS EXT
   SaleRefund,
   SaleExchange,
+
+  // CAJA
+  CashRegister,
+  CashMovement,
 
   // Shop
   ShopLink,
