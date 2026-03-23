@@ -349,14 +349,9 @@ async function buildCashRegisterSummary({
     throw err;
   }
 
-  const cashRegister = await CashRegister.findByPk(id, {
-    include: [
-      Branch ? { model: Branch, required: false } : null,
-      User ? { model: User, as: "openedBy", required: false } : null,
-      User ? { model: User, as: "closedBy", required: false } : null,
-    ].filter(Boolean),
-    transaction,
-  });
+const cashRegister = await CashRegister.findByPk(id, {
+  transaction,
+});
 
   if (!cashRegister) {
     const err = new Error("Caja no encontrada.");
