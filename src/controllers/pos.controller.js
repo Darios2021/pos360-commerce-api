@@ -1,36 +1,5 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/pos.controller.js
-//
-// (NO se altera lo que ya funciona: getContext, listProductsForPos, createSale quedan IGUAL en comportamiento)
-// ✅ FIX REAL (POS LIST):
-// - ADMIN_ALL + USER_SCOPE_ALL: cuando in_stock=0 NO debe “perder” productos por INNER JOIN warehouses
-// - Se usa LEFT JOIN + SUM(CASE WHEN ...) para:
-//    - qty = 0 cuando no hay stock_balance
-//    - filtrar stock SOLO si in_stock=1
-// ✅ FIX CLAVE: parseBool robusto (acepta 1/0, true/false, vacío) => evita "total=260 siempre" y globalItems=14
-// ✅ Se mantienen: createSaleReturn (devoluciones) + createSaleExchange (cambios)
-//
-// ✅ FIX ADMIN:
-// - Admin SÍ puede vender y registrar cambios
-// - Si el admin NO tiene branch_id en el usuario, debe venir branch_id/warehouse_id explícito (query/body/ctx) o error claro
-//
-// ✅ NUEVO (Crédito San Juan / cuotas):
-// - Soporta registrar cuotas hasta 12 (installments 1..12)
-// - El cálculo de cuotas se hace con PRECIO LISTA (lo hace el front) y el backend lo REGISTRA:
-//   - Guarda metadata en Payment.note (JSON) con:
-//     { provider_code, installments, price_basis:"LIST", list_total, per_installment_list, card_kind }
-// - Método ecom "credit_sjt" => se guarda en DB como Payment.method = "CREDIT_SJT" (enum real)
-//   + reference="SJCREDIT" + provider_code="credit_sjt"
-//
-// ✅ FIX DB (importante):
-// - payments ahora tiene columna installments INT NOT NULL DEFAULT 1
-// - payments.method enum incluye MERCADOPAGO y CREDIT_SJT (según tu DB real)
-// - MercadoPago / Transfer / Débito => SIEMPRE contado (installments=1)
-// - Cuotas SOLO cuando es TARJETA CRÉDITO (CARD y NO debit) o Crédito San Juan (CREDIT_SJT)
-//
-// ✅ FIX CLAVE PARA TU CASO (por qué seguía OTHER):
-// - Si el front manda method="OTHER" pero reference="SJCREDIT", acá lo interpretamos como CREDIT_SJT.
-// - También aceptamos method="credit_sjt" (string) directo.
 
 const { literal } = require("sequelize");
 const {
@@ -44,6 +13,7 @@ const {
   StockMovementItem,
   Warehouse,
 } = require("../models");
+const { getCurrentOpenCashRegister } = require("../services/cashRegister.service");
 
 /* =========================
    Utils
@@ -88,12 +58,6 @@ function normalizeBranchIds(raw) {
     .filter(Boolean);
 }
 
-/**
- * ✅ Admin robusto:
- * - roles: ["admin"] / ["super_admin"] / ["superadmin"]
- * - role/user_role: "admin" / "super_admin" / "superadmin"
- * - is_admin: true
- */
 function isAdminReq(req) {
   const u = req?.user || {};
   const roles = normalizeRoles(u.roles);
@@ -132,13 +96,9 @@ function logPos(req, level, msg, extra = {}) {
     q_branch_id: req?.query?.branch_id ?? req?.query?.branchId ?? null,
     q_warehouse_id: req?.query?.warehouse_id ?? req?.query?.warehouseId ?? null,
   };
-  // eslint-disable-next-line no-console
   console[level](`[POS] ${msg}`, { ...base, ...extra });
 }
 
-/**
- * ✅ SOLO valores EXPLÍCITOS (query/body).
- */
 function resolveExplicitPosContext(req) {
   const branchId =
     toInt(req?.body?.branch_id, 0) || toInt(req?.query?.branch_id, 0) || toInt(req?.query?.branchId, 0);
@@ -149,9 +109,6 @@ function resolveExplicitPosContext(req) {
   return { branchId, warehouseId };
 }
 
-/**
- * ✅ Resuelve branchId/warehouseId de forma robusta (incluye ctx)
- */
 function resolvePosContext(req) {
   const branchId =
     toInt(req?.body?.branch_id, 0) ||
@@ -191,9 +148,6 @@ async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
   return toInt(w.branch_id, 0) === bid;
 }
 
-/* =========================
-   ✅ NUEVO: cuotas/meta helpers
-========================= */
 function clampInstallments(v, def = 1) {
   const n = toInt(v, def);
   if (!Number.isFinite(n)) return def;
@@ -224,29 +178,15 @@ function mergePaymentNote(existingNote, metaObj) {
   return out;
 }
 
-/* =========================
-   ✅ Método de pago: mapping a enum DB real
-========================= */
-/**
- * payments.method enum esperado: CASH, TRANSFER, CARD, QR, MERCADOPAGO, CREDIT_SJT, OTHER
- *
- * ✅ FIX CLAVE:
- * - si llega method="OTHER" + reference="SJCREDIT" => tratamos como CREDIT_SJT
- * - si llega method vacío pero reference="SJCREDIT" => tratamos como CREDIT_SJT
- */
 function mapPayMethodDetailed(rawMethod, rawReference) {
   const ref = String(rawReference || "").trim().toUpperCase();
   const rawStr = String(rawMethod || "").trim();
   const m = rawStr.toUpperCase();
 
-  // ✅ pista fuerte por reference
   if (ref === "SJCREDIT" || ref === "SJ_CREDIT" || ref === "SANJUANCREDITO") {
     return { dbMethod: "CREDIT_SJT", providerCode: "credit_sjt" };
   }
 
-  // =========================
-  // Crédito San Juan
-  // =========================
   if (
     rawStr === "credit_sjt" ||
     m === "CREDIT_SJT" ||
@@ -258,25 +198,16 @@ function mapPayMethodDetailed(rawMethod, rawReference) {
     return { dbMethod: "CREDIT_SJT", providerCode: "credit_sjt" };
   }
 
-  // =========================
-  // MercadoPago
-  // =========================
   if (m === "MERCADOPAGO" || m === "MERCADO_PAGO" || m === "MERCADO PAGO" || m === "MP") {
     return { dbMethod: "MERCADOPAGO", providerCode: "mercadopago" };
   }
 
-  // =========================
-  // Alias comunes
-  // =========================
   if (m === "EFECTIVO") return { dbMethod: "CASH", providerCode: "cash" };
   if (m === "TRANSFERENCIA") return { dbMethod: "TRANSFER", providerCode: "transfer" };
   if (m === "TARJETA" || m === "CREDITO" || m === "CRÉDITO") return { dbMethod: "CARD", providerCode: "card" };
   if (m === "DEBITO" || m === "DÉBITO") return { dbMethod: "CARD", providerCode: "debit" };
   if (m === "QR") return { dbMethod: "QR", providerCode: "qr" };
 
-  // =========================
-  // ENUM directos DB
-  // =========================
   if (m === "CASH") return { dbMethod: "CASH", providerCode: "cash" };
   if (m === "TRANSFER") return { dbMethod: "TRANSFER", providerCode: "transfer" };
   if (m === "CARD") return { dbMethod: "CARD", providerCode: "card" };
@@ -288,7 +219,6 @@ function mapPayMethodDetailed(rawMethod, rawReference) {
   return { dbMethod: "OTHER", providerCode: rawStr ? rawStr : "other" };
 }
 
-// Back-compat por si alguien llama mapPayMethod()
 function mapPayMethod(raw) {
   return mapPayMethodDetailed(raw, null).dbMethod;
 }
@@ -370,14 +300,11 @@ async function listProductsForPos(req, res) {
 
   try {
     const admin = isAdminReq(req);
-
-    // SOLO explícitos (query/body) para decidir modo
     const explicit = resolveExplicitPosContext(req);
     const requestedBranchId = toInt(explicit.branchId, 0) || 0;
     const requestedWarehouseId = toInt(explicit.warehouseId, 0) || 0;
-
-    // Scope usuario (multi-sucursal)
     const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
+
     if (!admin && !allowedBranchIds.length) {
       return res.status(403).json({
         ok: false,
@@ -386,7 +313,6 @@ async function listProductsForPos(req, res) {
       });
     }
 
-    // Params
     const q = String(req.query.q || "").trim();
     const like = `%${q}%`;
 
@@ -394,7 +320,6 @@ async function listProductsForPos(req, res) {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const offset = (page - 1) * limit;
 
-    // ✅ FIX CLAVE
     const inStock = parseBool(req.query.in_stock, true);
     const sellable = parseBool(req.query.sellable, true);
 
@@ -416,9 +341,6 @@ async function listProductsForPos(req, res) {
         )`
       : "";
 
-    // ======================================================
-    // 1) MODO DEPÓSITO (warehouse_id explícito)
-    // ======================================================
     if (requestedWarehouseId) {
       const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
 
@@ -470,9 +392,6 @@ async function listProductsForPos(req, res) {
       });
     }
 
-    // ======================================================
-    // 2) ADMIN (sin warehouse) => agregado global o por branch
-    // ======================================================
     if (admin) {
       const scopeBranchId = requestedBranchId || 0;
 
@@ -535,9 +454,6 @@ async function listProductsForPos(req, res) {
       });
     }
 
-    // ======================================================
-    // 3) USER (sin warehouse) => agregado SOLO en sus branches
-    // ======================================================
     if (requestedBranchId && !allowedBranchIds.includes(requestedBranchId)) {
       return res.status(403).json({
         ok: false,
@@ -547,7 +463,6 @@ async function listProductsForPos(req, res) {
     }
 
     const scopeBranchIds = requestedBranchId ? [requestedBranchId] : allowedBranchIds;
-
     const qtyExpr = `COALESCE(SUM(CASE WHEN w.branch_id IN (:branchIds) THEN sb.qty ELSE 0 END), 0)`;
     const havingStock = inStock ? `HAVING ${qtyExpr} > 0` : "";
 
@@ -633,16 +548,8 @@ async function createSale(req, res) {
     const items = Array.isArray(body.items) ? body.items : [];
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
-    // ✅ DEBUG REAL: ver exactamente qué llega al backend
     console.log("[POS][createSale][body]", JSON.stringify(body, null, 2));
 
-    // ======================================================
-    // ✅ Cliente: soporte ULTRA ROBUSTO
-    // - top-level
-    // - body.customer
-    // - body.extra.customer
-    // - payments[0] fallback
-    // ======================================================
     const extra = body.extra && typeof body.extra === "object" ? body.extra : {};
     const c =
       extra.customer && typeof extra.customer === "object"
@@ -834,9 +741,15 @@ async function createSale(req, res) {
 
     t = await sequelize.transaction();
 
+    const currentCashRegister = await getCurrentOpenCashRegister({
+      branch_id: resolvedBranchId,
+      transaction: t,
+    });
+
     const sale = await Sale.create(
       {
         branch_id: resolvedBranchId,
+        cash_register_id: currentCashRegister?.id || null,
         user_id: userId,
         status: "PAID",
         sale_number: null,
@@ -930,10 +843,6 @@ async function createSale(req, res) {
       );
     }
 
-    // ======================================================
-    // ✅ PAGOS: guardar method real + installments en columna
-    // FIX: si llega OTHER + reference SJCREDIT => CREDIT_SJT
-    // ======================================================
     let totalPaid = 0;
 
     for (const pay of payments) {
@@ -1041,6 +950,7 @@ async function createSale(req, res) {
 
     logPos(req, "info", "createSale done", {
       sale_id: sale.id,
+      cash_register_id: sale.cash_register_id || null,
       resolvedBranchId,
       resolvedWarehouseId,
       totalPaid,
@@ -1052,6 +962,7 @@ async function createSale(req, res) {
       data: {
         sale_id: sale.id,
         branch_id: sale.branch_id,
+        cash_register_id: sale.cash_register_id || null,
         user_id: sale.user_id,
         warehouse_id: resolvedWarehouseId,
 
@@ -1079,7 +990,7 @@ async function createSale(req, res) {
 }
 
 /* ======================================================================
-   ✅ DEVOLUCIONES + CAMBIOS
+   DEVOLUCIONES + CAMBIOS
    ====================================================================== */
 
 async function assertReturnsTablesExist() {
@@ -1114,9 +1025,6 @@ function calcReturnTotal(items) {
   return Number(total || 0);
 }
 
-/**
- * ✅ POST /api/v1/pos/returns
- */
 async function createSaleReturn(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -1385,9 +1293,6 @@ async function createSaleReturn(req, res) {
   }
 }
 
-/**
- * ✅ POST /api/v1/pos/exchanges
- */
 async function createSaleExchange(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -1454,7 +1359,6 @@ async function createSaleExchange(req, res) {
       }
     }
 
-    // 1) Devolución en la MISMA tx
     const restock = parseBool(returnPayload.restock, true);
     const reason = returnPayload.reason ? String(returnPayload.reason).slice(0, 255) : null;
     const note = returnPayload.note ? String(returnPayload.note).slice(0, 255) : null;
@@ -1644,7 +1548,6 @@ async function createSaleExchange(req, res) {
       await sale.update({ status: "REFUNDED" }, { transaction: t });
     }
 
-    // 2) Nueva venta dentro de tx (igual a createSale, pero sin abrir otra tx)
     const items2 = Array.isArray(newSalePayload.items) ? newSalePayload.items : [];
     const pays2 = Array.isArray(newSalePayload.payments) ? newSalePayload.payments : [];
 
@@ -1716,9 +1619,15 @@ async function createSaleExchange(req, res) {
     let subtotal2 = 0;
     for (const it of normalizedItems2) subtotal2 += it.quantity * it.unit_price;
 
+    const currentCashRegister2 = await getCurrentOpenCashRegister({
+      branch_id: userBranchId,
+      transaction: t,
+    });
+
     const newSale = await Sale.create(
       {
         branch_id: userBranchId,
+        cash_register_id: currentCashRegister2?.id || null,
         user_id: userId,
         status: "PAID",
         sale_number: null,
