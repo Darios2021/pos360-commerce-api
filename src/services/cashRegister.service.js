@@ -336,7 +336,6 @@ async function createManualCashMovement({
     { transaction }
   );
 }
-
 async function buildCashRegisterSummary({
   cash_register_id,
   transaction = null,
@@ -349,9 +348,7 @@ async function buildCashRegisterSummary({
     throw err;
   }
 
-const cashRegister = await CashRegister.findByPk(id, {
-  transaction,
-});
+  const cashRegister = await CashRegister.findByPk(id, { transaction });
 
   if (!cashRegister) {
     const err = new Error("Caja no encontrada.");
@@ -360,44 +357,42 @@ const cashRegister = await CashRegister.findByPk(id, {
     throw err;
   }
 
-  const salesWhere = {
-    cash_register_id: id,
-    status: {
-      [Op.in]: ["PAID", "REFUNDED"],
-    },
-  };
-
-  const movementWhere = {
-    cash_register_id: id,
-  };
-
   const sales = await Sale.findAll({
-    where: salesWhere,
+    where: {
+      cash_register_id: id,
+      status: {
+        [Op.in]: ["PAID", "REFUNDED"],
+      },
+    },
     attributes: ["id", "status", "total", "paid_total", "change_total", "sold_at"],
     transaction,
   });
 
-  const payments = await Payment.findAll({
-    include: [
-      {
-        model: Sale,
-        required: true,
-        attributes: [],
-        where: { cash_register_id: id },
-      },
-    ],
-    attributes: ["id", "sale_id", "method", "amount", "installments", "paid_at"],
-    transaction,
-  });
+  const saleIds = sales.map((s) => toInt(s.id, 0)).filter(Boolean);
+
+  const payments = saleIds.length
+    ? await Payment.findAll({
+        where: {
+          sale_id: {
+            [Op.in]: saleIds,
+          },
+        },
+        attributes: ["id", "sale_id", "method", "amount", "installments", "paid_at"],
+        transaction,
+      })
+    : [];
 
   const movements = await CashMovement.findAll({
-    where: movementWhere,
+    where: {
+      cash_register_id: id,
+    },
     attributes: ["id", "type", "reason", "note", "amount", "happened_at", "user_id"],
     order: [["happened_at", "ASC"], ["id", "ASC"]],
     transaction,
   });
 
   const openingCash = Number(cashRegister.opening_cash || 0);
+
   const manualIn = movements
     .filter((m) => String(m.type) === "IN" && String(m.reason) !== "APERTURA_CAJA")
     .reduce((acc, m) => acc + Number(m.amount || 0), 0);
