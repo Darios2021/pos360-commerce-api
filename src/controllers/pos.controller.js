@@ -834,28 +834,29 @@ async function createSale(req, res) {
 
     t = await sequelize.transaction();
 
-    const sale = await Sale.create(
-      {
-        branch_id: resolvedBranchId,
-        user_id: userId,
-        status: "PAID",
-        sale_number: null,
+   const sale = await Sale.create(
+  {
+    branch_id: resolvedBranchId,
+    warehouse_id: resolvedWarehouseId,
+    user_id: userId,
+    status: "PAID",
+    sale_number: null,
 
-        customer_name,
-        customer_phone,
-        customer_doc,
+    customer_name,
+    customer_phone,
+    customer_doc,
 
-        subtotal,
-        discount_total: 0,
-        tax_total: 0,
-        total: subtotal,
-        paid_total: 0,
-        change_total: 0,
-        note,
-        sold_at: new Date(),
-      },
-      { transaction: t }
-    );
+    subtotal,
+    discount_total: 0,
+    tax_total: 0,
+    total: subtotal,
+    paid_total: 0,
+    change_total: 0,
+    note,
+    sold_at: new Date(),
+  },
+  { transaction: t }
+);
 
     const movement = await StockMovement.create(
       {
