@@ -61,6 +61,16 @@ async function open(req, res) {
     try {
       await t.rollback();
     } catch {}
+
+    console.error("[cashRegisters.open] error:", {
+      message: e?.message,
+      code: e?.code,
+      status: e?.status,
+      data: e?.data,
+      stack: e?.stack,
+      body: req.body,
+    });
+
     return res.status(e.status || 500).json({
       ok: false,
       code: e.code || "CASH_REGISTER_OPEN_ERROR",
@@ -97,6 +107,17 @@ async function addMovement(req, res) {
     try {
       await t.rollback();
     } catch {}
+
+    console.error("[cashRegisters.addMovement] error:", {
+      message: e?.message,
+      code: e?.code,
+      status: e?.status,
+      data: e?.data,
+      stack: e?.stack,
+      body: req.body,
+      params: req.params,
+    });
+
     return res.status(e.status || 500).json({
       ok: false,
       code: e.code || "CASH_MOVEMENT_ERROR",
@@ -116,6 +137,15 @@ async function getSummary(req, res) {
       data: summary,
     });
   } catch (e) {
+    console.error("[cashRegisters.getSummary] error:", {
+      message: e?.message,
+      code: e?.code,
+      status: e?.status,
+      data: e?.data,
+      stack: e?.stack,
+      params: req.params,
+    });
+
     return res.status(e.status || 500).json({
       ok: false,
       code: e.code || "CASH_REGISTER_SUMMARY_ERROR",
@@ -130,6 +160,12 @@ async function close(req, res) {
   try {
     const cash_register_id = req.params.id;
     const closed_by = getAuthUserId(req);
+
+    console.log("[cashRegisters.close] input:", {
+      cash_register_id,
+      closed_by,
+      body: req.body,
+    });
 
     const out = await closeCashRegister({
       cash_register_id,
@@ -150,6 +186,17 @@ async function close(req, res) {
     try {
       await t.rollback();
     } catch {}
+
+    console.error("[cashRegisters.close] error:", {
+      message: e?.message,
+      code: e?.code,
+      status: e?.status,
+      data: e?.data,
+      stack: e?.stack,
+      body: req.body,
+      params: req.params,
+    });
+
     return res.status(e.status || 500).json({
       ok: false,
       code: e.code || "CASH_REGISTER_CLOSE_ERROR",
