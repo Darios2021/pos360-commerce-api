@@ -1,4 +1,3 @@
-// src/controllers/cashRegisters.controller.js
 const {
   sequelize,
   getAuthUserId,
@@ -29,6 +28,7 @@ async function getCurrent(req, res, next) {
       data: cashRegister || null,
     });
   } catch (e) {
+    console.error("[cashRegisters.getCurrent] error:", e);
     next(e);
   }
 }
@@ -38,6 +38,12 @@ async function open(req, res) {
   try {
     const branch_id = getAuthBranchId(req);
     const opened_by = getAuthUserId(req);
+
+    console.log("[cashRegisters.open] input:", {
+      branch_id,
+      opened_by,
+      body: req.body,
+    });
 
     const cashRegister = await openCashRegister({
       branch_id,
@@ -86,6 +92,12 @@ async function addMovement(req, res) {
     const cash_register_id = req.params.id;
     const user_id = getAuthUserId(req);
 
+    console.log("[cashRegisters.addMovement] input:", {
+      cash_register_id,
+      user_id,
+      body: req.body,
+    });
+
     const movement = await createManualCashMovement({
       cash_register_id,
       user_id,
@@ -130,6 +142,11 @@ async function addMovement(req, res) {
 async function getSummary(req, res) {
   try {
     const cash_register_id = req.params.id;
+
+    console.log("[cashRegisters.getSummary] input:", {
+      cash_register_id,
+    });
+
     const summary = await buildCashRegisterSummary({ cash_register_id });
 
     return res.json({
