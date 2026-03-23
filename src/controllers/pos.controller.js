@@ -834,29 +834,28 @@ async function createSale(req, res) {
 
     t = await sequelize.transaction();
 
-   const sale = await Sale.create(
-  {
-    branch_id: resolvedBranchId,
-    warehouse_id: resolvedWarehouseId,
-    user_id: userId,
-    status: "PAID",
-    sale_number: null,
+    const sale = await Sale.create(
+      {
+        branch_id: resolvedBranchId,
+        user_id: userId,
+        status: "PAID",
+        sale_number: null,
 
-    customer_name,
-    customer_phone,
-    customer_doc,
+        customer_name,
+        customer_phone,
+        customer_doc,
 
-    subtotal,
-    discount_total: 0,
-    tax_total: 0,
-    total: subtotal,
-    paid_total: 0,
-    change_total: 0,
-    note,
-    sold_at: new Date(),
-  },
-  { transaction: t }
-);
+        subtotal,
+        discount_total: 0,
+        tax_total: 0,
+        total: subtotal,
+        paid_total: 0,
+        change_total: 0,
+        note,
+        sold_at: new Date(),
+      },
+      { transaction: t }
+    );
 
     const movement = await StockMovement.create(
       {
@@ -1351,7 +1350,7 @@ async function createSaleReturn(req, res) {
           transaction: t,
           replacements: {
             return_id: returnId,
-            method: dbMethod, // si tu enum de sale_return_payments no admite CREDIT_SJT/MERCADOPAGO, lo veremos luego y lo ajustamos
+            method: dbMethod,
             amount,
             reference: referenceIncoming ? String(referenceIncoming).slice(0, 120) : null,
             note: notePay ? String(notePay).slice(0, 255) : null,
@@ -1717,29 +1716,28 @@ async function createSaleExchange(req, res) {
     let subtotal2 = 0;
     for (const it of normalizedItems2) subtotal2 += it.quantity * it.unit_price;
 
-const newSale = await Sale.create(
-  {
-    branch_id: userBranchId,
-    warehouse_id: resolvedWarehouseId2,
-    user_id: userId,
-    status: "PAID",
-    sale_number: null,
+    const newSale = await Sale.create(
+      {
+        branch_id: userBranchId,
+        user_id: userId,
+        status: "PAID",
+        sale_number: null,
 
-    customer_name: customer_name2,
-    customer_phone: customer_phone2,
-    customer_doc: customer_doc2,
+        customer_name: customer_name2,
+        customer_phone: customer_phone2,
+        customer_doc: customer_doc2,
 
-    subtotal: subtotal2,
-    discount_total: 0,
-    tax_total: 0,
-    total: subtotal2,
-    paid_total: 0,
-    change_total: 0,
-    note: note2,
-    sold_at: new Date(),
-  },
-  { transaction: t }
-);
+        subtotal: subtotal2,
+        discount_total: 0,
+        tax_total: 0,
+        total: subtotal2,
+        paid_total: 0,
+        change_total: 0,
+        note: note2,
+        sold_at: new Date(),
+      },
+      { transaction: t }
+    );
 
     const mvOut = await StockMovement.create(
       {
