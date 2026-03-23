@@ -24,6 +24,12 @@ function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
+function toPlain(row) {
+  if (!row) return row;
+  if (typeof row.toJSON === "function") return row.toJSON();
+  return row;
+}
+
 function getAuthUserId(req) {
   const candidates = [
     req?.user?.id,
@@ -336,6 +342,7 @@ async function createManualCashMovement({
     { transaction }
   );
 }
+
 async function buildCashRegisterSummary({
   cash_register_id,
   transaction = null,
@@ -404,19 +411,27 @@ async function buildCashRegisterSummary({
   const paymentsByMethod = {};
   for (const p of payments) {
     const key = upper(p.method) || "OTHER";
-    paymentsByMethod[key] = Number((paymentsByMethod[key] || 0) + Number(p.amount || 0));
+    paymentsByMethod[key] = Number(
+      (paymentsByMethod[key] || 0) + Number(p.amount || 0)
+    );
   }
 
   const cashSales = Number(paymentsByMethod.CASH || 0);
-  const expectedCash = Number((openingCash + manualIn + cashSales - manualOut).toFixed(2));
+  const expectedCash = Number(
+    (openingCash + manualIn + cashSales - manualOut).toFixed(2)
+  );
 
   return {
-    cash_register: cashRegister,
+    cash_register: toPlain(cashRegister),
     totals: {
       opening_cash: openingCash,
       sales_count: sales.length,
-      sales_total: Number(sales.reduce((a, s) => a + Number(s.total || 0), 0).toFixed(2)),
-      paid_total: Number(sales.reduce((a, s) => a + Number(s.paid_total || 0), 0).toFixed(2)),
+      sales_total: Number(
+        sales.reduce((a, s) => a + Number(s.total || 0), 0).toFixed(2)
+      ),
+      paid_total: Number(
+        sales.reduce((a, s) => a + Number(s.paid_total || 0), 0).toFixed(2)
+      ),
       manual_in: Number(manualIn.toFixed(2)),
       manual_out: Number(manualOut.toFixed(2)),
       cash_sales: Number(cashSales.toFixed(2)),
@@ -432,8 +447,8 @@ async function buildCashRegisterSummary({
       other: Number(paymentsByMethod.OTHER || 0),
       raw_by_method: paymentsByMethod,
     },
-    movements,
-    sales,
+    movements: movements.map(toPlain),
+    sales: sales.map(toPlain),
   };
 }
 
@@ -462,31 +477,32 @@ async function closeCashRegister({
     throw err;
   }
 
-  const cashRegister = await CashRegister.findByPk(id, { transaction });
-  if (!cashRegister) {
-    const err = new Error("Caja no encontrada.");
-    err.status = 404;
-    err.code = "CASH_REGISTER_NOT_FOUND";
-    throw err;
-  }
+  try {
+    const cashRegister = await CashRegister.findByPk(id, { transaction });
 
-  if (String(cashRegister.status) !== "OPEN") {
-    const err = new Error("La caja ya está cerrada.");
-    err.status = 409;
-    err.code = "CASH_REGISTER_ALREADY_CLOSED";
-    throw err;
-  }
+    if (!cashRegister) {
+      const err = new Error("Caja no encontrada.");
+      err.status = 404;
+      err.code = "CASH_REGISTER_NOT_FOUND";
+      throw err;
+    }
 
-  const summary = await buildCashRegisterSummary({
-    cash_register_id: id,
-    transaction,
-  });
+    if (String(cashRegister.status) !== "OPEN") {
+      const err = new Error("La caja ya está cerrada.");
+      err.status = 409;
+      err.code = "CASH_REGISTER_ALREADY_CLOSED";
+      throw err;
+    }
 
-  const expectedCash = Number(summary.totals.expected_cash || 0);
-  const differenceCash = Number((closingCash - expectedCash).toFixed(2));
+    const summary = await buildCashRegisterSummary({
+      cash_register_id: id,
+      transaction,
+    });
 
-  await cashRegister.update(
-    {
+    const expectedCash = Number(summary?.totals?.expected_cash || 0);
+    const differenceCash = Number((closingCash - expectedCash).toFixed(2));
+
+    cashRegister.set({
       status: "CLOSED",
       closed_by: userId,
       closing_cash: closingCash,
@@ -494,14 +510,41 @@ async function closeCashRegister({
       closed_at: new Date(),
       expected_cash: expectedCash,
       difference_cash: differenceCash,
-    },
-    { transaction }
-  );
+    });
 
-  return {
-    cash_register: cashRegister,
-    summary,
-  };
+    await cashRegister.save({
+      transaction,
+      fields: [
+        "status",
+        "closed_by",
+        "closing_cash",
+        "closing_note",
+        "closed_at",
+        "expected_cash",
+        "difference_cash",
+      ],
+    });
+
+    const updatedCashRegister = await CashRegister.findByPk(id, { transaction });
+
+    return {
+      cash_register: toPlain(updatedCashRegister),
+      summary,
+    };
+  } catch (e) {
+    console.error("[cashRegister.service.closeCashRegister] error:", {
+      message: e?.message,
+      code: e?.code,
+      status: e?.status,
+      data: e?.data,
+      stack: e?.stack,
+      cash_register_id: id,
+      closed_by: userId,
+      closing_cash: closingCash,
+      closing_note,
+    });
+    throw e;
+  }
 }
 
 module.exports = {
