@@ -316,6 +316,9 @@ async function listProductsForPos(req, res) {
     const q = String(req.query.q || "").trim();
     const like = `%${q}%`;
 
+    const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || null;
+    const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || null;
+
     const limit = Math.min(Math.max(parseInt(req.query.limit || "48", 10), 1), 5000);
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const offset = (page - 1) * limit;
@@ -340,6 +343,8 @@ async function listProductsForPos(req, res) {
           OR p.brand LIKE :like OR p.model LIKE :like
         )`
       : "";
+    const whereCategory = categoryId ? `AND p.category_id = :categoryId` : "";
+    const whereSubcategory = subcategoryId ? `AND p.subcategory_id = :subcategoryId` : "";
 
     if (requestedWarehouseId) {
       const whereStock = inStock ? `AND COALESCE(sb.qty, 0) > 0` : "";
@@ -357,12 +362,23 @@ async function listProductsForPos(req, res) {
           ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
         WHERE p.is_active = 1
         ${whereQ}
+        ${whereCategory}
+        ${whereSubcategory}
         ${whereStock}
         ${whereSellable}
         ORDER BY p.name ASC
         LIMIT :limit OFFSET :offset
         `,
-        { replacements: { warehouseId: requestedWarehouseId, like, limit, offset } }
+        {
+          replacements: {
+            warehouseId: requestedWarehouseId,
+            like,
+            limit,
+            offset,
+            categoryId: categoryId || undefined,
+            subcategoryId: subcategoryId || undefined,
+          },
+        }
       );
 
       const [[countRow]] = await sequelize.query(
@@ -373,10 +389,19 @@ async function listProductsForPos(req, res) {
           ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
         WHERE p.is_active = 1
         ${whereQ}
+        ${whereCategory}
+        ${whereSubcategory}
         ${inStock ? `AND COALESCE(sb.qty,0) > 0` : ""}
         ${whereSellable}
         `,
-        { replacements: { warehouseId: requestedWarehouseId, like } }
+        {
+          replacements: {
+            warehouseId: requestedWarehouseId,
+            like,
+            categoryId: categoryId || undefined,
+            subcategoryId: subcategoryId || undefined,
+          },
+        }
       );
 
       return res.json({
@@ -414,13 +439,24 @@ async function listProductsForPos(req, res) {
         LEFT JOIN warehouses w ON w.id = sb.warehouse_id
         WHERE p.is_active = 1
         ${whereQ}
+        ${whereCategory}
+        ${whereSubcategory}
         ${whereSellable}
         GROUP BY p.id
         ${havingStock}
         ORDER BY p.name ASC
         LIMIT :limit OFFSET :offset
         `,
-        { replacements: { like, limit, offset, branchId: scopeBranchId || undefined } }
+        {
+          replacements: {
+            like,
+            limit,
+            offset,
+            branchId: scopeBranchId || undefined,
+            categoryId: categoryId || undefined,
+            subcategoryId: subcategoryId || undefined,
+          },
+        }
       );
 
       const [[countRow]] = await sequelize.query(
@@ -433,12 +469,21 @@ async function listProductsForPos(req, res) {
           LEFT JOIN warehouses w ON w.id = sb.warehouse_id
           WHERE p.is_active = 1
           ${whereQ}
+          ${whereCategory}
+          ${whereSubcategory}
           ${whereSellable}
           GROUP BY p.id
           ${havingStock}
         ) x
         `,
-        { replacements: { like, branchId: scopeBranchId || undefined } }
+        {
+          replacements: {
+            like,
+            branchId: scopeBranchId || undefined,
+            categoryId: categoryId || undefined,
+            subcategoryId: subcategoryId || undefined,
+          },
+        }
       );
 
       return res.json({
@@ -474,6 +519,8 @@ async function listProductsForPos(req, res) {
       scopeBranchIds,
       inStock,
       sellable,
+      categoryId,
+      subcategoryId,
     });
 
     const [rows] = await sequelize.query(
@@ -489,13 +536,24 @@ async function listProductsForPos(req, res) {
       LEFT JOIN warehouses w ON w.id = sb.warehouse_id
       WHERE p.is_active = 1
       ${whereQ}
+      ${whereCategory}
+      ${whereSubcategory}
       ${whereSellable}
       GROUP BY p.id
       ${havingStock}
       ORDER BY p.name ASC
       LIMIT :limit OFFSET :offset
       `,
-      { replacements: { like, limit, offset, branchIds: scopeBranchIds } }
+      {
+        replacements: {
+          like,
+          limit,
+          offset,
+          branchIds: scopeBranchIds,
+          categoryId: categoryId || undefined,
+          subcategoryId: subcategoryId || undefined,
+        },
+      }
     );
 
     const [[countRow]] = await sequelize.query(
@@ -508,12 +566,21 @@ async function listProductsForPos(req, res) {
         LEFT JOIN warehouses w ON w.id = sb.warehouse_id
         WHERE p.is_active = 1
         ${whereQ}
+        ${whereCategory}
+        ${whereSubcategory}
         ${whereSellable}
         GROUP BY p.id
         ${havingStock}
       ) x
       `,
-      { replacements: { like, branchIds: scopeBranchIds } }
+      {
+        replacements: {
+          like,
+          branchIds: scopeBranchIds,
+          categoryId: categoryId || undefined,
+          subcategoryId: subcategoryId || undefined,
+        },
+      }
     );
 
     return res.json({
