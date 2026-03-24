@@ -14,6 +14,8 @@ const {
   Warehouse,
 } = require("../models");
 const { getCurrentOpenCashRegister } = require("../services/cashRegister.service");
+const { resolveFiscalSnapshot } = require("../services/fiscalSnapshot.service");
+const { maybeCreateFiscalDocument } = require("../services/fiscalDocument.service");
 
 /* =========================
    Utils
@@ -813,6 +815,11 @@ async function createSale(req, res) {
       transaction: t,
     });
 
+    const fiscalSnapshot = resolveFiscalSnapshot({
+      body,
+      cashRegister: currentCashRegister,
+    });
+
     const sale = await Sale.create(
       {
         branch_id: resolvedBranchId,
@@ -824,6 +831,14 @@ async function createSale(req, res) {
         customer_name,
         customer_phone,
         customer_doc,
+
+        customer_email: fiscalSnapshot?.customer_email || null,
+        customer_address: fiscalSnapshot?.customer_address || null,
+        customer_doc_type: fiscalSnapshot?.customer_doc_type || null,
+        customer_tax_condition: fiscalSnapshot?.customer_tax_condition || null,
+        invoice_mode: fiscalSnapshot?.invoice_mode || null,
+        invoice_type: fiscalSnapshot?.invoice_type || null,
+        fiscal_status: fiscalSnapshot?.invoice_mode && fiscalSnapshot.invoice_mode !== "NO_FISCAL" ? "PENDING" : "NOT_REQUESTED",
 
         subtotal,
         discount_total: 0,
@@ -1013,11 +1028,18 @@ async function createSale(req, res) {
     sale.change_total = totalPaid - subtotal;
     await sale.save({ transaction: t });
 
+    const fiscalDocument = await maybeCreateFiscalDocument({
+      sale,
+      snapshot: fiscalSnapshot,
+      transaction: t,
+    });
+
     await t.commit();
 
     logPos(req, "info", "createSale done", {
       sale_id: sale.id,
       cash_register_id: sale.cash_register_id || null,
+      fiscal_document_id: fiscalDocument?.id || sale.fiscal_document_id || null,
       resolvedBranchId,
       resolvedWarehouseId,
       totalPaid,
@@ -1030,6 +1052,8 @@ async function createSale(req, res) {
         sale_id: sale.id,
         branch_id: sale.branch_id,
         cash_register_id: sale.cash_register_id || null,
+        fiscal_document_id: fiscalDocument?.id || sale.fiscal_document_id || null,
+        fiscal_status: sale.fiscal_status || (fiscalDocument ? "PENDING" : "NOT_REQUESTED"),
         user_id: sale.user_id,
         warehouse_id: resolvedWarehouseId,
 

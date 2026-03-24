@@ -5,57 +5,68 @@ module.exports = (sequelize, DataTypes) => {
   const SaleItem = sequelize.define(
     "SaleItem",
     {
-      id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true, autoIncrement: true },
-
-      sale_id: { 
-        type: DataTypes.BIGINT.UNSIGNED, 
-        allowNull: false 
+      id: {
+        type: DataTypes.BIGINT.UNSIGNED,
+        primaryKey: true,
+        autoIncrement: true,
       },
 
-      product_id: { 
-        type: DataTypes.BIGINT.UNSIGNED, 
-        allowNull: false 
+      sale_id: {
+        type: DataTypes.BIGINT.UNSIGNED,
+        allowNull: false,
       },
 
-      // ✅ FIX CRÍTICO (LO QUE TE ESTÁ ROMPIENDO TODO)
+      product_id: {
+        type: DataTypes.BIGINT.UNSIGNED,
+        allowNull: false,
+      },
+
       warehouse_id: {
         type: DataTypes.BIGINT.UNSIGNED,
         allowNull: false,
       },
 
-      quantity: { 
-        type: DataTypes.DECIMAL(12, 3), 
-        allowNull: false 
+      quantity: {
+        type: DataTypes.DECIMAL(12, 3),
+        allowNull: false,
       },
 
-      unit_price: { 
-        type: DataTypes.DECIMAL(12, 2), 
-        allowNull: false 
+      unit_price: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
       },
 
-      // Opcionales (pero compatibles con tu backend actual)
-      discount_amount: { 
-        type: DataTypes.DECIMAL(12, 2), 
+      discount_amount: {
+        type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
         defaultValue: 0,
       },
 
-      tax_amount: { 
-        type: DataTypes.DECIMAL(12, 2), 
+      tax_amount: {
+        type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
         defaultValue: 0,
       },
 
-      // ✅ ESTE YA LO TENÍAS BIEN
-      line_total: { 
-        type: DataTypes.DECIMAL(12, 2), 
-        allowNull: false 
+      line_total: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: false,
       },
 
-      // Snapshots
-      product_name_snapshot: { type: DataTypes.STRING },
-      product_sku_snapshot: { type: DataTypes.STRING },
-      product_barcode_snapshot: { type: DataTypes.STRING },
+      product_name_snapshot: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+
+      product_sku_snapshot: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+
+      product_barcode_snapshot: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
     },
     {
       tableName: "sale_items",
@@ -64,6 +75,27 @@ module.exports = (sequelize, DataTypes) => {
       paranoid: false,
     }
   );
+
+  SaleItem.associate = (models) => {
+    SaleItem.belongsTo(models.Sale, {
+      foreignKey: "sale_id",
+      as: "sale",
+    });
+
+    if (models.Product) {
+      SaleItem.belongsTo(models.Product, {
+        foreignKey: "product_id",
+        as: "product",
+      });
+    }
+
+    if (models.Warehouse) {
+      SaleItem.belongsTo(models.Warehouse, {
+        foreignKey: "warehouse_id",
+        as: "warehouse",
+      });
+    }
+  };
 
   return SaleItem;
 };
