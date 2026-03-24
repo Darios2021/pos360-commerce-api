@@ -5,6 +5,7 @@
 // - ✅ ProductVideo (opcional) + asociaciones Product ↔ ProductVideo
 // - ✅ CashRegister + CashMovement (opcionales) + asociaciones con Branch/User/Sale
 // - ✅ POS fiscal preparado con models nuevos: Sale / SaleItem / Payment / SaleDocument*
+// - ✅ FIX: sin ejecutar associate(models) al final para evitar aliases duplicados
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -408,9 +409,6 @@ if (SaleDocument && SaleDocumentRelation) {
   });
 }
 
-// ==========================================
-// Ejecutar associate() si existe
-// ==========================================
 const models = {
   sequelize,
 
@@ -457,11 +455,5 @@ const models = {
   ShopLink,
   EcomCustomer,
 };
-
-Object.values(models).forEach((model) => {
-  if (model && typeof model.associate === "function") {
-    model.associate(models);
-  }
-});
 
 module.exports = models;
