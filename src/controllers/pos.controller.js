@@ -1,12 +1,13 @@
 // ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/pos.controller.js
 
-const { literal } = require("sequelize");
+const { literal, Op } = require("sequelize");
 const {
   sequelize,
   Sale,
   SaleItem,
   Payment,
+  PaymentMethod,
   Product,
   StockBalance,
   StockMovement,
@@ -167,6 +168,14 @@ function safeJsonParse(s) {
   }
 }
 
+function safeJsonStringify(v, def = "{}") {
+  try {
+    return JSON.stringify(v ?? {});
+  } catch {
+    return def;
+  }
+}
+
 function mergePaymentNote(existingNote, metaObj) {
   const prev = safeJsonParse(existingNote) || {};
   const merged = { ...prev, ...metaObj };
@@ -223,6 +232,443 @@ function mapPayMethodDetailed(rawMethod, rawReference) {
 
 function mapPayMethod(raw) {
   return mapPayMethodDetailed(raw, null).dbMethod;
+}
+
+function mapConfiguredMethodToDbMethod(pm) {
+  const kind = String(pm?.kind || "").toUpperCase();
+  const provider = String(pm?.provider_code || "").trim().toLowerCase();
+  const cardKind = String(pm?.card_kind || "").trim().toUpperCase();
+
+  if (kind === "CASH") return { dbMethod: "CASH", providerCode: provider || "cash" };
+  if (kind === "TRANSFER") return { dbMethod: "TRANSFER", providerCode: provider || "transfer" };
+  if (kind === "QR") return { dbMethod: "QR", providerCode: provider || "qr" };
+  if (kind === "MERCADOPAGO") return { dbMethod: "MERCADOPAGO", providerCode: provider || "mercadopago" };
+  if (kind === "CREDIT_SJT") return { dbMethod: "CREDIT_SJT", providerCode: provider || "credit_sjt" };
+
+  if (kind === "CARD") {
+    if (cardKind === "DEBIT") return { dbMethod: "CARD", providerCode: "debit" };
+    if (cardKind === "CREDIT") return { dbMethod: "CARD", providerCode: "card" };
+    return { dbMethod: "CARD", providerCode: provider || "card" };
+  }
+
+  return { dbMethod: "OTHER", providerCode: provider || "other" };
+}
+
+function normalizePriceBasisFromPaymentMethod(pm) {
+  const pricingMode = String(pm?.pricing_mode || "").toUpperCase();
+
+  if (pricingMode === "LIST_PRICE") return "LIST";
+  if (pricingMode === "SALE_PRICE") return "SALE";
+  if (pricingMode === "SURCHARGE_PERCENT") return "SURCHARGE_PERCENT";
+  if (pricingMode === "FIXED_PRICE") return "FIXED_PRICE";
+  return null;
+}
+
+function resolveConfiguredInstallments(pm, pay) {
+  const requested = clampInstallments(
+    pay.installments ?? pay.cuotas ?? pay.installment_count ?? pm?.default_installments ?? 1,
+    pm?.default_installments ?? 1
+  );
+
+  if (!pm?.supports_installments) return 1;
+
+  const minI = Math.max(1, toInt(pm.min_installments, 1));
+  const maxI = Math.max(minI, toInt(pm.max_installments, minI));
+
+  if (requested < minI) return minI;
+  if (requested > maxI) return maxI;
+
+  return requested;
+}
+
+async function resolvePaymentMethodForBranch(paymentMethodId, branchId, transaction) {
+  const id = toInt(paymentMethodId, 0);
+  if (!id) return null;
+
+  const pm = await PaymentMethod.findByPk(id, { transaction });
+  if (!pm) {
+    const e = new Error(`Medio de pago no encontrado: id=${id}`);
+    e.httpStatus = 400;
+    e.code = "PAYMENT_METHOD_NOT_FOUND";
+    throw e;
+  }
+
+  const pmBranchId = toInt(pm.branch_id, 0) || null;
+  const bid = toInt(branchId, 0) || null;
+
+  if (pmBranchId !== null && bid !== null && pmBranchId !== bid) {
+    const e = new Error(`El medio de pago ${id} no pertenece a la sucursal ${bid}`);
+    e.httpStatus = 400;
+    e.code = "PAYMENT_METHOD_BRANCH_MISMATCH";
+    throw e;
+  }
+
+  if (!pm.is_active) {
+    const e = new Error(`El medio de pago ${id} está inactivo`);
+    e.httpStatus = 400;
+    e.code = "PAYMENT_METHOD_INACTIVE";
+    throw e;
+  }
+
+  if (pm.only_ecom) {
+    const e = new Error(`El medio de pago ${id} es solo para ecommerce`);
+    e.httpStatus = 400;
+    e.code = "PAYMENT_METHOD_CHANNEL_INVALID";
+    throw e;
+  }
+
+  return pm;
+}
+
+async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transaction }) {
+  const paymentMethodId = toInt(pay.payment_method_id || pay.paymentMethodId, 0);
+  const amount = toNum(pay.amount);
+  const referenceIncoming =
+    pay.reference ||
+    pay.proof ||
+    pay.payment_reference ||
+    null;
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const e = new Error(`Pago inválido: amount=${pay.amount}`);
+    e.httpStatus = 400;
+    e.code = "INVALID_PAYMENT";
+    throw e;
+  }
+
+  if (paymentMethodId) {
+    const pm = await resolvePaymentMethodForBranch(paymentMethodId, branchId, transaction);
+
+    if (paymentsCount > 1 && pm.allow_mixed === false) {
+      const e = new Error(`El medio de pago "${pm.name}" no permite pagos mixtos`);
+      e.httpStatus = 400;
+      e.code = "PAYMENT_METHOD_NOT_MIXABLE";
+      throw e;
+    }
+
+    if (pm.requires_reference && !String(referenceIncoming || "").trim()) {
+      const e = new Error(`El medio de pago "${pm.name}" requiere referencia/comprobante`);
+      e.httpStatus = 400;
+      e.code = "PAYMENT_METHOD_REFERENCE_REQUIRED";
+      throw e;
+    }
+
+    const { dbMethod, providerCode } = mapConfiguredMethodToDbMethod(pm);
+
+    const installments = resolveConfiguredInstallments(pm, pay);
+
+    const incomingCardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
+      .trim()
+      .toUpperCase();
+
+    const cardKindSnapshot =
+      pm.kind === "CARD"
+        ? (String(pm.card_kind || "").trim().toUpperCase() === "DEBIT"
+            ? "DEBIT"
+            : String(pm.card_kind || "").trim().toUpperCase() === "CREDIT"
+              ? "CREDIT"
+              : incomingCardKind || (providerCode === "debit" ? "DEBIT" : "CREDIT"))
+        : (String(pm.card_kind || "").trim().toUpperCase() || null);
+
+    const priceBasis = normalizePriceBasisFromPaymentMethod(pm);
+    const listTotal = toNum(pay.total_list ?? pay.totalList ?? pay.list_total ?? 0, 0) || null;
+    const perInstallmentList =
+      toNum(pay.per_installment_list ?? pay.perInstallmentList ?? pay.cuota_valor ?? 0, 0) || null;
+
+    const meta = {
+      provider_code: providerCode || null,
+      payment_method_id: pm.id,
+      payment_method_code: pm.code,
+      payment_method_name: pm.name,
+      installments,
+      price_basis: priceBasis,
+      list_total: listTotal,
+      per_installment_list: perInstallmentList,
+      pricing_mode: pm.pricing_mode || null,
+      surcharge_percent: toNum(pm.surcharge_percent, 0),
+      surcharge_fixed_amount: toNum(pm.surcharge_fixed_amount, 0),
+      register_group: pm.register_group || null,
+      card_brand: pm.card_brand || null,
+      card_kind: cardKindSnapshot || null,
+      requires_reference: !!pm.requires_reference,
+      counts_as_cash_in_register: !!pm.counts_as_cash_in_register,
+      impacts_cash_register: !!pm.impacts_cash_register,
+    };
+
+    let ref = referenceIncoming || null;
+    if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
+    if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
+
+    let notePay = pay.note || null;
+    notePay = mergePaymentNote(notePay, meta);
+
+    return {
+      paymentMethod: pm,
+      payment_method_id: pm.id,
+      dbMethod,
+      providerCode,
+      amount,
+      installments,
+      reference: ref,
+      note: notePay,
+      snapshot: {
+        payment_method_code_snapshot: pm.code || null,
+        payment_method_name_snapshot: pm.display_name || pm.name || null,
+        provider_code_snapshot: providerCode || null,
+        card_brand_snapshot: pm.card_brand || null,
+        card_kind_snapshot: cardKindSnapshot || null,
+        pricing_mode_snapshot: pm.pricing_mode || null,
+        base_amount_snapshot: toNum(pay.base_amount ?? pay.baseAmount ?? amount, amount),
+        charged_amount_snapshot: amount,
+        surcharge_percent_snapshot: toNum(pm.surcharge_percent, 0),
+        surcharge_fixed_amount_snapshot: toNum(pm.surcharge_fixed_amount, 0),
+        installments_snapshot: installments,
+        per_installment_amount_snapshot: installments > 0 ? Number((amount / installments).toFixed(2)) : amount,
+        reference_required_snapshot: !!pm.requires_reference,
+        payment_meta_snapshot: safeJsonStringify({
+          input_schema_json: pm.input_schema_json || null,
+          installment_plan_json: pm.installment_plan_json || null,
+          meta: pm.meta || null,
+          card_brand: pm.card_brand || null,
+          card_kind: cardKindSnapshot || null,
+          register_group: pm.register_group || null,
+        }),
+      },
+    };
+  }
+
+  // fallback legacy
+  const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method, referenceIncoming);
+
+  if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"].includes(dbMethod)) {
+    const e = new Error(`Pago inválido: method=${dbMethod}`);
+    e.httpStatus = 400;
+    e.code = "INVALID_PAYMENT_METHOD";
+    throw e;
+  }
+
+  const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
+    .trim()
+    .toUpperCase();
+
+  const isDebit =
+    providerCode === "debit" ||
+    cardKind === "DEBIT" ||
+    cardKind === "DEBITO" ||
+    cardKind === "DÉBITO" ||
+    pay.is_debit === true ||
+    pay.isDebit === true;
+
+  let installments = 1;
+
+  if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
+    installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
+  } else if (dbMethod === "CARD") {
+    if (!isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
+    else installments = 1;
+  } else {
+    installments = 1;
+  }
+
+  const priceBasis = String(pay.price_basis || pay.priceBasis || "").trim().toUpperCase() || null;
+  const effectiveBasis =
+    (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT"
+      ? "LIST"
+      : priceBasis || null;
+
+  const listTotal = toNum(pay.total_list ?? pay.totalList ?? pay.list_total ?? 0, 0) || null;
+  const perInstallmentList =
+    toNum(pay.per_installment_list ?? pay.perInstallmentList ?? pay.cuota_valor ?? 0, 0) || null;
+
+  const meta =
+    installments > 1 || providerCode
+      ? {
+          provider_code: providerCode || null,
+          installments,
+          price_basis: effectiveBasis,
+          list_total: listTotal,
+          per_installment_list: perInstallmentList,
+          card_kind: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : "CREDIT",
+        }
+      : null;
+
+  let ref = referenceIncoming || null;
+  if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
+  if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
+
+  let notePay = pay.note || null;
+  if (meta) notePay = mergePaymentNote(notePay, meta);
+
+  return {
+    paymentMethod: null,
+    payment_method_id: null,
+    dbMethod,
+    providerCode,
+    amount,
+    installments,
+    reference: ref,
+    note: notePay,
+    snapshot: {
+      payment_method_code_snapshot: String(pay.method || dbMethod || "").trim().toLowerCase() || null,
+      payment_method_name_snapshot: String(pay.label || pay.name || pay.method || dbMethod || "").trim() || null,
+      provider_code_snapshot: providerCode || null,
+      card_brand_snapshot: null,
+      card_kind_snapshot: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : null,
+      pricing_mode_snapshot: effectiveBasis === "LIST" ? "LIST_PRICE" : null,
+      base_amount_snapshot: toNum(pay.base_amount ?? pay.baseAmount ?? amount, amount),
+      charged_amount_snapshot: amount,
+      surcharge_percent_snapshot: null,
+      surcharge_fixed_amount_snapshot: null,
+      installments_snapshot: installments,
+      per_installment_amount_snapshot: installments > 0 ? Number((amount / installments).toFixed(2)) : amount,
+      reference_required_snapshot: false,
+      payment_meta_snapshot: safeJsonStringify(meta || {}),
+    },
+  };
+}
+
+async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
+  await sequelize.query(
+    `
+    INSERT INTO payments (
+      sale_id,
+      payment_method_id,
+      payment_method_code_snapshot,
+      payment_method_name_snapshot,
+      provider_code_snapshot,
+      card_brand_snapshot,
+      card_kind_snapshot,
+      pricing_mode_snapshot,
+      base_amount_snapshot,
+      charged_amount_snapshot,
+      surcharge_percent_snapshot,
+      surcharge_fixed_amount_snapshot,
+      installments_snapshot,
+      per_installment_amount_snapshot,
+      reference_required_snapshot,
+      payment_meta_snapshot,
+      method,
+      amount,
+      installments,
+      reference,
+      note,
+      paid_at
+    )
+    VALUES (
+      :sale_id,
+      :payment_method_id,
+      :payment_method_code_snapshot,
+      :payment_method_name_snapshot,
+      :provider_code_snapshot,
+      :card_brand_snapshot,
+      :card_kind_snapshot,
+      :pricing_mode_snapshot,
+      :base_amount_snapshot,
+      :charged_amount_snapshot,
+      :surcharge_percent_snapshot,
+      :surcharge_fixed_amount_snapshot,
+      :installments_snapshot,
+      :per_installment_amount_snapshot,
+      :reference_required_snapshot,
+      :payment_meta_snapshot,
+      :method,
+      :amount,
+      :installments,
+      :reference,
+      :note,
+      NOW()
+    )
+    `,
+    {
+      transaction,
+      replacements: {
+        sale_id: saleId,
+        payment_method_id: paymentResolved.payment_method_id || null,
+        payment_method_code_snapshot: paymentResolved.snapshot.payment_method_code_snapshot,
+        payment_method_name_snapshot: paymentResolved.snapshot.payment_method_name_snapshot,
+        provider_code_snapshot: paymentResolved.snapshot.provider_code_snapshot,
+        card_brand_snapshot: paymentResolved.snapshot.card_brand_snapshot,
+        card_kind_snapshot: paymentResolved.snapshot.card_kind_snapshot,
+        pricing_mode_snapshot: paymentResolved.snapshot.pricing_mode_snapshot,
+        base_amount_snapshot: paymentResolved.snapshot.base_amount_snapshot,
+        charged_amount_snapshot: paymentResolved.snapshot.charged_amount_snapshot,
+        surcharge_percent_snapshot: paymentResolved.snapshot.surcharge_percent_snapshot,
+        surcharge_fixed_amount_snapshot: paymentResolved.snapshot.surcharge_fixed_amount_snapshot,
+        installments_snapshot: paymentResolved.snapshot.installments_snapshot,
+        per_installment_amount_snapshot: paymentResolved.snapshot.per_installment_amount_snapshot,
+        reference_required_snapshot: paymentResolved.snapshot.reference_required_snapshot ? 1 : 0,
+        payment_meta_snapshot: paymentResolved.snapshot.payment_meta_snapshot,
+        method: paymentResolved.dbMethod,
+        amount: paymentResolved.amount,
+        installments: paymentResolved.installments,
+        reference: paymentResolved.reference,
+        note: paymentResolved.note,
+      },
+    }
+  );
+}
+
+async function insertSaleReturnPaymentRow({ returnId, paymentResolved, transaction }) {
+  await sequelize.query(
+    `
+    INSERT INTO sale_return_payments (
+      return_id,
+      payment_method_id,
+      payment_method_code_snapshot,
+      payment_method_name_snapshot,
+      provider_code_snapshot,
+      pricing_mode_snapshot,
+      base_amount_snapshot,
+      charged_amount_snapshot,
+      surcharge_percent_snapshot,
+      installments_snapshot,
+      payment_meta_snapshot,
+      method,
+      amount,
+      reference,
+      note,
+      created_at
+    )
+    VALUES (
+      :return_id,
+      :payment_method_id,
+      :payment_method_code_snapshot,
+      :payment_method_name_snapshot,
+      :provider_code_snapshot,
+      :pricing_mode_snapshot,
+      :base_amount_snapshot,
+      :charged_amount_snapshot,
+      :surcharge_percent_snapshot,
+      :installments_snapshot,
+      :payment_meta_snapshot,
+      :method,
+      :amount,
+      :reference,
+      :note,
+      NOW()
+    )
+    `,
+    {
+      transaction,
+      replacements: {
+        return_id: returnId,
+        payment_method_id: paymentResolved.payment_method_id || null,
+        payment_method_code_snapshot: paymentResolved.snapshot.payment_method_code_snapshot,
+        payment_method_name_snapshot: paymentResolved.snapshot.payment_method_name_snapshot,
+        provider_code_snapshot: paymentResolved.snapshot.provider_code_snapshot,
+        pricing_mode_snapshot: paymentResolved.snapshot.pricing_mode_snapshot,
+        base_amount_snapshot: paymentResolved.snapshot.base_amount_snapshot,
+        charged_amount_snapshot: paymentResolved.snapshot.charged_amount_snapshot,
+        surcharge_percent_snapshot: paymentResolved.snapshot.surcharge_percent_snapshot,
+        installments_snapshot: paymentResolved.snapshot.installments_snapshot,
+        payment_meta_snapshot: paymentResolved.snapshot.payment_meta_snapshot,
+        method: paymentResolved.dbMethod,
+        amount: paymentResolved.amount,
+        reference: paymentResolved.reference,
+        note: paymentResolved.note,
+      },
+    }
+  );
 }
 
 /* =========================
@@ -838,7 +1284,8 @@ async function createSale(req, res) {
         customer_tax_condition: fiscalSnapshot?.customer_tax_condition || null,
         invoice_mode: fiscalSnapshot?.invoice_mode || null,
         invoice_type: fiscalSnapshot?.invoice_type || null,
-        fiscal_status: fiscalSnapshot?.invoice_mode && fiscalSnapshot.invoice_mode !== "NO_FISCAL" ? "PENDING" : "NOT_REQUESTED",
+        fiscal_status:
+          fiscalSnapshot?.invoice_mode && fiscalSnapshot.invoice_mode !== "NO_FISCAL" ? "PENDING" : "NOT_REQUESTED",
 
         subtotal,
         discount_total: 0,
@@ -928,98 +1375,20 @@ async function createSale(req, res) {
     let totalPaid = 0;
 
     for (const pay of payments) {
-      const amount = toNum(pay.amount);
+      const resolvedPay = await resolveSalePaymentInput({
+        pay,
+        branchId: resolvedBranchId,
+        paymentsCount: payments.length,
+        transaction: t,
+      });
 
-      const referenceIncoming =
-        pay.reference ||
-        pay.proof ||
-        body.reference ||
-        body.proof ||
-        body.payment_reference ||
-        null;
+      totalPaid += resolvedPay.amount;
 
-      const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method, referenceIncoming);
-
-      if (!Number.isFinite(amount) || amount <= 0) {
-        throw Object.assign(new Error(`Pago inválido: amount=${pay.amount}`), {
-          httpStatus: 400,
-          code: "INVALID_PAYMENT",
-        });
-      }
-
-      if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"].includes(dbMethod)) {
-        throw Object.assign(new Error(`Pago inválido: method=${dbMethod}`), {
-          httpStatus: 400,
-          code: "INVALID_PAYMENT_METHOD",
-        });
-      }
-
-      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
-        .trim()
-        .toUpperCase();
-
-      const isDebit =
-        providerCode === "debit" ||
-        cardKind === "DEBIT" ||
-        cardKind === "DEBITO" ||
-        cardKind === "DÉBITO" ||
-        pay.is_debit === true ||
-        pay.isDebit === true;
-
-      let installments = 1;
-
-      if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
-        installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
-      } else if (dbMethod === "CARD") {
-        if (!isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
-        else installments = 1;
-      } else {
-        installments = 1;
-      }
-
-      const priceBasis = String(pay.price_basis || pay.priceBasis || "").trim().toUpperCase() || null;
-      const effectiveBasis =
-        (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT"
-          ? "LIST"
-          : priceBasis || null;
-
-      const listTotal = toNum(pay.total_list ?? pay.totalList ?? pay.list_total ?? 0, 0) || null;
-      const perInstallmentList =
-        toNum(pay.per_installment_list ?? pay.perInstallmentList ?? pay.cuota_valor ?? 0, 0) || null;
-
-      const meta =
-        installments > 1 || providerCode
-          ? {
-              provider_code: providerCode || null,
-              installments,
-              price_basis: effectiveBasis,
-              list_total: listTotal,
-              per_installment_list: perInstallmentList,
-              card_kind: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : "CREDIT",
-            }
-          : null;
-
-      totalPaid += amount;
-
-      let ref = referenceIncoming || null;
-      if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
-      if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
-
-      let notePay = pay.note || null;
-      if (meta) notePay = mergePaymentNote(notePay, meta);
-
-      await Payment.create(
-        {
-          sale_id: sale.id,
-          method: dbMethod,
-          amount,
-          installments,
-          reference: ref,
-          note: notePay,
-          paid_at: new Date(),
-        },
-        { transaction: t }
-      );
+      await insertPaymentRow({
+        saleId: sale.id,
+        paymentResolved: resolvedPay,
+        transaction: t,
+      });
     }
 
     if (payments.length === 0) totalPaid = subtotal;
@@ -1313,49 +1682,18 @@ async function createSaleReturn(req, res) {
     }
 
     for (const p of payments) {
-      const referenceIncoming = p.reference || null;
-      const { dbMethod, providerCode } = mapPayMethodDetailed(p.method, referenceIncoming);
-      const amount = toNum(p.amount);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        const e = new Error(`Pago devolución inválido: amount=${p.amount}`);
-        e.httpStatus = 400;
-        e.code = "INVALID_RETURN_PAYMENT";
-        throw e;
-      }
+      const resolvedPay = await resolveSalePaymentInput({
+        pay: p,
+        branchId: toInt(sale.branch_id, 0),
+        paymentsCount: payments.length,
+        transaction: t,
+      });
 
-      const installments = clampInstallments(p.installments ?? p.cuotas ?? 1, 1);
-
-      const meta =
-        installments > 1 || providerCode
-          ? {
-              provider_code: providerCode || null,
-              installments,
-              price_basis: "LIST",
-              list_total: toNum(p.total_list ?? p.totalList ?? p.list_total ?? 0, 0) || null,
-              per_installment_list: toNum(p.per_installment_list ?? p.perInstallmentList ?? 0, 0) || null,
-            }
-          : null;
-
-      const notePay = meta ? mergePaymentNote(p.note || null, meta) : p.note ? String(p.note).slice(0, 255) : null;
-
-      await sequelize.query(
-        `
-        INSERT INTO sale_return_payments
-          (return_id, method, amount, reference, note, created_at)
-        VALUES
-          (:return_id, :method, :amount, :reference, :note, NOW())
-        `,
-        {
-          transaction: t,
-          replacements: {
-            return_id: returnId,
-            method: dbMethod,
-            amount,
-            reference: referenceIncoming ? String(referenceIncoming).slice(0, 120) : null,
-            note: notePay ? String(notePay).slice(0, 255) : null,
-          },
-        }
-      );
+      await insertSaleReturnPaymentRow({
+        returnId,
+        paymentResolved: resolvedPay,
+        transaction: t,
+      });
     }
 
     if (Math.abs(totalReturn - paidTotal) <= 0.01) {
@@ -1591,48 +1929,18 @@ async function createSaleExchange(req, res) {
     }
 
     for (const p of returnPayload.payments || []) {
-      const referenceIncoming = p.reference || null;
-      const { dbMethod, providerCode } = mapPayMethodDetailed(p.method, referenceIncoming);
-      const amount = toNum(p.amount);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        const e = new Error(`Pago devolución inválido: amount=${p.amount}`);
-        e.httpStatus = 400;
-        e.code = "INVALID_RETURN_PAYMENT";
-        throw e;
-      }
+      const resolvedPay = await resolveSalePaymentInput({
+        pay: p,
+        branchId: toInt(sale.branch_id, 0),
+        paymentsCount: (returnPayload.payments || []).length,
+        transaction: t,
+      });
 
-      const installments = clampInstallments(p.installments ?? p.cuotas ?? 1, 1);
-      const meta =
-        installments > 1 || providerCode
-          ? {
-              provider_code: providerCode || null,
-              installments,
-              price_basis: "LIST",
-              list_total: toNum(p.total_list ?? p.totalList ?? 0, 0) || null,
-              per_installment_list: toNum(p.per_installment_list ?? p.perInstallmentList ?? 0, 0) || null,
-            }
-          : null;
-
-      const notePay = meta ? mergePaymentNote(p.note || null, meta) : p.note ? String(p.note).slice(0, 255) : null;
-
-      await sequelize.query(
-        `
-        INSERT INTO sale_return_payments
-          (return_id, method, amount, reference, note, created_at)
-        VALUES
-          (:return_id, :method, :amount, :reference, :note, NOW())
-        `,
-        {
-          transaction: t,
-          replacements: {
-            return_id: returnId,
-            method: dbMethod,
-            amount,
-            reference: referenceIncoming ? String(referenceIncoming).slice(0, 120) : null,
-            note: notePay ? String(notePay).slice(0, 255) : null,
-          },
-        }
-      );
+      await insertSaleReturnPaymentRow({
+        returnId,
+        paymentResolved: resolvedPay,
+        transaction: t,
+      });
     }
 
     if (Math.abs(totalReturn - paidTotal) <= 0.01) {
@@ -1816,70 +2124,20 @@ async function createSaleExchange(req, res) {
 
     let totalPaid2 = 0;
     for (const pay of pays2) {
-      const amount = toNum(pay.amount);
-      const referenceIncoming = pay.reference || pay.proof || null;
-      const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method, referenceIncoming);
+      const resolvedPay = await resolveSalePaymentInput({
+        pay,
+        branchId: userBranchId,
+        paymentsCount: pays2.length,
+        transaction: t,
+      });
 
-      if (!Number.isFinite(amount) || amount <= 0) {
-        const e = new Error(`Pago inválido (cambio): amount=${pay.amount}`);
-        e.httpStatus = 400;
-        e.code = "INVALID_PAYMENT";
-        throw e;
-      }
+      totalPaid2 += resolvedPay.amount;
 
-      const cardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
-        .trim()
-        .toUpperCase();
-      const isDebit =
-        providerCode === "debit" ||
-        cardKind === "DEBIT" ||
-        cardKind === "DEBITO" ||
-        cardKind === "DÉBITO" ||
-        pay.is_debit === true ||
-        pay.isDebit === true;
-
-      let installments = 1;
-      if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
-        installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
-      } else if (dbMethod === "CARD" && !isDebit) {
-        installments = clampInstallments(pay.installments ?? pay.cuotas ?? 1, 1);
-      } else {
-        installments = 1;
-      }
-
-      const meta =
-        installments > 1 || providerCode
-          ? {
-              provider_code: providerCode || null,
-              installments,
-              price_basis:
-                (dbMethod === "CARD" && installments > 1 && !isDebit) || dbMethod === "CREDIT_SJT" ? "LIST" : null,
-              list_total: toNum(pay.total_list ?? pay.totalList ?? 0, 0) || null,
-              per_installment_list: toNum(pay.per_installment_list ?? pay.perInstallmentList ?? 0, 0) || null,
-              card_kind: dbMethod === "CARD" ? (isDebit ? "DEBIT" : "CREDIT") : "CREDIT",
-            }
-          : null;
-
-      totalPaid2 += amount;
-
-      let ref = referenceIncoming || null;
-      if (!ref && dbMethod === "CREDIT_SJT") ref = "SJCREDIT";
-      if (!ref && dbMethod === "MERCADOPAGO") ref = "MERCADOPAGO";
-
-      const notePay = meta ? mergePaymentNote(pay.note || null, meta) : pay.note || null;
-
-      await Payment.create(
-        {
-          sale_id: newSale.id,
-          method: dbMethod,
-          amount,
-          installments,
-          reference: ref,
-          note: notePay,
-          paid_at: new Date(),
-        },
-        { transaction: t }
-      );
+      await insertPaymentRow({
+        saleId: newSale.id,
+        paymentResolved: resolvedPay,
+        transaction: t,
+      });
     }
 
     if (!pays2.length) totalPaid2 = subtotal2;

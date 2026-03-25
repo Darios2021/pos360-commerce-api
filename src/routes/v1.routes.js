@@ -7,6 +7,8 @@
 // ✅ FIX: carga publicInstagram.routes (si existe)
 // ✅ FIX: monta /ecom (checkout + payments/webhooks)
 // ✅ NUEVO: monta /public/payment-methods (DB-first)
+// ✅ NUEVO: monta /pos/payment-methods
+// ✅ NUEVO: monta /admin/payment-methods
 // ✅ NUEVO: monta /admin/shop/branches (opcional)
 // ✅ NUEVO: SHOP AUTH (Google + sesiones)
 //    - PUBLIC: POST /api/v1/public/auth/google
@@ -224,8 +226,8 @@ const publicThemeRoutes = loadRoute("./publicTheme.routes", { optional: true });
 const ecomCheckoutRoutes = loadRoute("./ecomCheckout.routes", { optional: false });
 const ecomPaymentsRoutes = loadRoute("./ecomPayments.routes", { optional: false });
 
-// ✅ métodos de pago públicos (opcional)
-const publicPaymentMethodsRoutes = loadRoute("./publicPaymentMethods.routes", { optional: true });
+// ✅ métodos de pago unificados
+const paymentMethodRoutes = loadRoute("./paymentMethod.routes", { optional: true });
 
 // Links públicos (opcional)
 const publicLinksRoutes = loadRoute("./publicLinks.routes", { optional: true });
@@ -304,7 +306,9 @@ safeUse("/", publicProductVideosRoutes);
 // Theme
 if (publicThemeRoutes) safeUse("/public", publicThemeRoutes);
 
-if (publicPaymentMethodsRoutes) safeUse("/public", publicPaymentMethodsRoutes);
+// ✅ payment methods público
+if (paymentMethodRoutes) safeUse("/public", paymentMethodRoutes);
+
 if (publicLinksRoutes) safeUse("/public", publicLinksRoutes);
 if (publicInstagramRoutes) safeUse("/public", publicInstagramRoutes);
 
@@ -326,6 +330,11 @@ safeUse("/dashboard", requireAuth, dashboardRoutes);
 
 safeUse("/pos", requireAuth, posRoutes);
 safeUse("/me", requireAuth, meRoutes);
+
+// ✅ payment methods POS
+if (paymentMethodRoutes) {
+  safeUse("/pos", requireAuth, attachAccessContext, branchContext, paymentMethodRoutes);
+}
 
 // ✅ NUEVO: CAJA (POS)
 if (cashRegistersRoutes) {
@@ -360,6 +369,14 @@ if (adminFiscalRoutes) {
 } else {
   // eslint-disable-next-line no-console
   console.log("⚠️ adminFiscalRoutes no cargado (no existe admin.fiscal.routes.js o exporta mal)");
+}
+
+// ✅ payment methods admin
+if (paymentMethodRoutes) {
+  safeUse("/admin", requireAuth, attachAccessContext, paymentMethodRoutes);
+} else {
+  // eslint-disable-next-line no-console
+  console.log("⚠️ paymentMethodRoutes no cargado (no existe paymentMethod.routes.js o exporta mal)");
 }
 
 // Admin videos: /api/v1/admin/products/:id/videos

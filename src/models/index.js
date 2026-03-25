@@ -1,11 +1,12 @@
-// src/models/index.js
 // ✅ COPY-PASTE FINAL COMPLETO
+// src/models/index.js
 // - Subcategory + Product->createdByUser + SaleRefund/SaleExchange
 // - blindado anti-crash + ShopLink opcional
 // - ✅ ProductVideo (opcional) + asociaciones Product ↔ ProductVideo
 // - ✅ CashRegister + CashMovement (opcionales) + asociaciones con Branch/User/Sale
 // - ✅ POS fiscal preparado con models nuevos: Sale / SaleItem / Payment / SaleDocument*
 // - ✅ FiscalConfig + FiscalCertificate (opcionales)
+// - ✅ PaymentMethod + asociaciones Payment
 // - ✅ FIX: sin ejecutar associate(models) al final para evitar aliases duplicados
 
 const { DataTypes } = require("sequelize");
@@ -18,7 +19,6 @@ const Permission = require("./permission")(sequelize, DataTypes);
 const UserRole = require("./user_role")(sequelize, DataTypes);
 const UserBranch = require("./UserBranch")(sequelize, DataTypes);
 
-// role_permission.js (puede no existir)
 let RolePermission = null;
 try {
   RolePermission = require("./role_permission")(sequelize, DataTypes);
@@ -54,6 +54,15 @@ try {
 const Sale = require("./Sale")(sequelize, DataTypes);
 const SaleItem = require("./SaleItem")(sequelize, DataTypes);
 const Payment = require("./Payment")(sequelize, DataTypes);
+
+// ===== PAYMENT METHOD =====
+let PaymentMethod = null;
+try {
+  PaymentMethod = require("./PaymentMethod")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ PaymentMethod no cargado");
+  PaymentMethod = null;
+}
 
 // ===== POS FISCAL =====
 let SaleDocument = null;
@@ -310,6 +319,21 @@ safeBelongsTo(SaleItem, Warehouse, { foreignKey: "warehouse_id", as: "warehouse"
 safeHasMany(Sale, Payment, { foreignKey: "sale_id", as: "payments" });
 safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 
+// PaymentMethod
+if (PaymentMethod) {
+  safeBelongsTo(PaymentMethod, Branch, { foreignKey: "branch_id", as: "branch" });
+  safeHasMany(Branch, PaymentMethod, { foreignKey: "branch_id", as: "paymentMethods" });
+
+  safeBelongsTo(Payment, PaymentMethod, {
+    foreignKey: "payment_method_id",
+    as: "paymentMethod",
+  });
+  safeHasMany(PaymentMethod, Payment, {
+    foreignKey: "payment_method_id",
+    as: "payments",
+  });
+}
+
 // CAJA: CashRegister ↔ Branch/User
 if (CashRegister) {
   safeBelongsTo(CashRegister, Branch, { foreignKey: "branch_id", as: "branch" });
@@ -347,7 +371,7 @@ if (SaleExchange) {
   safeBelongsTo(SaleExchange, User, { foreignKey: "created_by", as: "creator" });
 }
 
-// ===== POS FISCAL =====
+// POS FISCAL
 if (SaleDocument) {
   safeBelongsTo(SaleDocument, Sale, { foreignKey: "sale_id", as: "sale" });
   safeHasMany(Sale, SaleDocument, { foreignKey: "sale_id", as: "documents" });
@@ -426,7 +450,7 @@ if (SaleDocument && SaleDocumentRelation) {
   });
 }
 
-// ===== FISCAL ADMIN =====
+// FISCAL ADMIN
 if (FiscalConfig) {
   safeBelongsTo(FiscalConfig, Branch, {
     foreignKey: "branch_id",
@@ -483,6 +507,7 @@ const models = {
   Sale,
   SaleItem,
   Payment,
+  PaymentMethod,
 
   // POS fiscal
   SaleDocument,
