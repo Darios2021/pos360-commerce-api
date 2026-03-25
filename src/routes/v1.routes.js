@@ -33,6 +33,12 @@
 //    - GET  /api/v1/pos/cash-registers/:id/summary
 //    - POST /api/v1/pos/cash-registers/:id/movements
 //    - POST /api/v1/pos/cash-registers/:id/close
+// ✅ NUEVO: FISCAL ADMIN
+//    - GET  /api/v1/admin/fiscal/config
+//    - PUT  /api/v1/admin/fiscal/config
+//    - GET  /api/v1/admin/fiscal/certificates
+//    - POST /api/v1/admin/fiscal/certificates
+//    - POST /api/v1/admin/fiscal/test-connection
 
 const router = require("express").Router();
 const { requireAuth } = require("../middlewares/auth");
@@ -268,6 +274,9 @@ const adminShopLinksRoutes = loadRoute("./admin.shopLinks.routes", { optional: t
 const adminMediaRoutes =
   loadRoute("./adminMedia.routes", { optional: true }) || loadRoute("./admin.media.routes", { optional: true });
 
+// ✅ NUEVO: fiscal admin
+const adminFiscalRoutes = loadRoute("./admin.fiscal.routes", { optional: true });
+
 // =========================
 // Mount: Public
 // =========================
@@ -343,6 +352,14 @@ if (adminShopBranchesRoutes) {
 
 if (adminShopLinksRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
+}
+
+// ✅ NUEVO: fiscal admin
+if (adminFiscalRoutes) {
+  safeUse("/admin/fiscal", requireAuth, attachAccessContext, adminFiscalRoutes);
+} else {
+  // eslint-disable-next-line no-console
+  console.log("⚠️ adminFiscalRoutes no cargado (no existe admin.fiscal.routes.js o exporta mal)");
 }
 
 // Admin videos: /api/v1/admin/products/:id/videos
