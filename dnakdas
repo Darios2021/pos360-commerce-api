@@ -1,0 +1,127 @@
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m8[m[36m:[mconst { encrypt } = require("../services/[1;31mfiscal[m/crypto.service");
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m16[m[36m:[m} = require("../services/[1;31mfiscal[m/config.service");
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m66[m[36m:[m            default_[1;31minvoice_type[m: row.default_[1;31minvoice_type[m,
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m118[m[36m:[m      req.body?.default_[1;31minvoice_type[m,
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m175[m[36m:[m          default_[1;31minvoice_type[m: defaultInvoiceType,
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m192[m[36m:[m          default_[1;31minvoice_type[m: defaultInvoiceType,
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m357[m[36m:[m        message: "La sucursal no tiene [1;31mfiscal[m_config.",
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m364[m[36m:[m        message: "La configuración [1;31mfiscal[m está desactivada.",
+[35msrc/controllers/admin.fiscal.controller.js[m[36m:[m[32m399[m[36m:[m          default_[1;31minvoice_type[m: config.default_[1;31minvoice_type[m,
+[35msrc/controllers/admin.shopSettings.controller.js[m[36m:[m[32m8[m[36m:[m// Keys esperadas: orders | shipping | pickup | payments | notify | [1;31mfiscal[m
+[35msrc/controllers/admin.shopSettings.controller.js[m[36m:[m[32m23[m[36m:[m  "[1;31mfiscal[m",
+[35msrc/controllers/admin.shopSettings.controller.js[m[36m:[m[32m45[m[36m:[m    case "[1;31mfiscal[m":
+[35msrc/controllers/admin.shopSettings.controller.js[m[36m:[m[32m49[m[36m:[m        default_[1;31minvoice_type[m: "B",
+[35msrc/controllers/cashRegisters.controller.js[m[36m:[m[32m54[m[36m:[m      [1;31minvoice_mode[m: req.body?.[1;31minvoice_mode[m,
+[35msrc/controllers/cashRegisters.controller.js[m[36m:[m[32m55[m[36m:[m      [1;31minvoice_type[m: req.body?.[1;31minvoice_type[m,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m18[m[36m:[mconst { [1;31mresolveFiscal[mSnapshot } = require("../services/[1;31mfiscalSnapshot[m.service");
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m19[m[36m:[mconst { [1;31mmaybeCreateFiscalDocument[m } = require("../services/[1;31mfiscal[mDocument.service");
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1054[m[36m:[masync function [1;31mcreateSale[m(req, res) {
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1060[m[36m:[m    if (admin) logPos(req, "info", "[1;31mcreateSale[m admin allowed");
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1066[m[36m:[m    console.log("[POS][[1;31mcreateSale[m][body]", JSON.stringify(body, null, 2));
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1149[m[36m:[m    console.log("[POS][[1;31mcreateSale[m][customer resolved]", {
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1156[m[36m:[m      logPos(req, "warn", "[1;31mcreateSale[m blocked: unauthorized");
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1171[m[36m:[m      logPos(req, "warn", "[1;31mcreateSale[m blocked: missing branch", { admin, userBranchId, explicit, ctx });
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1193[m[36m:[m      logPos(req, "warn", "[1;31mcreateSale[m blocked: missing warehouse", { resolvedBranchId, admin, explicit, ctx });
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1214[m[36m:[m      logPos(req, "warn", "[1;31mcreateSale[m blocked: empty items");
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1245[m[36m:[m    logPos(req, "info", "[1;31mcreateSale[m start", {
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1264[m[36m:[m    const [1;31mfiscalSnapshot[m = [1;31mresolveFiscal[mSnapshot({
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1281[m[36m:[m        customer_email: [1;31mfiscalSnapshot[m?.customer_email || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1282[m[36m:[m        customer_address: [1;31mfiscalSnapshot[m?.customer_address || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1283[m[36m:[m        customer_doc_type: [1;31mfiscalSnapshot[m?.customer_doc_type || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1284[m[36m:[m        customer_tax_condition: [1;31mfiscalSnapshot[m?.customer_tax_condition || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1285[m[36m:[m        [1;31minvoice_mode[m: [1;31mfiscalSnapshot[m?.[1;31minvoice_mode[m || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1286[m[36m:[m        [1;31minvoice_type[m: [1;31mfiscalSnapshot[m?.[1;31minvoice_type[m || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1287[m[36m:[m        [1;31mfiscal[m_status:
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1288[m[36m:[m          [1;31mfiscalSnapshot[m?.[1;31minvoice_mode[m && [1;31mfiscalSnapshot[m.[1;31minvoice_mode[m !== "NO_FISCAL" ? "PENDING" : "NOT_REQUESTED",
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1400[m[36m:[m    const [1;31mfiscal[mDocument = await [1;31mmaybeCreateFiscalDocument[m({
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1402[m[36m:[m      snapshot: [1;31mfiscalSnapshot[m,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1408[m[36m:[m    logPos(req, "info", "[1;31mcreateSale[m done", {
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1411[m[36m:[m      [1;31mfiscal[m_document_id: [1;31mfiscal[mDocument?.id || sale.[1;31mfiscal[m_document_id || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1424[m[36m:[m        [1;31mfiscal[m_document_id: [1;31mfiscal[mDocument?.id || sale.[1;31mfiscal[m_document_id || null,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1425[m[36m:[m        [1;31mfiscal[m_status: sale.[1;31mfiscal[m_status || ([1;31mfiscal[mDocument ? "PENDING" : "NOT_REQUESTED"),
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1447[m[36m:[m    logPos(req, "error", "[1;31mcreateSale[m error", { code, err: e.message });
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1488[m[36m:[masync function [1;31mcreateSale[mReturn(req, res) {
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1720[m[36m:[m    logPos(req, "error", "[1;31mcreateSale[mReturn error", { code, err: e.message });
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1725[m[36m:[masync function [1;31mcreateSale[mExchange(req, res) {
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m1738[m[36m:[m    if (admin) logPos(req, "info", "[1;31mcreateSale[mExchange admin allowed");
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m2192[m[36m:[m    logPos(req, "error", "[1;31mcreateSale[mExchange error", { code, err: e.message });
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m2200[m[36m:[m  [1;31mcreateSale[m,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m2201[m[36m:[m  [1;31mcreateSale[mReturn,
+[35msrc/controllers/pos.controller.js[m[36m:[m[32m2202[m[36m:[m  [1;31mcreateSale[mExchange,
+[35msrc/models/CashRegister.js[m[36m:[m[32m81[m[36m:[m      [1;31minvoice_mode[m: {
+[35msrc/models/CashRegister.js[m[36m:[m[32m86[m[36m:[m      [1;31minvoice_type[m: {
+[35msrc/models/FiscalCertificate.js[m[36m:[m[32m45[m[36m:[m      tableName: "[1;31mfiscal[m_certificates",
+[35msrc/models/FiscalConfig.js[m[36m:[m[32m47[m[36m:[m      default_[1;31minvoice_type[m: {
+[35msrc/models/FiscalConfig.js[m[36m:[m[32m70[m[36m:[m      tableName: "[1;31mfiscal[m_configs",
+[35msrc/models/Sale.js[m[36m:[m[32m99[m[36m:[m      [1;31minvoice_mode[m: {
+[35msrc/models/Sale.js[m[36m:[m[32m104[m[36m:[m      [1;31minvoice_type[m: {
+[35msrc/models/Sale.js[m[36m:[m[32m162[m[36m:[m      [1;31mfiscal[m_status: {
+[35msrc/models/Sale.js[m[36m:[m[32m174[m[36m:[m      has_[1;31mfiscal[m_document: {
+[35msrc/models/Sale.js[m[36m:[m[32m180[m[36m:[m      [1;31mfiscal[m_document_id: {
+[35msrc/models/Sale.js[m[36m:[m[32m251[m[36m:[m        foreignKey: "[1;31mfiscal[m_document_id",
+[35msrc/models/Sale.js[m[36m:[m[32m252[m[36m:[m        as: "[1;31mfiscal[mDocument",
+[35msrc/models/SaleDocument.js[m[36m:[m[32m47[m[36m:[m      [1;31minvoice_type[m: {
+[35msrc/models/SaleDocument.js[m[36m:[m[32m57[m[36m:[m      [1;31minvoice_mode[m: {
+[35msrc/models/SaleDocument.js[m[36m:[m[32m216[m[36m:[m      [1;31mfiscal[m_status: {
+[35msrc/models/index.js[m[36m:[m[32m7[m[36m:[m// - ✅ POS [1;31mfiscal[m preparado con models nuevos: Sale / SaleItem / Payment / SaleDocument*
+[35msrc/models/index.js[m[36m:[m[32m380[m[36m:[m    foreignKey: "[1;31mfiscal[m_document_id",
+[35msrc/models/index.js[m[36m:[m[32m381[m[36m:[m    as: "[1;31mfiscal[mDocument",
+[35msrc/models/index.js[m[36m:[m[32m461[m[36m:[m    as: "[1;31mfiscal[mConfigs",
+[35msrc/models/index.js[m[36m:[m[32m472[m[36m:[m    as: "[1;31mfiscal[mCertificates",
+[35msrc/models/index.js[m[36m:[m[32m512[m[36m:[m  // POS [1;31mfiscal[m
+[35msrc/modules/pos/pos.controller.js[m[36m:[m[32m137[m[36m:[masync function [1;31mcreateSale[m(req, res) {
+[35msrc/modules/pos/pos.controller.js[m[36m:[m[32m253[m[36m:[m    console.error("[POS [1;31mcreateSale[m ERROR]", e);
+[35msrc/modules/pos/pos.controller.js[m[36m:[m[32m291[m[36m:[m  [1;31mcreateSale[m,
+[35msrc/modules/pos/pos.routes.js[m[36m:[m[32m16[m[36m:[mrouter.post("/sales", posController.[1;31mcreateSale[m);
+[35msrc/routes/admin.fiscal.routes.js[m[36m:[m[32m2[m[36m:[mconst controller = require("../controllers/admin.[1;31mfiscal[m.controller");
+[35msrc/routes/admin.fiscal.routes.js[m[36m:[m[32m9[m[36m:[m  app.use("/api/v1/admin/[1;31mfiscal[m", requireAuth, requireAdmin, router);
+[35msrc/routes/index.js[m[36m:[m[32m329[m[36m:[m    foreignKey: "[1;31mfiscal[m_document_id",
+[35msrc/routes/index.js[m[36m:[m[32m330[m[36m:[m    as: "[1;31mfiscal[mDocument",
+[35msrc/routes/index.js[m[36m:[m[32m403[m[36m:[m    as: "[1;31mfiscal[mConfigs",
+[35msrc/routes/index.js[m[36m:[m[32m414[m[36m:[m    as: "[1;31mfiscal[mCertificates",
+[35msrc/routes/index.js[m[36m:[m[32m453[m[36m:[m  // POS [1;31mfiscal[m
+[35msrc/routes/pos.routes.js[m[36m:[m[32m4[m[36m:[m// - POST /sales va al POS rápido (pos.controller.js) si existe [1;31mcreateSale[m
+[35msrc/routes/pos.routes.js[m[36m:[m[32m10[m[36m:[m// POS "rápido" (context/products/[1;31mcreateSale[m) => src/controllers/pos.controller.js
+[35msrc/routes/pos.routes.js[m[36m:[m[32m22[m[36m:[m  posController.[1;31mcreateSale[m || posController?.default?.[1;31mcreateSale[m;
+[35msrc/routes/pos.routes.js[m[36m:[m[32m25[m[36m:[mconst [1;31mcreateSale[mReturn =
+[35msrc/routes/pos.routes.js[m[36m:[m[32m26[m[36m:[m  posController.[1;31mcreateSale[mReturn || posController?.default?.[1;31mcreateSale[mReturn;
+[35msrc/routes/pos.routes.js[m[36m:[m[32m28[m[36m:[mconst [1;31mcreateSale[mExchange =
+[35msrc/routes/pos.routes.js[m[36m:[m[32m29[m[36m:[m  posController.[1;31mcreateSale[mExchange || posController?.default?.[1;31mcreateSale[mExchange;
+[35msrc/routes/pos.routes.js[m[36m:[m[32m58[m[36m:[m  posSalesController.[1;31mcreateSale[mRefund ||
+[35msrc/routes/pos.routes.js[m[36m:[m[32m63[m[36m:[m  posSalesController.[1;31mcreateSale[mExchange ||
+[35msrc/routes/pos.routes.js[m[36m:[m[32m136[m[36m:[mrouter.post("/sales/backoffice", safeFn("posSalesController.[1;31mcreateSale[m", posSalesController.[1;31mcreateSale[m));
+[35msrc/routes/pos.routes.js[m[36m:[m[32m152[m[36m:[mrouter.post("/returns", safeFn("[1;31mcreateSale[mReturn", [1;31mcreateSale[mReturn));
+[35msrc/routes/pos.routes.js[m[36m:[m[32m153[m[36m:[mrouter.post("/exchanges", safeFn("[1;31mcreateSale[mExchange", [1;31mcreateSale[mExchange));
+[35msrc/routes/v1.routes.js[m[36m:[m[32m39[m[36m:[m//    - GET  /api/v1/admin/[1;31mfiscal[m/config
+[35msrc/routes/v1.routes.js[m[36m:[m[32m40[m[36m:[m//    - PUT  /api/v1/admin/[1;31mfiscal[m/config
+[35msrc/routes/v1.routes.js[m[36m:[m[32m41[m[36m:[m//    - GET  /api/v1/admin/[1;31mfiscal[m/certificates
+[35msrc/routes/v1.routes.js[m[36m:[m[32m42[m[36m:[m//    - POST /api/v1/admin/[1;31mfiscal[m/certificates
+[35msrc/routes/v1.routes.js[m[36m:[m[32m43[m[36m:[m//    - POST /api/v1/admin/[1;31mfiscal[m/test-connection
+[35msrc/routes/v1.routes.js[m[36m:[m[32m279[m[36m:[m// ✅ NUEVO: [1;31mfiscal[m admin
+[35msrc/routes/v1.routes.js[m[36m:[m[32m280[m[36m:[mconst adminFiscalRoutes = loadRoute("./admin.[1;31mfiscal[m.routes", { optional: true });
+[35msrc/routes/v1.routes.js[m[36m:[m[32m366[m[36m:[m// ✅ NUEVO: [1;31mfiscal[m admin
+[35msrc/routes/v1.routes.js[m[36m:[m[32m368[m[36m:[m  safeUse("/admin/[1;31mfiscal[m", requireAuth, attachAccessContext, adminFiscalRoutes);
+[35msrc/routes/v1.routes.js[m[36m:[m[32m371[m[36m:[m  console.log("⚠️ adminFiscalRoutes no cargado (no existe admin.[1;31mfiscal[m.routes.js o exporta mal)");
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m200[m[36m:[m  [1;31minvoice_mode[m,
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m201[m[36m:[m  [1;31minvoice_type[m,
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m208[m[36m:[m  const invoiceMode = normalizeInvoiceMode([1;31minvoice_mode[m);
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m209[m[36m:[m  const invoiceType = normalizeInvoiceType([1;31minvoice_type[m);
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m233[m[36m:[m    const err = new Error("[1;31minvoice_mode[m inválido.");
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m240[m[36m:[m    const err = new Error("[1;31minvoice_type[m inválido.");
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m257[m[36m:[m      [1;31minvoice_mode[m: invoiceMode,
+[35msrc/services/cashRegister.service.js[m[36m:[m[32m258[m[36m:[m      [1;31minvoice_type[m: invoiceType,
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m2[m[36m:[m// src/services/[1;31mfiscal[mDocument.service.js
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m6[m[36m:[masync function [1;31mmaybeCreateFiscalDocument[m({
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m13[m[36m:[m  if (snapshot.[1;31minvoice_mode[m === "NO_FISCAL") {
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m24[m[36m:[m      [1;31minvoice_type[m: snapshot.[1;31minvoice_type[m,
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m33[m[36m:[m      [1;31mfiscal[m_status: "PENDING",
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m34[m[36m:[m      [1;31mfiscal[m_document_id: doc.id,
+[35msrc/services/fiscalDocument.service.js[m[36m:[m[32m42[m[36m:[mmodule.exports = { [1;31mmaybeCreateFiscalDocument[m };
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m2[m[36m:[m// src/services/[1;31mfiscalSnapshot[m.service.js
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m4[m[36m:[mfunction [1;31mresolveFiscal[mSnapshot({ body, cashRegister }) {
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m37[m[36m:[m  const [1;31minvoice_mode[m =
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m38[m[36m:[m    body.[1;31minvoice_mode[m ||
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m39[m[36m:[m    cashRegister?.[1;31minvoice_mode[m ||
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m42[m[36m:[m  const [1;31minvoice_type[m =
+[35msrc/services/fiscalSnapshot.service.js[m[36m:[m[32m43[m[36m:[m    body.[1;31minvoice_type[m ||
+[35msrc/services

@@ -34,12 +34,15 @@ function resolveFiscalSnapshot({ body, cashRegister }) {
     c.tax_condition ||
     (customer_doc ? "RESPONSABLE_INSCRIPTO" : "CONSUMIDOR_FINAL");
 
+  // 🔥 FIX CLAVE: tomar primero lo que viene del POS (extra)
   const invoice_mode =
+    extra.invoice_mode ||
     body.invoice_mode ||
     cashRegister?.invoice_mode ||
     "NO_FISCAL";
 
   const invoice_type =
+    extra.invoice_type ||
     body.invoice_type ||
     cashRegister?.invoice_type ||
     "B";
