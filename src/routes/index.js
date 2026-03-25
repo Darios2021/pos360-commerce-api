@@ -4,6 +4,8 @@
 // - blindado anti-crash + ShopLink opcional
 // - ✅ NUEVO: ProductVideo (opcional) + asociaciones Product ↔ ProductVideo
 // - ✅ NUEVO: CashRegister + CashMovement (opcionales) + asociaciones con Branch/User/Sale
+// - ✅ NUEVO: SaleDocument + SaleDocumentVatLine + SaleDocumentTaxLine + SaleDocumentRelation
+// - ✅ NUEVO: FiscalConfig + FiscalCertificate
 
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/sequelize");
@@ -20,7 +22,6 @@ let RolePermission = null;
 try {
   RolePermission = require("./role_permission")(sequelize, DataTypes);
 } catch (e) {
-  // eslint-disable-next-line no-console
   console.log("⚠️ RolePermission no cargado");
 }
 
@@ -35,17 +36,14 @@ const StockBalance = require("./StockBalance")(sequelize, DataTypes);
 const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 
-// ✅ NUEVO: ProductVideo (puede no existir todavía)
+// ===== ProductVideo (opcional) =====
 let ProductVideo = null;
 try {
-  // opción A: models/ProductVideo.js
   ProductVideo = require("./ProductVideo")(sequelize, DataTypes);
 } catch (e1) {
   try {
-    // opción B: models/productVideo.model.js (por si lo nombraste así)
     ProductVideo = require("./productVideo.model")(sequelize, DataTypes);
   } catch (e2) {
-    // eslint-disable-next-line no-console
     console.log("⚠️ ProductVideo no cargado (models/ProductVideo.js no encontrado o falló)");
     ProductVideo = null;
   }
@@ -56,6 +54,36 @@ const Sale = require("./sale.model")(sequelize, DataTypes);
 const SaleItem = require("./sale_item.model")(sequelize, DataTypes);
 const Payment = require("./payment.model")(sequelize, DataTypes);
 
+// ===== POS FISCAL =====
+let SaleDocument = null;
+let SaleDocumentVatLine = null;
+let SaleDocumentTaxLine = null;
+let SaleDocumentRelation = null;
+
+try {
+  SaleDocument = require("./SaleDocument")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ SaleDocument no cargado");
+}
+
+try {
+  SaleDocumentVatLine = require("./SaleDocumentVatLine")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ SaleDocumentVatLine no cargado");
+}
+
+try {
+  SaleDocumentTaxLine = require("./SaleDocumentTaxLine")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ SaleDocumentTaxLine no cargado");
+}
+
+try {
+  SaleDocumentRelation = require("./SaleDocumentRelation")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ SaleDocumentRelation no cargado");
+}
+
 // ===== POS EXT =====
 let SaleRefund = null;
 let SaleExchange = null;
@@ -63,14 +91,12 @@ let SaleExchange = null;
 try {
   SaleRefund = require("./SaleRefund")(sequelize, DataTypes);
 } catch (e) {
-  // eslint-disable-next-line no-console
   console.log("⚠️ SaleRefund no cargado (models/SaleRefund.js no encontrado o falló)");
 }
 
 try {
   SaleExchange = require("./SaleExchange")(sequelize, DataTypes);
 } catch (e) {
-  // eslint-disable-next-line no-console
   console.log("⚠️ SaleExchange no cargado (models/SaleExchange.js no encontrado o falló)");
 }
 
@@ -84,7 +110,6 @@ try {
   try {
     CashRegister = require("./cashRegister.model")(sequelize, DataTypes);
   } catch (e2) {
-    // eslint-disable-next-line no-console
     console.log("⚠️ CashRegister no cargado (models/CashRegister.js no encontrado o falló)");
     CashRegister = null;
   }
@@ -96,19 +121,33 @@ try {
   try {
     CashMovement = require("./cashMovement.model")(sequelize, DataTypes);
   } catch (e2) {
-    // eslint-disable-next-line no-console
     console.log("⚠️ CashMovement no cargado (models/CashMovement.js no encontrado o falló)");
     CashMovement = null;
   }
 }
 
-// ✅ CAMINO B: ShopLink (puede no existir todavía)
+// ===== ShopLink (opcional) =====
 let ShopLink = null;
 try {
   ShopLink = require("./ShopLink")(sequelize, DataTypes);
 } catch (e) {
-  // eslint-disable-next-line no-console
   console.log("⚠️ ShopLink no cargado (models/ShopLink.js no encontrado o falló)");
+}
+
+// ===== Fiscal admin =====
+let FiscalConfig = null;
+let FiscalCertificate = null;
+
+try {
+  FiscalConfig = require("./FiscalConfig")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ FiscalConfig no cargado");
+}
+
+try {
+  FiscalCertificate = require("./FiscalCertificate")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ FiscalCertificate no cargado");
 }
 
 // ==========================================
@@ -148,7 +187,7 @@ safeBelongsToMany(Role, User, {
   as: "users",
 });
 
-// Roles ↔ Permissions (si existe tabla puente)
+// Roles ↔ Permissions
 if (RolePermission) {
   safeBelongsToMany(Role, Permission, {
     through: { model: RolePermission, timestamps: false },
@@ -164,7 +203,7 @@ if (RolePermission) {
   });
 }
 
-// Users ↔ Branches (user_branches)
+// Users ↔ Branches
 safeBelongsToMany(User, Branch, {
   through: { model: UserBranch, timestamps: false },
   foreignKey: "user_id",
@@ -178,7 +217,7 @@ safeBelongsToMany(Branch, User, {
   as: "users",
 });
 
-// Categorías (recursivo)
+// Categorías
 safeBelongsTo(Category, Category, { foreignKey: "parent_id", as: "parent" });
 safeHasMany(Category, Category, { foreignKey: "parent_id", as: "children" });
 
@@ -190,7 +229,7 @@ safeHasMany(Category, Subcategory, { foreignKey: "category_id", as: "subcategori
 safeBelongsTo(Product, Branch, { foreignKey: "branch_id", as: "branch" });
 safeHasMany(Branch, Product, { foreignKey: "branch_id", as: "products" });
 
-// Product -> User (created_by)
+// Product -> User
 safeBelongsTo(Product, User, { foreignKey: "created_by", as: "createdByUser" });
 safeHasMany(User, Product, { foreignKey: "created_by", as: "products_created" });
 
@@ -206,7 +245,7 @@ safeHasMany(Subcategory, Product, { foreignKey: "subcategory_id", as: "products"
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
 safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
-// ✅ Product ↔ Videos (SOLO si existe el model)
+// Product ↔ Videos
 if (ProductVideo) {
   safeHasMany(Product, ProductVideo, { foreignKey: "product_id", as: "videos" });
   safeBelongsTo(ProductVideo, Product, { foreignKey: "product_id", as: "product" });
@@ -239,7 +278,7 @@ safeBelongsTo(SaleItem, Warehouse, { foreignKey: "warehouse_id", as: "warehouse"
 safeHasMany(Sale, Payment, { foreignKey: "sale_id", as: "payments" });
 safeBelongsTo(Payment, Sale, { foreignKey: "sale_id", as: "sale" });
 
-// ✅ CAJA: CashRegister ↔ Branch/User
+// CAJA: CashRegister ↔ Branch/User
 if (CashRegister) {
   safeBelongsTo(CashRegister, Branch, { foreignKey: "branch_id", as: "branch" });
   safeHasMany(Branch, CashRegister, { foreignKey: "branch_id", as: "cashRegisters" });
@@ -251,7 +290,7 @@ if (CashRegister) {
   safeHasMany(User, CashRegister, { foreignKey: "closed_by", as: "closedCashRegisters" });
 }
 
-// ✅ CAJA: CashMovement ↔ CashRegister/User
+// CAJA: CashMovement ↔ CashRegister/User
 if (CashMovement && CashRegister) {
   safeBelongsTo(CashMovement, CashRegister, { foreignKey: "cash_register_id", as: "cashRegister" });
   safeHasMany(CashRegister, CashMovement, { foreignKey: "cash_register_id", as: "movements" });
@@ -261,18 +300,17 @@ if (CashMovement) {
   safeHasMany(User, CashMovement, { foreignKey: "user_id", as: "cashMovements" });
 }
 
-// ✅ VENTAS ↔ CAJA
+// VENTAS ↔ CAJA
 if (CashRegister) {
   safeBelongsTo(Sale, CashRegister, { foreignKey: "cash_register_id", as: "cashRegister" });
   safeHasMany(CashRegister, Sale, { foreignKey: "cash_register_id", as: "sales" });
 }
 
-// POS EXT: Refunds (VIEW) + Exchanges (TABLE)
+// POS EXT
 if (SaleRefund) {
   safeBelongsTo(SaleRefund, Sale, { foreignKey: "sale_id", as: "sale" });
   safeBelongsTo(SaleRefund, Branch, { foreignKey: "branch_id", as: "branch" });
   safeBelongsTo(SaleRefund, User, { foreignKey: "user_id", as: "user" });
-
   safeHasMany(Sale, SaleRefund, { foreignKey: "sale_id", as: "refunds" });
 }
 
@@ -280,6 +318,108 @@ if (SaleExchange) {
   safeBelongsTo(SaleExchange, Sale, { foreignKey: "original_sale_id", as: "originalSale" });
   safeBelongsTo(SaleExchange, Sale, { foreignKey: "new_sale_id", as: "newSale" });
   safeBelongsTo(SaleExchange, User, { foreignKey: "created_by", as: "creator" });
+}
+
+// POS FISCAL
+if (SaleDocument) {
+  safeBelongsTo(SaleDocument, Sale, { foreignKey: "sale_id", as: "sale" });
+  safeHasMany(Sale, SaleDocument, { foreignKey: "sale_id", as: "documents" });
+
+  safeBelongsTo(Sale, SaleDocument, {
+    foreignKey: "fiscal_document_id",
+    as: "fiscalDocument",
+  });
+
+  safeBelongsTo(SaleDocument, Branch, {
+    foreignKey: "branch_id",
+    as: "branch",
+  });
+
+  if (CashRegister) {
+    safeBelongsTo(SaleDocument, CashRegister, {
+      foreignKey: "cash_register_id",
+      as: "cashRegister",
+    });
+  }
+
+  safeBelongsTo(SaleDocument, User, {
+    foreignKey: "issued_by",
+    as: "issuedBy",
+  });
+}
+
+if (SaleDocument && SaleDocumentVatLine) {
+  safeHasMany(SaleDocument, SaleDocumentVatLine, {
+    foreignKey: "sale_document_id",
+    as: "vatLines",
+  });
+  safeBelongsTo(SaleDocumentVatLine, SaleDocument, {
+    foreignKey: "sale_document_id",
+    as: "document",
+  });
+}
+
+if (SaleDocument && SaleDocumentTaxLine) {
+  safeHasMany(SaleDocument, SaleDocumentTaxLine, {
+    foreignKey: "sale_document_id",
+    as: "taxLines",
+  });
+  safeBelongsTo(SaleDocumentTaxLine, SaleDocument, {
+    foreignKey: "sale_document_id",
+    as: "document",
+  });
+}
+
+if (SaleDocument && SaleDocumentRelation) {
+  safeHasMany(SaleDocument, SaleDocumentRelation, {
+    foreignKey: "sale_document_id",
+    as: "relations",
+  });
+
+  safeHasMany(SaleDocument, SaleDocumentRelation, {
+    foreignKey: "related_sale_document_id",
+    as: "relatedToMe",
+  });
+
+  safeBelongsTo(SaleDocumentRelation, SaleDocument, {
+    foreignKey: "sale_document_id",
+    as: "document",
+  });
+
+  safeBelongsTo(SaleDocumentRelation, SaleDocument, {
+    foreignKey: "related_sale_document_id",
+    as: "relatedDocument",
+  });
+}
+
+// FISCAL ADMIN
+if (FiscalConfig) {
+  safeBelongsTo(FiscalConfig, Branch, {
+    foreignKey: "branch_id",
+    as: "branch",
+  });
+  safeHasMany(Branch, FiscalConfig, {
+    foreignKey: "branch_id",
+    as: "fiscalConfigs",
+  });
+}
+
+if (FiscalCertificate) {
+  safeBelongsTo(FiscalCertificate, Branch, {
+    foreignKey: "branch_id",
+    as: "branch",
+  });
+  safeHasMany(Branch, FiscalCertificate, {
+    foreignKey: "branch_id",
+    as: "fiscalCertificates",
+  });
+}
+
+if (FiscalConfig && FiscalCertificate) {
+  safeBelongsTo(FiscalConfig, FiscalCertificate, {
+    foreignKey: "cert_active_id",
+    as: "activeCertificate",
+  });
 }
 
 module.exports = {
@@ -310,6 +450,12 @@ module.exports = {
   SaleItem,
   Payment,
 
+  // POS fiscal
+  SaleDocument,
+  SaleDocumentVatLine,
+  SaleDocumentTaxLine,
+  SaleDocumentRelation,
+
   // POS EXT
   SaleRefund,
   SaleExchange,
@@ -320,4 +466,8 @@ module.exports = {
 
   // Shop
   ShopLink,
+
+  // Fiscal admin
+  FiscalConfig,
+  FiscalCertificate,
 };

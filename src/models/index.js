@@ -1,10 +1,11 @@
-// ✅ COPY-PASTE FINAL COMPLETO
 // src/models/index.js
+// ✅ COPY-PASTE FINAL COMPLETO
 // - Subcategory + Product->createdByUser + SaleRefund/SaleExchange
 // - blindado anti-crash + ShopLink opcional
 // - ✅ ProductVideo (opcional) + asociaciones Product ↔ ProductVideo
 // - ✅ CashRegister + CashMovement (opcionales) + asociaciones con Branch/User/Sale
 // - ✅ POS fiscal preparado con models nuevos: Sale / SaleItem / Payment / SaleDocument*
+// - ✅ FiscalConfig + FiscalCertificate (opcionales)
 // - ✅ FIX: sin ejecutar associate(models) al final para evitar aliases duplicados
 
 const { DataTypes } = require("sequelize");
@@ -49,12 +50,12 @@ try {
   }
 }
 
-// ===== POS CORE (NUEVOS) =====
+// ===== POS CORE =====
 const Sale = require("./Sale")(sequelize, DataTypes);
 const SaleItem = require("./SaleItem")(sequelize, DataTypes);
 const Payment = require("./Payment")(sequelize, DataTypes);
 
-// ===== POS FISCAL (opcionales por despliegue seguro) =====
+// ===== POS FISCAL =====
 let SaleDocument = null;
 let SaleDocumentVatLine = null;
 let SaleDocumentTaxLine = null;
@@ -145,6 +146,22 @@ try {
     console.log("⚠️ EcomCustomer no cargado");
     EcomCustomer = null;
   }
+}
+
+// ===== FISCAL ADMIN (opcionales) =====
+let FiscalConfig = null;
+let FiscalCertificate = null;
+
+try {
+  FiscalConfig = require("./FiscalConfig")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ FiscalConfig no cargado");
+}
+
+try {
+  FiscalCertificate = require("./FiscalCertificate")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ FiscalCertificate no cargado");
 }
 
 // ==========================================
@@ -315,7 +332,7 @@ if (CashMovement) {
   safeHasMany(User, CashMovement, { foreignKey: "user_id", as: "cashMovements" });
 }
 
-// POS EXT: Refunds (VIEW) + Exchanges (TABLE)
+// POS EXT: Refunds + Exchanges
 if (SaleRefund) {
   safeBelongsTo(SaleRefund, Sale, { foreignKey: "sale_id", as: "sale" });
   safeBelongsTo(SaleRefund, Branch, { foreignKey: "branch_id", as: "branch" });
@@ -409,6 +426,36 @@ if (SaleDocument && SaleDocumentRelation) {
   });
 }
 
+// ===== FISCAL ADMIN =====
+if (FiscalConfig) {
+  safeBelongsTo(FiscalConfig, Branch, {
+    foreignKey: "branch_id",
+    as: "branch",
+  });
+  safeHasMany(Branch, FiscalConfig, {
+    foreignKey: "branch_id",
+    as: "fiscalConfigs",
+  });
+}
+
+if (FiscalCertificate) {
+  safeBelongsTo(FiscalCertificate, Branch, {
+    foreignKey: "branch_id",
+    as: "branch",
+  });
+  safeHasMany(Branch, FiscalCertificate, {
+    foreignKey: "branch_id",
+    as: "fiscalCertificates",
+  });
+}
+
+if (FiscalConfig && FiscalCertificate) {
+  safeBelongsTo(FiscalConfig, FiscalCertificate, {
+    foreignKey: "cert_active_id",
+    as: "activeCertificate",
+  });
+}
+
 const models = {
   sequelize,
 
@@ -454,6 +501,10 @@ const models = {
   // Shop / Customer
   ShopLink,
   EcomCustomer,
+
+  // Fiscal admin
+  FiscalConfig,
+  FiscalCertificate,
 };
 
 module.exports = models;
