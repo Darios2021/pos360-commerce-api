@@ -527,7 +527,43 @@ async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transacti
   };
 }
 
+// ✅ COPY-PASTE FINAL COMPLETO
+// pegar cerca de insertPaymentRow en src/controllers/pos.controller.js
+
+function cleanPaymentNote(value, maxLen = 255) {
+  if (value == null) return null;
+
+  // si viene objeto/array, NO lo mandamos a note
+  if (typeof value === "object") {
+    return null;
+  }
+
+  let s = String(value).trim();
+  if (!s) return null;
+
+  // si parece json o metadata serializada, tampoco va a note
+  if (
+    s.startsWith("{") ||
+    s.startsWith("[") ||
+    s.includes('"provider_code"') ||
+    s.includes('"payment_method_id"') ||
+    s.includes('"payment_method_code"') ||
+    s.includes('"pricing_mode"') ||
+    s.includes('"register_group"')
+  ) {
+    return null;
+  }
+
+  if (s.length > maxLen) {
+    s = s.slice(0, maxLen);
+  }
+
+  return s || null;
+}
+
 async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
+  const safeNote = cleanPaymentNote(paymentResolved?.note);
+
   await sequelize.query(
     `
     INSERT INTO payments (
@@ -584,29 +620,49 @@ async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
       replacements: {
         sale_id: saleId,
         payment_method_id: paymentResolved.payment_method_id || null,
-        payment_method_code_snapshot: paymentResolved.snapshot.payment_method_code_snapshot,
-        payment_method_name_snapshot: paymentResolved.snapshot.payment_method_name_snapshot,
-        provider_code_snapshot: paymentResolved.snapshot.provider_code_snapshot,
-        card_brand_snapshot: paymentResolved.snapshot.card_brand_snapshot,
-        card_kind_snapshot: paymentResolved.snapshot.card_kind_snapshot,
-        pricing_mode_snapshot: paymentResolved.snapshot.pricing_mode_snapshot,
-        base_amount_snapshot: paymentResolved.snapshot.base_amount_snapshot,
-        charged_amount_snapshot: paymentResolved.snapshot.charged_amount_snapshot,
-        surcharge_percent_snapshot: paymentResolved.snapshot.surcharge_percent_snapshot,
-        surcharge_fixed_amount_snapshot: paymentResolved.snapshot.surcharge_fixed_amount_snapshot,
-        installments_snapshot: paymentResolved.snapshot.installments_snapshot,
-        per_installment_amount_snapshot: paymentResolved.snapshot.per_installment_amount_snapshot,
-        reference_required_snapshot: paymentResolved.snapshot.reference_required_snapshot ? 1 : 0,
-        payment_meta_snapshot: paymentResolved.snapshot.payment_meta_snapshot,
+        payment_method_code_snapshot:
+          paymentResolved.snapshot.payment_method_code_snapshot,
+        payment_method_name_snapshot:
+          paymentResolved.snapshot.payment_method_name_snapshot,
+        provider_code_snapshot:
+          paymentResolved.snapshot.provider_code_snapshot,
+        card_brand_snapshot:
+          paymentResolved.snapshot.card_brand_snapshot,
+        card_kind_snapshot:
+          paymentResolved.snapshot.card_kind_snapshot,
+        pricing_mode_snapshot:
+          paymentResolved.snapshot.pricing_mode_snapshot,
+        base_amount_snapshot:
+          paymentResolved.snapshot.base_amount_snapshot,
+        charged_amount_snapshot:
+          paymentResolved.snapshot.charged_amount_snapshot,
+        surcharge_percent_snapshot:
+          paymentResolved.snapshot.surcharge_percent_snapshot,
+        surcharge_fixed_amount_snapshot:
+          paymentResolved.snapshot.surcharge_fixed_amount_snapshot,
+        installments_snapshot:
+          paymentResolved.snapshot.installments_snapshot,
+        per_installment_amount_snapshot:
+          paymentResolved.snapshot.per_installment_amount_snapshot,
+        reference_required_snapshot:
+          paymentResolved.snapshot.reference_required_snapshot ? 1 : 0,
+        payment_meta_snapshot:
+          paymentResolved.snapshot.payment_meta_snapshot,
         method: paymentResolved.dbMethod,
         amount: paymentResolved.amount,
         installments: paymentResolved.installments,
         reference: paymentResolved.reference,
-        note: paymentResolved.note,
+        note: safeNote,
       },
     }
   );
 }
+
+
+
+
+
+
 
 async function insertSaleReturnPaymentRow({ returnId, paymentResolved, transaction }) {
   await sequelize.query(
