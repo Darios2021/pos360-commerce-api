@@ -1051,10 +1051,17 @@ async function listProductsForPos(req, res) {
 /* =========================
    POST /pos/sales
 ========================= */
+/* =========================
+   POST /pos/sales
+========================= */
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
 
   let t;
+  let fiscalSnapshot = null;
+  let currentCashRegister = null;
+  let sale = null;
+
   try {
     const admin = isAdminReq(req);
     if (admin) logPos(req, "info", "createSale admin allowed");
@@ -1154,7 +1161,11 @@ async function createSale(req, res) {
 
     if (!req.user?.id) {
       logPos(req, "warn", "createSale blocked: unauthorized");
-      return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No autenticado" });
+      return res.status(401).json({
+        ok: false,
+        code: "UNAUTHORIZED",
+        message: "No autenticado",
+      });
     }
 
     const userId = toInt(req.user.id, 0);
@@ -1168,7 +1179,12 @@ async function createSale(req, res) {
       : userBranchId;
 
     if (!resolvedBranchId) {
-      logPos(req, "warn", "createSale blocked: missing branch", { admin, userBranchId, explicit, ctx });
+      logPos(req, "warn", "createSale blocked: missing branch", {
+        admin,
+        userBranchId,
+        explicit,
+        ctx,
+      });
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -1190,7 +1206,12 @@ async function createSale(req, res) {
     }
 
     if (!resolvedWarehouseId) {
-      logPos(req, "warn", "createSale blocked: missing warehouse", { resolvedBranchId, admin, explicit, ctx });
+      logPos(req, "warn", "createSale blocked: missing warehouse", {
+        resolvedBranchId,
+        admin,
+        explicit,
+        ctx,
+      });
       return res.status(400).json({
         ok: false,
         code: "WAREHOUSE_REQUIRED",
@@ -1200,7 +1221,10 @@ async function createSale(req, res) {
     }
 
     if (admin) {
-      const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
+      const ok = await assertWarehouseBelongsToBranch(
+        resolvedWarehouseId,
+        resolvedBranchId
+      );
       if (!ok) {
         return res.status(400).json({
           ok: false,
@@ -1212,7 +1236,11 @@ async function createSale(req, res) {
 
     if (items.length === 0) {
       logPos(req, "warn", "createSale blocked: empty items");
-      return res.status(400).json({ ok: false, code: "EMPTY_ITEMS", message: "Venta sin items" });
+      return res.status(400).json({
+        ok: false,
+        code: "EMPTY_ITEMS",
+        message: "Venta sin items",
+      });
     }
 
     const normalizedItems = items.map((i) => ({
@@ -1221,21 +1249,33 @@ async function createSale(req, res) {
       unit_price: toNum(i.unit_price),
     }));
 
+    console.log("[POS][createSale][normalizedItems]", normalizedItems);
+    console.log("[POS][createSale][payments raw]", payments);
+
     for (const it of normalizedItems) {
       if (!it.product_id) {
-        throw Object.assign(new Error("Item inválido: falta product_id"), { httpStatus: 400, code: "INVALID_ITEM" });
+        throw Object.assign(new Error("Item inválido: falta product_id"), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       }
       if (!Number.isFinite(it.quantity) || it.quantity <= 0) {
-        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
+        throw Object.assign(
+          new Error(`Item inválido: quantity=${it.quantity}`),
+          {
+            httpStatus: 400,
+            code: "INVALID_ITEM",
+          }
+        );
       }
       if (!Number.isFinite(it.unit_price) || it.unit_price <= 0) {
-        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
-          httpStatus: 400,
-          code: "INVALID_ITEM",
-        });
+        throw Object.assign(
+          new Error(`Item inválido: unit_price=${it.unit_price}`),
+          {
+            httpStatus: 400,
+            code: "INVALID_ITEM",
+          }
+        );
       }
     }
 
@@ -1256,17 +1296,24 @@ async function createSale(req, res) {
 
     t = await sequelize.transaction();
 
-    const currentCashRegister = await getCurrentOpenCashRegister({
+    currentCashRegister = await getCurrentOpenCashRegister({
       branch_id: resolvedBranchId,
       transaction: t,
     });
 
-    const fiscalSnapshot = resolveFiscalSnapshot({
+    console.log("[POS][createSale][cashRegister]", currentCashRegister);
+
+    fiscalSnapshot = resolveFiscalSnapshot({
       body,
       cashRegister: currentCashRegister,
     });
 
-    const sale = await Sale.create(
+    console.log(
+      "[POS][createSale][fiscalSnapshot]",
+      JSON.stringify(fiscalSnapshot, null, 2)
+    );
+
+    sale = await Sale.create(
       {
         branch_id: resolvedBranchId,
         cash_register_id: currentCashRegister?.id || null,
@@ -1284,8 +1331,12 @@ async function createSale(req, res) {
         customer_tax_condition: fiscalSnapshot?.customer_tax_condition || null,
         invoice_mode: fiscalSnapshot?.invoice_mode || null,
         invoice_type: fiscalSnapshot?.invoice_type || null,
+        customer_type: fiscalSnapshot?.customer_type || null,
         fiscal_status:
-          fiscalSnapshot?.invoice_mode && fiscalSnapshot.invoice_mode !== "NO_FISCAL" ? "PENDING" : "NOT_REQUESTED",
+          fiscalSnapshot?.invoice_mode &&
+          fiscalSnapshot.invoice_mode !== "NO_FISCAL"
+            ? "PENDING"
+            : "NOT_REQUESTED",
 
         subtotal,
         discount_total: 0,
@@ -1299,6 +1350,8 @@ async function createSale(req, res) {
       { transaction: t }
     );
 
+    console.log("[POS][createSale][sale created]", sale?.toJSON?.() || sale);
+
     const movement = await StockMovement.create(
       {
         type: "out",
@@ -1311,36 +1364,61 @@ async function createSale(req, res) {
       { transaction: t }
     );
 
+    console.log("[POS][createSale][movement created]", movement?.toJSON?.() || movement);
+
     for (const it of normalizedItems) {
+      console.log("[POS][createSale][item loop start]", it);
+
       const p = await Product.findByPk(it.product_id, { transaction: t });
       if (!p) {
-        throw Object.assign(new Error(`Producto no existe: id=${it.product_id}`), {
-          httpStatus: 400,
-          code: "PRODUCT_NOT_FOUND",
-        });
+        throw Object.assign(
+          new Error(`Producto no existe: id=${it.product_id}`),
+          {
+            httpStatus: 400,
+            code: "PRODUCT_NOT_FOUND",
+          }
+        );
       }
 
       const sb = await StockBalance.findOne({
-        where: { warehouse_id: resolvedWarehouseId, product_id: it.product_id },
+        where: {
+          warehouse_id: resolvedWarehouseId,
+          product_id: it.product_id,
+        },
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
 
+      console.log("[POS][createSale][stockBalance before]", sb?.toJSON?.() || sb);
+
       if (!sb) {
         throw Object.assign(
-          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`),
-          { httpStatus: 409, code: "STOCK_BALANCE_MISSING" }
+          new Error(
+            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
+          ),
+          {
+            httpStatus: 409,
+            code: "STOCK_BALANCE_MISSING",
+          }
         );
       }
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
-          { httpStatus: 409, code: "STOCK_INSUFFICIENT" }
+          new Error(
+            `Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`
+          ),
+          {
+            httpStatus: 409,
+            code: "STOCK_INSUFFICIENT",
+          }
         );
       }
 
-      await sb.update({ qty: literal(`qty - ${it.quantity}`) }, { transaction: t });
+      await sb.update(
+        { qty: literal(`qty - ${it.quantity}`) },
+        { transaction: t }
+      );
 
       const lineTotal = it.quantity * it.unit_price;
 
@@ -1370,11 +1448,21 @@ async function createSale(req, res) {
         },
         { transaction: t }
       );
+
+      console.log("[POS][createSale][item loop done]", {
+        product_id: it.product_id,
+        quantity: it.quantity,
+        unit_price: it.unit_price,
+        lineTotal,
+      });
     }
 
     let totalPaid = 0;
+    const resolvedPayments = [];
 
     for (const pay of payments) {
+      console.log("[POS][createSale][payment input]", pay);
+
       const resolvedPay = await resolveSalePaymentInput({
         pay,
         branchId: resolvedBranchId,
@@ -1382,6 +1470,9 @@ async function createSale(req, res) {
         transaction: t,
       });
 
+      console.log("[POS][createSale][payment resolved]", resolvedPay);
+
+      resolvedPayments.push(resolvedPay);
       totalPaid += resolvedPay.amount;
 
       await insertPaymentRow({
@@ -1397,11 +1488,23 @@ async function createSale(req, res) {
     sale.change_total = totalPaid - subtotal;
     await sale.save({ transaction: t });
 
+    console.log("[POS][createSale][sale totals updated]", {
+      sale_id: sale.id,
+      subtotal,
+      totalPaid,
+      change_total: sale.change_total,
+    });
+
     const fiscalDocument = await maybeCreateFiscalDocument({
       sale,
       snapshot: fiscalSnapshot,
       transaction: t,
     });
+
+    console.log(
+      "[POS][createSale][fiscalDocument]",
+      fiscalDocument?.toJSON?.() || fiscalDocument || null
+    );
 
     await t.commit();
 
@@ -1422,7 +1525,8 @@ async function createSale(req, res) {
         branch_id: sale.branch_id,
         cash_register_id: sale.cash_register_id || null,
         fiscal_document_id: fiscalDocument?.id || sale.fiscal_document_id || null,
-        fiscal_status: sale.fiscal_status || (fiscalDocument ? "PENDING" : "NOT_REQUESTED"),
+        fiscal_status:
+          sale.fiscal_status || (fiscalDocument ? "PENDING" : "NOT_REQUESTED"),
         user_id: sale.user_id,
         warehouse_id: resolvedWarehouseId,
 
@@ -1439,13 +1543,82 @@ async function createSale(req, res) {
       },
     });
   } catch (e) {
-    if (t) await t.rollback();
+    try {
+      if (t) await t.rollback();
+    } catch (rbErr) {
+      console.error("[POS][createSale][rollback error]", {
+        message: rbErr?.message || null,
+        stack: rbErr?.stack || null,
+      });
+    }
 
-    const status = e.httpStatus || 500;
-    const code = e.code || "POS_CREATE_SALE_ERROR";
+    const status =
+      Number(e?.httpStatus) ||
+      Number(e?.status) ||
+      Number(e?.response?.status) ||
+      500;
 
-    logPos(req, "error", "createSale error", { code, err: e.message });
-    return res.status(status).json({ ok: false, code, message: e.message });
+    const code = e?.code || "POS_CREATE_SALE_ERROR";
+
+    const errorPayload = {
+      ok: false,
+      code,
+      message: e?.message || "Error al registrar la venta",
+      detail: {
+        name: e?.name || null,
+        stack: e?.stack || null,
+
+        parent_message: e?.parent?.message || null,
+        parent_code: e?.parent?.code || null,
+        parent_errno: e?.parent?.errno || null,
+        parent_sql_state: e?.parent?.sqlState || null,
+        sql_message: e?.parent?.sqlMessage || null,
+        sql: e?.parent?.sql || e?.sql || null,
+
+        original_message: e?.original?.message || null,
+        original_code: e?.original?.code || null,
+        original_errno: e?.original?.errno || null,
+        original_sql_state: e?.original?.sqlState || null,
+
+        errors: Array.isArray(e?.errors)
+          ? e.errors.map((x) => ({
+              message: x?.message || null,
+              path: x?.path || null,
+              value: x?.value ?? null,
+              type: x?.type || null,
+              validatorKey: x?.validatorKey || null,
+            }))
+          : [],
+
+        context: {
+          sale_id: sale?.id || null,
+          cash_register_id: currentCashRegister?.id || null,
+          fiscalSnapshot,
+          body: req?.body || null,
+        },
+      },
+    };
+
+    console.error("[POS][createSale][ERROR]", {
+      rid: req._rid,
+      status,
+      code,
+      message: errorPayload.message,
+      detail: errorPayload.detail,
+    });
+
+    logPos(req, "error", "createSale error", {
+      code,
+      err: e?.message || null,
+      status,
+      sale_id: sale?.id || null,
+      cash_register_id: currentCashRegister?.id || null,
+      parent_message: e?.parent?.message || null,
+      sql_message: e?.parent?.sqlMessage || null,
+      original_message: e?.original?.message || null,
+    });
+
+    return res.status(status).json(errorPayload);
   }
 }
 
