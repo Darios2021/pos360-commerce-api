@@ -267,7 +267,7 @@ function buildPayload(raw = {}) {
 }
 
 /* =========================
-   Validation
+   Validation + normalization
 ========================= */
 function validatePayload(payload, { isCreate = false } = {}) {
   if (isCreate) {
@@ -350,6 +350,13 @@ function validatePayload(payload, { isCreate = false } = {}) {
     payload.requires_card_holder = false;
   }
 
+  if (payload.kind === "CARD" && !payload.card_kind) {
+    const e = new Error("Para kind=CARD, card_kind es requerido");
+    e.httpStatus = 400;
+    e.code = "PAYMENT_METHOD_CARD_KIND_REQUIRED";
+    throw e;
+  }
+
   if (payload.kind === "CASH") {
     payload.allows_change = true;
     payload.counts_as_cash_in_register = true;
@@ -387,14 +394,22 @@ function validatePayload(payload, { isCreate = false } = {}) {
     throw e;
   }
 
-  if (payload.fixed_price_value !== undefined && payload.fixed_price_value !== null && !isPositive(payload.fixed_price_value)) {
+  if (
+    payload.fixed_price_value !== undefined &&
+    payload.fixed_price_value !== null &&
+    !isPositive(payload.fixed_price_value)
+  ) {
     const e = new Error("fixed_price_value inválido");
     e.httpStatus = 400;
     e.code = "PAYMENT_METHOD_FIXED_PRICE_INVALID";
     throw e;
   }
 
-  if (payload.rounding_value !== undefined && payload.rounding_value !== null && !isPositive(payload.rounding_value)) {
+  if (
+    payload.rounding_value !== undefined &&
+    payload.rounding_value !== null &&
+    !isPositive(payload.rounding_value)
+  ) {
     const e = new Error("rounding_value inválido");
     e.httpStatus = 400;
     e.code = "PAYMENT_METHOD_ROUNDING_VALUE_INVALID";
@@ -454,7 +469,11 @@ function validatePayload(payload, { isCreate = false } = {}) {
     }
   }
 
-  if (payload.change_limit_amount !== undefined && payload.change_limit_amount !== null && !isPositiveOrZero(payload.change_limit_amount)) {
+  if (
+    payload.change_limit_amount !== undefined &&
+    payload.change_limit_amount !== null &&
+    !isPositiveOrZero(payload.change_limit_amount)
+  ) {
     const e = new Error("change_limit_amount inválido");
     e.httpStatus = 400;
     e.code = "PAYMENT_METHOD_CHANGE_LIMIT_INVALID";
@@ -495,8 +514,43 @@ function validatePayload(payload, { isCreate = false } = {}) {
     throw e;
   }
 
+  // =========================
+  // Reglas fuertes POS para tarjetas
+  // =========================
+  if (payload.kind === "CARD") {
+    if (payload.card_kind === "DEBIT") {
+      payload.pricing_mode = "SALE_PRICE";
+      payload.supports_installments = false;
+      payload.min_installments = 1;
+      payload.max_installments = 1;
+      payload.default_installments = 1;
+    }
+
+    if (payload.card_kind === "CREDIT") {
+      payload.pricing_mode = "LIST_PRICE";
+      payload.supports_installments = true;
+      if (payload.min_installments < 1) payload.min_installments = 1;
+      if (payload.max_installments < payload.min_installments) payload.max_installments = payload.min_installments;
+      if (payload.default_installments < payload.min_installments) payload.default_installments = payload.min_installments;
+      if (payload.default_installments > payload.max_installments) payload.default_installments = payload.max_installments;
+    }
+
+    if (payload.card_kind === "BOTH") {
+      payload.supports_installments = true;
+      if (payload.min_installments < 1) payload.min_installments = 1;
+      if (payload.max_installments < payload.min_installments) payload.max_installments = payload.min_installments;
+      if (payload.default_installments < payload.min_installments) payload.default_installments = payload.min_installments;
+      if (payload.default_installments > payload.max_installments) payload.default_installments = payload.max_installments;
+
+      // Para dual, el POS decide en la operación:
+      // DEBIT => SALE, CREDIT => LIST
+      // Guardamos SALE_PRICE como base neutra.
+      payload.pricing_mode = "SALE_PRICE";
+    }
+  }
+
   if (payload.kind === "CARD" && !payload.provider_code) {
-    payload.provider_code = payload.card_kind === "DEBIT" ? "debit" : "card";
+    payload.provider_code = "card";
   }
 
   if (payload.kind === "CASH" && !payload.provider_code) payload.provider_code = "cash";

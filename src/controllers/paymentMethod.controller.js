@@ -181,6 +181,7 @@ async function adminCreate(req, res) {
 
     const payload = buildPayload(req.body || {});
     validatePayload(payload, { isCreate: true });
+
     await ensureUniqueCode({
       branch_id: payload.branch_id,
       code: payload.code,
@@ -240,6 +241,7 @@ async function adminUpdate(req, res) {
     });
 
     validatePayload(payload, { isCreate: false });
+
     await ensureUniqueCode({
       branch_id: payload.branch_id,
       code: payload.code,

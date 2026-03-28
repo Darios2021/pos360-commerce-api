@@ -323,11 +323,7 @@ async function resolvePaymentMethodForBranch(paymentMethodId, branchId, transact
 async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transaction }) {
   const paymentMethodId = toInt(pay.payment_method_id || pay.paymentMethodId, 0);
   const amount = toNum(pay.amount);
-  const referenceIncoming =
-    pay.reference ||
-    pay.proof ||
-    pay.payment_reference ||
-    null;
+  const referenceIncoming = pay.reference || pay.proof || pay.payment_reference || null;
 
   if (!Number.isFinite(amount) || amount <= 0) {
     const e = new Error(`Pago inválido: amount=${pay.amount}`);
@@ -354,7 +350,6 @@ async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transacti
     }
 
     const { dbMethod, providerCode } = mapConfiguredMethodToDbMethod(pm);
-
     const installments = resolveConfiguredInstallments(pm, pay);
 
     const incomingCardKind = String(pay.card_kind || pay.cardKind || pay.card_type || pay.cardType || "")
@@ -363,12 +358,12 @@ async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transacti
 
     const cardKindSnapshot =
       pm.kind === "CARD"
-        ? (String(pm.card_kind || "").trim().toUpperCase() === "DEBIT"
-            ? "DEBIT"
-            : String(pm.card_kind || "").trim().toUpperCase() === "CREDIT"
-              ? "CREDIT"
-              : incomingCardKind || (providerCode === "debit" ? "DEBIT" : "CREDIT"))
-        : (String(pm.card_kind || "").trim().toUpperCase() || null);
+        ? String(pm.card_kind || "").trim().toUpperCase() === "DEBIT"
+          ? "DEBIT"
+          : String(pm.card_kind || "").trim().toUpperCase() === "CREDIT"
+            ? "CREDIT"
+            : incomingCardKind || (providerCode === "debit" ? "DEBIT" : "CREDIT")
+        : String(pm.card_kind || "").trim().toUpperCase() || null;
 
     const priceBasis = normalizePriceBasisFromPaymentMethod(pm);
     const listTotal = toNum(pay.total_list ?? pay.totalList ?? pay.list_total ?? 0, 0) || null;
@@ -437,7 +432,6 @@ async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transacti
     };
   }
 
-  // fallback legacy
   const { dbMethod, providerCode } = mapPayMethodDetailed(pay.method, referenceIncoming);
 
   if (!["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"].includes(dbMethod)) {
@@ -464,8 +458,9 @@ async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transacti
   if (dbMethod === "CREDIT_SJT" || providerCode === "credit_sjt") {
     installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
   } else if (dbMethod === "CARD") {
-    if (!isDebit) installments = clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1);
-    else installments = 1;
+    installments = !isDebit
+      ? clampInstallments(pay.installments ?? pay.cuotas ?? pay.installment_count ?? 1, 1)
+      : 1;
   } else {
     installments = 1;
   }
@@ -527,13 +522,9 @@ async function resolveSalePaymentInput({ pay, branchId, paymentsCount, transacti
   };
 }
 
-// ✅ COPY-PASTE FINAL COMPLETO
-// pegar cerca de insertPaymentRow en src/controllers/pos.controller.js
-
 function cleanPaymentNote(value, maxLen = 255) {
   if (value == null) return null;
 
-  // si viene objeto/array, NO lo mandamos a note
   if (typeof value === "object") {
     return null;
   }
@@ -541,7 +532,6 @@ function cleanPaymentNote(value, maxLen = 255) {
   let s = String(value).trim();
   if (!s) return null;
 
-  // si parece json o metadata serializada, tampoco va a note
   if (
     s.startsWith("{") ||
     s.startsWith("[") ||
@@ -620,34 +610,20 @@ async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
       replacements: {
         sale_id: saleId,
         payment_method_id: paymentResolved.payment_method_id || null,
-        payment_method_code_snapshot:
-          paymentResolved.snapshot.payment_method_code_snapshot,
-        payment_method_name_snapshot:
-          paymentResolved.snapshot.payment_method_name_snapshot,
-        provider_code_snapshot:
-          paymentResolved.snapshot.provider_code_snapshot,
-        card_brand_snapshot:
-          paymentResolved.snapshot.card_brand_snapshot,
-        card_kind_snapshot:
-          paymentResolved.snapshot.card_kind_snapshot,
-        pricing_mode_snapshot:
-          paymentResolved.snapshot.pricing_mode_snapshot,
-        base_amount_snapshot:
-          paymentResolved.snapshot.base_amount_snapshot,
-        charged_amount_snapshot:
-          paymentResolved.snapshot.charged_amount_snapshot,
-        surcharge_percent_snapshot:
-          paymentResolved.snapshot.surcharge_percent_snapshot,
-        surcharge_fixed_amount_snapshot:
-          paymentResolved.snapshot.surcharge_fixed_amount_snapshot,
-        installments_snapshot:
-          paymentResolved.snapshot.installments_snapshot,
-        per_installment_amount_snapshot:
-          paymentResolved.snapshot.per_installment_amount_snapshot,
-        reference_required_snapshot:
-          paymentResolved.snapshot.reference_required_snapshot ? 1 : 0,
-        payment_meta_snapshot:
-          paymentResolved.snapshot.payment_meta_snapshot,
+        payment_method_code_snapshot: paymentResolved.snapshot.payment_method_code_snapshot,
+        payment_method_name_snapshot: paymentResolved.snapshot.payment_method_name_snapshot,
+        provider_code_snapshot: paymentResolved.snapshot.provider_code_snapshot,
+        card_brand_snapshot: paymentResolved.snapshot.card_brand_snapshot,
+        card_kind_snapshot: paymentResolved.snapshot.card_kind_snapshot,
+        pricing_mode_snapshot: paymentResolved.snapshot.pricing_mode_snapshot,
+        base_amount_snapshot: paymentResolved.snapshot.base_amount_snapshot,
+        charged_amount_snapshot: paymentResolved.snapshot.charged_amount_snapshot,
+        surcharge_percent_snapshot: paymentResolved.snapshot.surcharge_percent_snapshot,
+        surcharge_fixed_amount_snapshot: paymentResolved.snapshot.surcharge_fixed_amount_snapshot,
+        installments_snapshot: paymentResolved.snapshot.installments_snapshot,
+        per_installment_amount_snapshot: paymentResolved.snapshot.per_installment_amount_snapshot,
+        reference_required_snapshot: paymentResolved.snapshot.reference_required_snapshot ? 1 : 0,
+        payment_meta_snapshot: paymentResolved.snapshot.payment_meta_snapshot,
         method: paymentResolved.dbMethod,
         amount: paymentResolved.amount,
         installments: paymentResolved.installments,
@@ -657,12 +633,6 @@ async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
     }
   );
 }
-
-
-
-
-
-
 
 async function insertSaleReturnPaymentRow({ returnId, paymentResolved, transaction }) {
   await sequelize.query(
@@ -1107,9 +1077,6 @@ async function listProductsForPos(req, res) {
 /* =========================
    POST /pos/sales
 ========================= */
-/* =========================
-   POST /pos/sales
-========================= */
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -1277,10 +1244,7 @@ async function createSale(req, res) {
     }
 
     if (admin) {
-      const ok = await assertWarehouseBelongsToBranch(
-        resolvedWarehouseId,
-        resolvedBranchId
-      );
+      const ok = await assertWarehouseBelongsToBranch(resolvedWarehouseId, resolvedBranchId);
       if (!ok) {
         return res.status(400).json({
           ok: false,
@@ -1316,22 +1280,16 @@ async function createSale(req, res) {
         });
       }
       if (!Number.isFinite(it.quantity) || it.quantity <= 0) {
-        throw Object.assign(
-          new Error(`Item inválido: quantity=${it.quantity}`),
-          {
-            httpStatus: 400,
-            code: "INVALID_ITEM",
-          }
-        );
+        throw Object.assign(new Error(`Item inválido: quantity=${it.quantity}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       }
       if (!Number.isFinite(it.unit_price) || it.unit_price <= 0) {
-        throw Object.assign(
-          new Error(`Item inválido: unit_price=${it.unit_price}`),
-          {
-            httpStatus: 400,
-            code: "INVALID_ITEM",
-          }
-        );
+        throw Object.assign(new Error(`Item inválido: unit_price=${it.unit_price}`), {
+          httpStatus: 400,
+          code: "INVALID_ITEM",
+        });
       }
     }
 
@@ -1364,10 +1322,7 @@ async function createSale(req, res) {
       cashRegister: currentCashRegister,
     });
 
-    console.log(
-      "[POS][createSale][fiscalSnapshot]",
-      JSON.stringify(fiscalSnapshot, null, 2)
-    );
+    console.log("[POS][createSale][fiscalSnapshot]", JSON.stringify(fiscalSnapshot, null, 2));
 
     sale = await Sale.create(
       {
@@ -1389,8 +1344,7 @@ async function createSale(req, res) {
         invoice_type: fiscalSnapshot?.invoice_type || null,
         customer_type: fiscalSnapshot?.customer_type || null,
         fiscal_status:
-          fiscalSnapshot?.invoice_mode &&
-          fiscalSnapshot.invoice_mode !== "NO_FISCAL"
+          fiscalSnapshot?.invoice_mode && fiscalSnapshot.invoice_mode !== "NO_FISCAL"
             ? "PENDING"
             : "NOT_REQUESTED",
 
@@ -1427,13 +1381,10 @@ async function createSale(req, res) {
 
       const p = await Product.findByPk(it.product_id, { transaction: t });
       if (!p) {
-        throw Object.assign(
-          new Error(`Producto no existe: id=${it.product_id}`),
-          {
-            httpStatus: 400,
-            code: "PRODUCT_NOT_FOUND",
-          }
-        );
+        throw Object.assign(new Error(`Producto no existe: id=${it.product_id}`), {
+          httpStatus: 400,
+          code: "PRODUCT_NOT_FOUND",
+        });
       }
 
       const sb = await StockBalance.findOne({
@@ -1449,9 +1400,7 @@ async function createSale(req, res) {
 
       if (!sb) {
         throw Object.assign(
-          new Error(
-            `No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`
-          ),
+          new Error(`No existe stock_balance para producto ${p.sku || p.id} en depósito ${resolvedWarehouseId}`),
           {
             httpStatus: 409,
             code: "STOCK_BALANCE_MISSING",
@@ -1461,9 +1410,7 @@ async function createSale(req, res) {
 
       if (Number(sb.qty) < it.quantity) {
         throw Object.assign(
-          new Error(
-            `Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`
-          ),
+          new Error(`Stock insuficiente (depósito ${resolvedWarehouseId}) para producto ${p.sku || p.id}`),
           {
             httpStatus: 409,
             code: "STOCK_INSUFFICIENT",
@@ -1471,10 +1418,7 @@ async function createSale(req, res) {
         );
       }
 
-      await sb.update(
-        { qty: literal(`qty - ${it.quantity}`) },
-        { transaction: t }
-      );
+      await sb.update({ qty: literal(`qty - ${it.quantity}`) }, { transaction: t });
 
       const lineTotal = it.quantity * it.unit_price;
 
@@ -1557,10 +1501,7 @@ async function createSale(req, res) {
       transaction: t,
     });
 
-    console.log(
-      "[POS][createSale][fiscalDocument]",
-      fiscalDocument?.toJSON?.() || fiscalDocument || null
-    );
+    console.log("[POS][createSale][fiscalDocument]", fiscalDocument?.toJSON?.() || fiscalDocument || null);
 
     await t.commit();
 
@@ -1581,8 +1522,7 @@ async function createSale(req, res) {
         branch_id: sale.branch_id,
         cash_register_id: sale.cash_register_id || null,
         fiscal_document_id: fiscalDocument?.id || sale.fiscal_document_id || null,
-        fiscal_status:
-          sale.fiscal_status || (fiscalDocument ? "PENDING" : "NOT_REQUESTED"),
+        fiscal_status: sale.fiscal_status || (fiscalDocument ? "PENDING" : "NOT_REQUESTED"),
         user_id: sale.user_id,
         warehouse_id: resolvedWarehouseId,
 
@@ -1608,12 +1548,7 @@ async function createSale(req, res) {
       });
     }
 
-    const status =
-      Number(e?.httpStatus) ||
-      Number(e?.status) ||
-      Number(e?.response?.status) ||
-      500;
-
+    const status = Number(e?.httpStatus) || Number(e?.status) || Number(e?.response?.status) || 500;
     const code = e?.code || "POS_CREATE_SALE_ERROR";
 
     const errorPayload = {
@@ -1739,10 +1674,12 @@ async function createSaleReturn(req, res) {
     const payments = Array.isArray(body.payments) ? body.payments : [];
 
     if (!saleId) return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "sale_id requerido" });
-    if (!items.length)
+    if (!items.length) {
       return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "items requerido (array no vacío)" });
-    if (!payments.length)
+    }
+    if (!payments.length) {
       return res.status(400).json({ ok: false, code: "BAD_REQUEST", message: "payments requerido (array no vacío)" });
+    }
 
     t = await sequelize.transaction();
 
