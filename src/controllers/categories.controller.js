@@ -73,13 +73,15 @@ function handleSequelizeError(res, e) {
 // =====================
 exports.list = async (req, res, next) => {
   try {
+    const rootOnly = req.query.root_only === "1" || req.query.root_only === "true";
+
+    const where = { is_active: 1 };
+    if (rootOnly) where.parent_id = null;
+
     const items = await Category.findAll({
-      where: { is_active: 1 },
+      where,
       attributes: ["id", "name", "parent_id", "is_active"],
-      order: [
-        ["parent_id", "ASC"],
-        ["name", "ASC"],
-      ],
+      order: [["name", "ASC"]],
     });
 
     return res.json({ ok: true, items });
