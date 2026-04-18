@@ -226,35 +226,55 @@ module.exports = {
     }
 
     const q = toStr(search).toLowerCase();
-    const strict = toBoolLike(strict_search, false);
+    void strict_search; // ya no se usa — la descripción nunca se busca por defecto
 
     if (q.length) {
-      repl.q = `%${escLike(q)}%`;
+      repl.q      = `%${escLike(q)}%`;
+      repl.qStart = `${escLike(q)}%`;
+      repl.qExact = q;
 
+      // Solo buscamos en campos del PRODUCTO: name, brand, model, sku, barcode, code.
+      // category_name y subcategory_name fueron quitados intencionalmente:
+      // el usuario filtra por categoría desde el sidebar, no mediante texto libre.
+      // description también fue quitada porque es demasiado ruidosa y devuelve
+      // falsos positivos (p.ej. "compatible con celular" en una descripción de trípode).
       where.push(`
         (
-          LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
-          ${strict ? "" : `OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'`}
-          OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
+          LOWER(COALESCE(vc.name,''))    LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.brand,''))  LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.model,''))  LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.sku,''))    LIKE :q ESCAPE '${ESC}'
           OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.code,''))   LIKE :q ESCAPE '${ESC}'
         )
       `);
     }
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
 
-    // ✅ FIX: sort
+    // Sort — cuando hay búsqueda de texto usamos relevancia automática
     const s = toStr(sort);
-    let orderSql = "ORDER BY vc.product_id DESC";
-    if (s === "price_asc") orderSql = "ORDER BY COALESCE(vc.price,0) ASC, vc.product_id DESC";
-    else if (s === "price_desc") orderSql = "ORDER BY COALESCE(vc.price,0) DESC, vc.product_id DESC";
-    else if (s === "name_asc") orderSql = "ORDER BY COALESCE(vc.name,'') ASC, vc.product_id DESC";
-    else if (s === "newest") orderSql = "ORDER BY vc.product_id DESC";
+    let orderSql;
+
+    if (q.length && (!s || s === "relevance" || s === "newest")) {
+      // Relevancia: nombre exacto (0) > empieza con (1) > contiene (2) > marca/etc (3)
+      orderSql = `ORDER BY
+        CASE
+          WHEN LOWER(COALESCE(vc.name,'')) = :qExact                              THEN 0
+          WHEN LOWER(COALESCE(vc.name,'')) LIKE :qStart ESCAPE '${ESC}'           THEN 1
+          WHEN LOWER(COALESCE(vc.name,'')) LIKE :q      ESCAPE '${ESC}'           THEN 2
+          ELSE 3
+        END ASC,
+        vc.product_id DESC`;
+    } else if (s === "price_asc") {
+      orderSql = "ORDER BY COALESCE(vc.price,0) ASC, vc.product_id DESC";
+    } else if (s === "price_desc") {
+      orderSql = "ORDER BY COALESCE(vc.price,0) DESC, vc.product_id DESC";
+    } else if (s === "name_asc") {
+      orderSql = "ORDER BY COALESCE(vc.name,'') ASC, vc.product_id DESC";
+    } else {
+      orderSql = "ORDER BY vc.product_id DESC";
+    }
 
     const [[countRow]] = await sequelize.query(
       `
@@ -314,19 +334,17 @@ module.exports = {
     const qq = String(q || "").trim().toLowerCase();
     if (!qq.length) return [];
 
-    repl.q = `%${escLike(qq)}%`;
+    repl.q      = `%${escLike(qq)}%`;
+    repl.qStart = `${escLike(qq)}%`;
+    repl.qExact = qq;
 
+    // Solo name, brand y model — sin description ni category_name para evitar
+    // sugerencias completamente irrelevantes
     where.push(`
       (
-        LOWER(COALESCE(vc.name,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.description,'')) LIKE :q ESCAPE '${ESC}'
+        LOWER(COALESCE(vc.name,''))   LIKE :q ESCAPE '${ESC}'
         OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
         OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.sku,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.code,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.category_name,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.subcategory_name,'')) LIKE :q ESCAPE '${ESC}'
       )
     `);
 
@@ -347,7 +365,14 @@ module.exports = {
       FROM v_public_catalog vc
       ${whereSql}
       GROUP BY vc.product_id
-      ORDER BY vc.product_id DESC
+      ORDER BY
+        CASE
+          WHEN LOWER(MAX(vc.name)) = :qExact                             THEN 0
+          WHEN LOWER(MAX(vc.name)) LIKE :qStart ESCAPE '${ESC}'         THEN 1
+          WHEN LOWER(MAX(vc.name)) LIKE :q      ESCAPE '${ESC}'         THEN 2
+          ELSE 3
+        END ASC,
+        vc.product_id DESC
       LIMIT :limit
       `,
       { replacements: repl }
