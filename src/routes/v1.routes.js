@@ -407,17 +407,18 @@ if (adminMediaRoutes) {
     next();
   }
 
-  // GET  /api/v1/sys/search/health
-  router.get("/sys/search/health", requireMasterKey, async (req, res) => {
+  // GET  /api/v1/sys/search/health  (público — solo muestra si está configurado)
+  router.get("/sys/search/health", async (req, res) => {
     try {
       const status = await searchService.healthCheck();
+      // No exponer la master key, solo si está configurado
       res.json({ ok: true, data: status });
     } catch (e) {
       res.status(500).json({ ok: false, message: e.message });
     }
   });
 
-  // POST /api/v1/sys/search/reindex
+  // POST /api/v1/sys/search/reindex  (protegido por master key)
   router.post("/sys/search/reindex", requireMasterKey, (req, res) => {
     res.json({ ok: true, message: "Reindex iniciado en background" });
     searchService.triggerFullReindex().catch((e) =>
