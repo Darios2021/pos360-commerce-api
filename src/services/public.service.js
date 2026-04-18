@@ -71,28 +71,44 @@ const MYSQL_STOP_WORDS = new Set([
   "por","que","se","su","sus","lo","le","a","o","e","al","como","mas",
 ]);
 
-// Expande una query multi-palabra aplicando sinónimos y quitando stop words.
-// Devuelve un array de variantes para hacer OR en MySQL.
-function expandQuery(rawQ) {
+// Descompone la query en grupos de sinónimos por palabra.
+// "camara ip" → [ ["camara","cámara","camera"], ["ip"] ]
+// "cargador telefono" → [ ["cargador","cargadores","charger"], ["celular","smartphone",...] ]
+// La búsqueda aplica AND entre grupos y OR dentro de cada grupo.
+function expandQueryGroups(rawQ) {
   const words = String(rawQ || "")
     .toLowerCase()
     .trim()
     .split(/\s+/)
     .filter((w) => w.length >= 2 && !MYSQL_STOP_WORDS.has(w));
 
-  if (!words.length) return [rawQ];
+  if (!words.length) return [[rawQ.toLowerCase().trim()]];
 
-  // Para cada palabra, obtener sus sinónimos
-  const expanded = new Set();
-  for (const w of words) {
-    const syns = MYSQL_SYNONYMS[w] || [w];
-    for (const s of syns) expanded.add(s);
+  return words.map((w) => {
+    const syns = MYSQL_SYNONYMS[w];
+    return syns ? [...new Set([w, ...syns])] : [w];
+  });
+}
+
+// Construye cláusulas WHERE y rellena repl.
+// Devuelve el string SQL con los grupos AND/OR.
+function buildSearchWhere(groups, fields, repl, ESC) {
+  const andClauses = [];
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    const orClauses = [];
+    for (let si = 0; si < groups[gi].length; si++) {
+      const key = `qg${gi}_s${si}`;
+      repl[key] = `%${escLike(groups[gi][si])}%`;
+      const fieldClauses = fields.map(
+        (f) => `LOWER(COALESCE(${f},'')) LIKE :${key} ESCAPE '${ESC}'`
+      );
+      orClauses.push(`(${fieldClauses.join(" OR ")})`);
+    }
+    andClauses.push(`(${orClauses.join(" OR ")})`);
   }
 
-  // También agregar la frase completa tal cual
-  expanded.add(rawQ.toLowerCase().trim());
-
-  return Array.from(expanded);
+  return andClauses.join(" AND ");
 }
 
 function toBoolLike(v, d = false) {
@@ -396,26 +412,12 @@ module.exports = {
       repl.qExact = q;
       repl.qStart = `${escLike(q)}%`;
 
-      // Expandir con sinónimos: "cargador telefono" → ["cargador","cargadores","charger","celular","smartphone",...]
-      const variants = expandQuery(q);
-      const orClauses = [];
-      for (let i = 0; i < variants.length; i++) {
-        const key = `qv${i}`;
-        repl[key] = `%${escLike(variants[i])}%`;
-        orClauses.push(`
-          LOWER(COALESCE(vc.name,''))    LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.brand,''))  LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.model,''))  LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.sku,''))    LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.barcode,'')) LIKE :${key} ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.code,''))   LIKE :${key} ESCAPE '${ESC}'
-        `);
-      }
+      const groups = expandQueryGroups(q);
+      const fields = ["vc.name", "vc.brand", "vc.model", "vc.sku", "vc.barcode", "vc.code"];
+      where.push(buildSearchWhere(groups, fields, repl, ESC));
 
-      // Para el ORDER BY de relevancia usamos el primer variant (término original)
-      repl.q = `%${escLike(variants[0])}%`;
-
-      where.push(`(${orClauses.join(" OR ")})`);
+      // Para ORDER BY de relevancia usamos la primera variante del primer grupo
+      repl.q = `%${escLike(groups[0][0])}%`;
     }
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
@@ -540,21 +542,11 @@ module.exports = {
     repl.qExact = qq;
     repl.qStart = `${escLike(qq)}%`;
 
-    // Expandir con sinónimos para sugerencias
-    const variants = expandQuery(qq);
-    const orClauses = [];
-    for (let i = 0; i < variants.length; i++) {
-      const key = `qv${i}`;
-      repl[key] = `%${escLike(variants[i])}%`;
-      orClauses.push(`
-        LOWER(COALESCE(vc.name,''))   LIKE :${key} ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.brand,'')) LIKE :${key} ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.model,'')) LIKE :${key} ESCAPE '${ESC}'
-      `);
-    }
-    repl.q = `%${escLike(variants[0])}%`;
+    const groups = expandQueryGroups(qq);
+    const fields = ["vc.name", "vc.brand", "vc.model"];
+    where.push(buildSearchWhere(groups, fields, repl, ESC));
 
-    where.push(`(${orClauses.join(" OR ")})`);
+    repl.q = `%${escLike(groups[0][0])}%`;
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
 
