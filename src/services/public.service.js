@@ -159,12 +159,14 @@ module.exports = {
         const pg  = Math.max(1, toInt(params.page, 1));
         const total = msResult.total;
         return {
-          items:  msResult.items,
-          page:   pg,
-          limit:  lim,
+          items:       msResult.items,
+          page:        pg,
+          limit:       lim,
           total,
-          pages:  total ? Math.ceil(total / lim) : 0,
-          _source: "meilisearch",
+          pages:       total ? Math.ceil(total / lim) : 0,
+          brandsFacet: msResult.brandsFacet || [],
+          catsFacet:   msResult.catsFacet   || [],
+          _source:     "meilisearch",
         };
       } catch (e) {
         // Fallback silencioso a MySQL

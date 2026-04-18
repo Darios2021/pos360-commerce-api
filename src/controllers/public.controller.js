@@ -299,18 +299,20 @@ module.exports = {
 
       const result = await PublicService.listCatalog({
         branch_id,
-        search: toStr(req.query.search),
-        category_id: toInt(req.query.category_id, 0) || null,
-        subcategory_id: toInt(req.query.subcategory_id, 0) || null,
+        search:           toStr(req.query.search),
+        category_id:      toInt(req.query.category_id, 0) || null,
+        subcategory_id:   toInt(req.query.subcategory_id, 0) || null,
         include_children: toBoolLike(req.query.include_children, false),
-        in_stock: toBoolLike(req.query.in_stock, false),
-        page: Math.max(1, toInt(req.query.page, 1)),
-        limit: Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
-        strict_search: toBoolLike(req.query.strict_search, false),
-        exclude_terms: toStr(req.query.exclude_terms),
-        brands: toCsvList(req.query.brands),
-        model: toStr(req.query.model),
-        sort: toStr(req.query.sort),
+        in_stock:         toBoolLike(req.query.in_stock, false),
+        page:             Math.max(1, toInt(req.query.page, 1)),
+        limit:            Math.min(100, Math.max(1, toInt(req.query.limit, 24))),
+        strict_search:    toBoolLike(req.query.strict_search, false),
+        exclude_terms:    toStr(req.query.exclude_terms),
+        brands:           toCsvList(req.query.brands),
+        model:            toStr(req.query.model),
+        sort:             toStr(req.query.sort),
+        price_min:        req.query.price_min != null ? toFloat(req.query.price_min) : null,
+        price_max:        req.query.price_max != null ? toFloat(req.query.price_max) : null,
       });
 
       return res.json({ ok: true, branch_id, ...result });

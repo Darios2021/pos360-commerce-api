@@ -30,11 +30,51 @@ const SEARCHABLE_ATTRIBUTES = [
 const FILTERABLE_ATTRIBUTES = [
   "branch_ids",
   "category_id",
+  "category_name",
   "subcategory_id",
+  "subcategory_name",
+  "brand",
   "brand_lower",
   "is_active",
   "price",
 ];
+
+const STOP_WORDS = [
+  "de", "para", "con", "el", "la", "los", "las",
+  "un", "una", "y", "en", "del", "al", "por", "que",
+  "se", "su", "sus", "lo", "le", "a", "o", "e",
+];
+
+// Sinónimos bidireccionales para el catálogo en español
+const SYNONYMS = {
+  "celular":    ["celu", "telefono", "smartphone", "movil", "telephone"],
+  "celu":       ["celular", "telefono", "smartphone", "movil"],
+  "telefono":   ["celular", "celu", "smartphone", "movil"],
+  "smartphone": ["celular", "celu", "telefono", "movil"],
+  "movil":      ["celular", "celu", "telefono", "smartphone"],
+  "auricular":  ["auriculares", "headset", "headphones", "fono", "audifonos", "cascos"],
+  "auriculares":["auricular", "headset", "headphones", "fono", "audifonos"],
+  "fono":       ["auricular", "auriculares", "headphones", "headset"],
+  "parlante":   ["parlantes", "speaker", "bocina", "altavoz", "altavoces"],
+  "parlantes":  ["parlante", "speaker", "bocina", "altavoz"],
+  "speaker":    ["parlante", "parlantes", "bocina", "altavoz"],
+  "notebook":   ["laptop", "computadora portatil", "portatil"],
+  "laptop":     ["notebook", "computadora portatil", "portatil"],
+  "tele":       ["television", "televisor", "tv"],
+  "television": ["televisor", "tv", "tele"],
+  "televisor":  ["television", "tv", "tele"],
+  "tv":         ["television", "televisor", "tele"],
+  "cargador":   ["cargadores", "charger", "adaptador de corriente"],
+  "cargadores": ["cargador", "charger"],
+  "cable":      ["cables", "conector"],
+  "cables":     ["cable", "conector"],
+  "camara":     ["cámara", "camera"],
+  "cámara":     ["camara", "camera"],
+  "mouse":      ["raton", "ratón"],
+  "teclado":    ["keyboard"],
+  "inalambrico":["inalámbrico", "wireless", "wifi", "bluetooth"],
+  "inalámbrico":["inalambrico", "wireless", "wifi", "bluetooth"],
+};
 
 const SORTABLE_ATTRIBUTES = ["price", "name", "id"];
 
@@ -88,14 +128,10 @@ async function initIndex() {
       rankingRules: RANKING_RULES,
       typoTolerance: {
         enabled: true,
-        minWordSizeForTypos: {
-          oneTypo: 4,
-          twoTypos: 8,
-        },
+        minWordSizeForTypos: { oneTypo: 4, twoTypos: 8 },
       },
-      // Destacar el texto encontrado
-      highlightPreTag: "<mark>",
-      highlightPostTag: "</mark>",
+      stopWords: STOP_WORDS,
+      synonyms: SYNONYMS,
     });
 
     console.log("✅ [Meilisearch] Índice configurado:", INDEX_NAME);
@@ -289,6 +325,8 @@ async function searchCatalog({
     sort: sortArr.length ? sortArr : undefined,
     limit: lim,
     offset: (pg - 1) * lim,
+    matchingStrategy: "last",
+    facets: ["brand", "category_name", "subcategory_name"],
     attributesToRetrieve: [
       "id", "name", "brand", "model", "sku", "barcode", "code",
       "category_id", "category_name", "subcategory_id", "subcategory_name",
@@ -297,7 +335,7 @@ async function searchCatalog({
     ],
   });
 
-  // Normalizar al formato que espera el controller
+  // Normalizar items
   const items = (result.hits || []).map((h) => ({
     product_id: h.id,
     name: h.name,
@@ -317,12 +355,26 @@ async function searchCatalog({
     is_promo: h.is_promo,
     description: h.description,
     branch_id: Number(branch_id),
-    // stock_by_branch se enriquece en el service igual que MySQL
   }));
 
   const total = result.estimatedTotalHits ?? result.totalHits ?? items.length;
 
-  return { items, total, page: pg, limit: lim };
+  // Transformar facetDistribution a formato usable por el frontend
+  const fd = result.facetDistribution || {};
+
+  const brandsFacet = Object.entries(fd.brand || {})
+    .map(([k, c]) => ({ key: k, label: k, count: c }))
+    .sort((a, b) => b.count - a.count);
+
+  const catsFacet = Object.entries(fd.category_name || {})
+    .map(([name, count]) => {
+      // Buscar category_id desde los items actuales
+      const match = items.find(i => i.category_name === name);
+      return { key: match ? String(match.category_id) : name, label: name, count };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  return { items, total, page: pg, limit: lim, brandsFacet, catsFacet };
 }
 
 // ─── Sugerencias (autocomplete) ───────────────────────────────────────────────
@@ -334,6 +386,7 @@ async function searchSuggestions({ branch_id, q, limit = 8 }) {
   const result = await index.search(q, {
     filter: [`branch_ids = ${Number(branch_id)}`, "is_active = 1"].join(" AND "),
     limit: Math.min(15, Math.max(1, Number(limit))),
+    matchingStrategy: "last",
     attributesToRetrieve: [
       "id", "name", "brand", "model",
       "category_id", "category_name",
