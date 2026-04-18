@@ -19,6 +19,82 @@ function escLike(s) {
   return String(s ?? "").replace(/[!%_]/g, (m) => ESC + m);
 }
 
+// ── Sinónimos MySQL: cuando Meilisearch no está disponible ───────────────────
+// Dado un término, devuelve todos los términos equivalentes (incluyendo el original)
+const MYSQL_SYNONYMS = {
+  "celular":     ["celular", "smartphone", "movil", "telefono", "celu"],
+  "celu":        ["celu", "celular", "smartphone", "movil", "telefono"],
+  "telefono":    ["telefono", "celular", "smartphone", "movil", "celu"],
+  "smartphone":  ["smartphone", "celular", "movil", "telefono"],
+  "movil":       ["movil", "celular", "smartphone", "telefono"],
+  "auricular":   ["auricular", "auriculares", "headset", "headphones", "audifonos", "fono", "cascos"],
+  "auriculares": ["auriculares", "auricular", "headset", "headphones", "audifonos", "fono"],
+  "fono":        ["fono", "auricular", "auriculares", "audifonos", "headset"],
+  "audifonos":   ["audifonos", "auricular", "auriculares", "headset"],
+  "headset":     ["headset", "auricular", "auriculares", "audifonos"],
+  "parlante":    ["parlante", "parlantes", "speaker", "bocina", "altavoz"],
+  "parlantes":   ["parlantes", "parlante", "speaker", "bocina", "altavoz"],
+  "speaker":     ["speaker", "parlante", "parlantes", "bocina", "altavoz"],
+  "bocina":      ["bocina", "parlante", "parlantes", "speaker"],
+  "notebook":    ["notebook", "laptop", "portatil"],
+  "laptop":      ["laptop", "notebook", "portatil"],
+  "tele":        ["tele", "television", "televisor", "tv"],
+  "television":  ["television", "televisor", "tv", "tele"],
+  "televisor":   ["televisor", "television", "tv", "tele"],
+  "tv":          ["tv", "television", "televisor", "tele"],
+  "cargador":    ["cargador", "cargadores", "charger"],
+  "cargadores":  ["cargadores", "cargador", "charger"],
+  "cable":       ["cable", "cables"],
+  "cables":      ["cables", "cable"],
+  "mouse":       ["mouse", "raton"],
+  "raton":       ["raton", "mouse"],
+  "teclado":     ["teclado", "keyboard"],
+  "keyboard":    ["keyboard", "teclado"],
+  "bluetooth":   ["bluetooth", "inalambrico", "wireless", "bt"],
+  "inalambrico": ["inalambrico", "bluetooth", "wireless"],
+  "wireless":    ["wireless", "inalambrico", "bluetooth"],
+  "bateria":     ["bateria", "batería", "battery", "pila"],
+  "batería":     ["batería", "bateria", "battery", "pila"],
+  "tablet":      ["tablet", "tableta"],
+  "tableta":     ["tableta", "tablet"],
+  "funda":       ["funda", "cover", "estuche", "carcasa"],
+  "carcasa":     ["carcasa", "funda", "cover", "estuche"],
+  "camara":      ["camara", "cámara", "camera"],
+  "cámara":      ["cámara", "camara", "camera"],
+  "joystick":    ["joystick", "gamepad", "control", "mando"],
+  "gamepad":     ["gamepad", "joystick", "control", "mando"],
+};
+
+// Stop words para ignorar en la búsqueda (palabras sin valor semántico)
+const MYSQL_STOP_WORDS = new Set([
+  "de","para","con","el","la","los","las","un","una","y","en","del","al",
+  "por","que","se","su","sus","lo","le","a","o","e","al","como","mas",
+]);
+
+// Expande una query multi-palabra aplicando sinónimos y quitando stop words.
+// Devuelve un array de variantes para hacer OR en MySQL.
+function expandQuery(rawQ) {
+  const words = String(rawQ || "")
+    .toLowerCase()
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !MYSQL_STOP_WORDS.has(w));
+
+  if (!words.length) return [rawQ];
+
+  // Para cada palabra, obtener sus sinónimos
+  const expanded = new Set();
+  for (const w of words) {
+    const syns = MYSQL_SYNONYMS[w] || [w];
+    for (const s of syns) expanded.add(s);
+  }
+
+  // También agregar la frase completa tal cual
+  expanded.add(rawQ.toLowerCase().trim());
+
+  return Array.from(expanded);
+}
+
 function toBoolLike(v, d = false) {
   if (v === undefined || v === null || v === "") return d;
   if (v === true || v === 1 || v === "1") return true;
@@ -314,28 +390,32 @@ module.exports = {
     }
 
     const q = toStr(search).toLowerCase();
-    void strict_search; // ya no se usa — la descripción nunca se busca por defecto
+    void strict_search;
 
     if (q.length) {
-      repl.q      = `%${escLike(q)}%`;
-      repl.qStart = `${escLike(q)}%`;
       repl.qExact = q;
+      repl.qStart = `${escLike(q)}%`;
 
-      // Solo buscamos en campos del PRODUCTO: name, brand, model, sku, barcode, code.
-      // category_name y subcategory_name fueron quitados intencionalmente:
-      // el usuario filtra por categoría desde el sidebar, no mediante texto libre.
-      // description también fue quitada porque es demasiado ruidosa y devuelve
-      // falsos positivos (p.ej. "compatible con celular" en una descripción de trípode).
-      where.push(`
-        (
-          LOWER(COALESCE(vc.name,''))    LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.brand,''))  LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.model,''))  LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.sku,''))    LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.barcode,'')) LIKE :q ESCAPE '${ESC}'
-          OR LOWER(COALESCE(vc.code,''))   LIKE :q ESCAPE '${ESC}'
-        )
-      `);
+      // Expandir con sinónimos: "cargador telefono" → ["cargador","cargadores","charger","celular","smartphone",...]
+      const variants = expandQuery(q);
+      const orClauses = [];
+      for (let i = 0; i < variants.length; i++) {
+        const key = `qv${i}`;
+        repl[key] = `%${escLike(variants[i])}%`;
+        orClauses.push(`
+          LOWER(COALESCE(vc.name,''))    LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.brand,''))  LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.model,''))  LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.sku,''))    LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.barcode,'')) LIKE :${key} ESCAPE '${ESC}'
+          OR LOWER(COALESCE(vc.code,''))   LIKE :${key} ESCAPE '${ESC}'
+        `);
+      }
+
+      // Para el ORDER BY de relevancia usamos el primer variant (término original)
+      repl.q = `%${escLike(variants[0])}%`;
+
+      where.push(`(${orClauses.join(" OR ")})`);
     }
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
@@ -429,7 +509,21 @@ module.exports = {
     }
 
     // ── MySQL fallback ───────────────────────────────────────────────────────
-    return this._listSuggestionsMySQL({ branch_id, q: qq, limit });
+    const suggestions = await this._listSuggestionsMySQL({ branch_id, q: qq, limit });
+    if (suggestions.length) return suggestions;
+
+    // Multi-pass: si 0 sugerencias, reintentar quitando palabras
+    const words = qq.split(/\s+/).filter((w) => w.length >= 2 && !MYSQL_STOP_WORDS.has(w));
+    if (words.length > 1) {
+      for (let drop = 1; drop < words.length; drop++) {
+        const reducedQ = words.slice(0, words.length - drop).join(" ");
+        if (reducedQ.length < 2) break;
+        const retry = await this._listSuggestionsMySQL({ branch_id, q: reducedQ, limit });
+        if (retry.length) return retry;
+      }
+    }
+
+    return [];
   },
 
   async _listSuggestionsMySQL({ branch_id, q, limit }) {
@@ -443,19 +537,24 @@ module.exports = {
       limit: Math.min(15, Math.max(1, toInt(limit, 8))),
     };
 
-    repl.q      = `%${escLike(qq)}%`;
-    repl.qStart = `${escLike(qq)}%`;
     repl.qExact = qq;
+    repl.qStart = `${escLike(qq)}%`;
 
-    // Solo name, brand y model — sin description ni category_name para evitar
-    // sugerencias completamente irrelevantes
-    where.push(`
-      (
-        LOWER(COALESCE(vc.name,''))   LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.brand,'')) LIKE :q ESCAPE '${ESC}'
-        OR LOWER(COALESCE(vc.model,'')) LIKE :q ESCAPE '${ESC}'
-      )
-    `);
+    // Expandir con sinónimos para sugerencias
+    const variants = expandQuery(qq);
+    const orClauses = [];
+    for (let i = 0; i < variants.length; i++) {
+      const key = `qv${i}`;
+      repl[key] = `%${escLike(variants[i])}%`;
+      orClauses.push(`
+        LOWER(COALESCE(vc.name,''))   LIKE :${key} ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.brand,'')) LIKE :${key} ESCAPE '${ESC}'
+        OR LOWER(COALESCE(vc.model,'')) LIKE :${key} ESCAPE '${ESC}'
+      `);
+    }
+    repl.q = `%${escLike(variants[0])}%`;
+
+    where.push(`(${orClauses.join(" OR ")})`);
 
     const whereSql = `WHERE ${where.join(" AND ")}`;
 
