@@ -11,7 +11,7 @@
 
 "use strict";
 
-const { MeiliSearch } = require("meilisearch");
+const { Meilisearch } = require("meilisearch");
 const { sequelize } = require("../models");
 
 // ─── Constantes ─────────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ function isConfigured() {
 function getClient() {
   if (!isConfigured()) return null;
   if (!_client) {
-    _client = new MeiliSearch({
+    _client = new Meilisearch({
       host: process.env.MEILISEARCH_HOST,
       apiKey: process.env.MEILISEARCH_MASTER_KEY || process.env.MEILISEARCH_API_KEY || "",
     });
