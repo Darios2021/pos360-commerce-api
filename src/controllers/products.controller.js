@@ -242,9 +242,9 @@ async function sanitizeCategoryFKs(payload) {
 
 /**
  * products.subcategory_id -> FK a subcategories.id
- * Regla (anti colisión IDs):
- * 1) PRIORIDAD: si incoming existe como Category HIJA (parent_id) => convertir a Subcategory real
- * 2) Si NO es Category HIJA, permitir que sea Subcategory.id real
+ * Prioridad corregida para nuevo UI que envía subcategories.id reales:
+ * 1) Si el incoming existe en subcategories y su category_id coincide => usar directo
+ * 2) Fallback legacy: si el ID es un categories.id hijo (import / UI vieja)
  * 3) Si no cierra => null
  */
 async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
@@ -262,7 +262,27 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
 
   const catIncoming = toInt(payload.category_id, 0) || 0;
 
-  // 1) interpretarlo como categories.id HIJA (legacy UI)
+  // 1) PRIORIDAD: verificar si es un subcategories.id real
+  const subByPk = await Subcategory.findByPk(incoming, {
+    attributes: ["id", "category_id"],
+    transaction,
+  }).catch(() => null);
+
+  if (subByPk) {
+    const subCatId = toInt(subByPk.category_id, 0) || 0;
+
+    if (!catIncoming && subCatId) payload.category_id = subCatId;
+
+    if (catIncoming && subCatId && catIncoming !== subCatId) {
+      payload.subcategory_id = null;
+      return payload;
+    }
+
+    payload.subcategory_id = subByPk.id;
+    return payload;
+  }
+
+  // 2) Fallback legacy: el ID puede ser un categories.id hijo (import / UI vieja)
   const catChild = await Category.findByPk(incoming, {
     attributes: ["id", "name", "parent_id"],
     transaction,
@@ -285,26 +305,6 @@ async function ensureSubcategoryFK(payload, { transaction = null } = {}) {
     }
 
     payload.subcategory_id = sub.id;
-    return payload;
-  }
-
-  // 2) permitir que sea subcategories.id real
-  const subByPk = await Subcategory.findByPk(incoming, {
-    attributes: ["id", "category_id"],
-    transaction,
-  }).catch(() => null);
-
-  if (subByPk) {
-    const subCatId = toInt(subByPk.category_id, 0) || 0;
-
-    if (!catIncoming && subCatId) payload.category_id = subCatId;
-
-    if (catIncoming && subCatId && catIncoming !== subCatId) {
-      payload.subcategory_id = null;
-      return payload;
-    }
-
-    payload.subcategory_id = subByPk.id;
     return payload;
   }
 
