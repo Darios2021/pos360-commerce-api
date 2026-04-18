@@ -133,9 +133,8 @@ module.exports = {
     if (searchService.isConfigured() && params.search && String(params.search).trim().length >= 2) {
       try {
         const brandsArr = csvList(params.brands);
-        const msResult = await searchService.searchCatalog({
-          branch_id: toInt(params.branch_id),
-          q:          String(params.search).trim(),
+        const baseParams = {
+          branch_id:   toInt(params.branch_id),
           category_id: toInt(params.category_id, 0) || null,
           brands:      brandsArr,
           price_min:   params.price_min ?? null,
@@ -143,13 +142,32 @@ module.exports = {
           sort:        toStr(params.sort),
           page:        toInt(params.page, 1),
           limit:       toInt(params.limit, 24),
-        });
+        };
 
-        // Enriquecer con stock_by_branch (igual que MySQL path)
-        const productIds = msResult.items
-          .map((it) => Number(it.product_id || 0))
-          .filter(Boolean);
+        const originalQ = String(params.search).trim();
+        let msResult = await searchService.searchCatalog({ ...baseParams, q: originalQ });
+        let usedQ = originalQ;
 
+        // ── Multi-pass: si 0 resultados, reducir la query palabra a palabra ──
+        // "cargador celular" → "cargador" → muestra cargadores
+        // "parlante xiaomi rojo" → "parlante xiaomi" → "parlante"
+        if (msResult.total === 0) {
+          const words = originalQ.split(/\s+/).filter(Boolean);
+          for (let drop = 1; drop < words.length; drop++) {
+            // probar quitando de atrás hacia adelante
+            const reducedQ = words.slice(0, words.length - drop).join(" ");
+            if (reducedQ.length < 2) break;
+            const retry = await searchService.searchCatalog({ ...baseParams, q: reducedQ, page: 1 });
+            if (retry.total > 0) {
+              msResult = retry;
+              usedQ = reducedQ;
+              break;
+            }
+          }
+        }
+
+        // Enriquecer con stock_by_branch
+        const productIds = msResult.items.map((it) => Number(it.product_id || 0)).filter(Boolean);
         const stockMap = productIds.length ? await getStockByBranchMap(productIds) : {};
         for (const it of msResult.items) {
           it.stock_by_branch = stockMap[Number(it.product_id)] || [];
@@ -159,17 +177,17 @@ module.exports = {
         const pg  = Math.max(1, toInt(params.page, 1));
         const total = msResult.total;
         return {
-          items:       msResult.items,
-          page:        pg,
-          limit:       lim,
+          items:         msResult.items,
+          page:          pg,
+          limit:         lim,
           total,
-          pages:       total ? Math.ceil(total / lim) : 0,
-          brandsFacet: msResult.brandsFacet || [],
-          catsFacet:   msResult.catsFacet   || [],
-          _source:     "meilisearch",
+          pages:         total ? Math.ceil(total / lim) : 0,
+          brandsFacet:   msResult.brandsFacet || [],
+          catsFacet:     msResult.catsFacet   || [],
+          relaxed_query: usedQ !== originalQ ? usedQ : null,  // frontend puede mostrar "Resultados para X"
+          _source:       "meilisearch",
         };
       } catch (e) {
-        // Fallback silencioso a MySQL
         console.warn("⚠️  [Meilisearch] listCatalog falló, usando MySQL:", e.message);
       }
     }

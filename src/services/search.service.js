@@ -19,12 +19,16 @@ const { sequelize } = require("../models");
 const INDEX_NAME = "products";
 
 const SEARCHABLE_ATTRIBUTES = [
+  // Orden = prioridad de relevancia (primero = más importante)
   "name",
   "brand",
   "model",
   "sku",
   "barcode",
   "code",
+  "category_name",      // "parlante xiaomi" → matchea categoría Audio
+  "subcategory_name",
+  "description",        // último recurso, peso mínimo
 ];
 
 const FILTERABLE_ATTRIBUTES = [
@@ -47,33 +51,65 @@ const STOP_WORDS = [
 
 // Sinónimos bidireccionales para el catálogo en español
 const SYNONYMS = {
-  "celular":    ["celu", "telefono", "smartphone", "movil", "telephone"],
+  // Celulares
+  "celular":    ["celu", "telefono", "smartphone", "movil", "telephone", "tel"],
   "celu":       ["celular", "telefono", "smartphone", "movil"],
   "telefono":   ["celular", "celu", "smartphone", "movil"],
   "smartphone": ["celular", "celu", "telefono", "movil"],
   "movil":      ["celular", "celu", "telefono", "smartphone"],
-  "auricular":  ["auriculares", "headset", "headphones", "fono", "audifonos", "cascos"],
-  "auriculares":["auricular", "headset", "headphones", "fono", "audifonos"],
+  // Audio
+  "auricular":  ["auriculares", "headset", "headphones", "fono", "audifonos", "cascos", "earphone", "earphones"],
+  "auriculares":["auricular", "headset", "headphones", "fono", "audifonos", "earphones"],
   "fono":       ["auricular", "auriculares", "headphones", "headset"],
-  "parlante":   ["parlantes", "speaker", "bocina", "altavoz", "altavoces"],
-  "parlantes":  ["parlante", "speaker", "bocina", "altavoz"],
+  "audifonos":  ["auricular", "auriculares", "headset", "fono"],
+  "headset":    ["auricular", "auriculares", "audifonos", "fono"],
+  "parlante":   ["parlantes", "speaker", "bocina", "altavoz", "altavoces", "audio"],
+  "parlantes":  ["parlante", "speaker", "bocina", "altavoz", "altavoces"],
   "speaker":    ["parlante", "parlantes", "bocina", "altavoz"],
-  "notebook":   ["laptop", "computadora portatil", "portatil"],
+  "bocina":     ["parlante", "parlantes", "speaker", "altavoz"],
+  // Computadoras
+  "notebook":   ["laptop", "computadora portatil", "portatil", "computador"],
   "laptop":     ["notebook", "computadora portatil", "portatil"],
-  "tele":       ["television", "televisor", "tv"],
-  "television": ["televisor", "tv", "tele"],
+  "pc":         ["computadora", "computador", "desktop"],
+  "computadora":["pc", "computador", "desktop"],
+  // TV
+  "tele":       ["television", "televisor", "tv", "smart tv"],
+  "television": ["televisor", "tv", "tele", "smart tv"],
   "televisor":  ["television", "tv", "tele"],
-  "tv":         ["television", "televisor", "tele"],
-  "cargador":   ["cargadores", "charger", "adaptador de corriente"],
+  "tv":         ["television", "televisor", "tele", "smart tv"],
+  "smart tv":   ["television", "televisor", "tv", "tele"],
+  // Periféricos
+  "cargador":   ["cargadores", "charger", "adaptador de corriente", "carga"],
   "cargadores": ["cargador", "charger"],
   "cable":      ["cables", "conector"],
   "cables":     ["cable", "conector"],
-  "camara":     ["cámara", "camera"],
-  "cámara":     ["camara", "camera"],
-  "mouse":      ["raton", "ratón"],
+  "mouse":      ["raton", "ratón", "mice"],
+  "raton":      ["mouse", "ratón"],
   "teclado":    ["keyboard"],
-  "inalambrico":["inalámbrico", "wireless", "wifi", "bluetooth"],
+  "keyboard":   ["teclado"],
+  // Fotos / video
+  "camara":     ["cámara", "camera", "camaras"],
+  "cámara":     ["camara", "camera"],
+  "camaras":    ["camara", "cámara", "camera"],
+  // Conectividad
+  "inalambrico":["inalámbrico", "wireless", "wifi", "bluetooth", "inalambrica"],
   "inalámbrico":["inalambrico", "wireless", "wifi", "bluetooth"],
+  "wireless":   ["inalambrico", "inalámbrico", "wifi", "bluetooth"],
+  "bluetooth":  ["inalambrico", "inalámbrico", "wireless", "bt"],
+  // Gaming
+  "joystick":   ["control", "gamepad", "mando", "pad"],
+  "gamepad":    ["joystick", "control", "mando"],
+  "consola":    ["playstation", "xbox", "nintendo", "gaming"],
+  // Tablets / accesorios
+  "tablet":     ["tableta", "ipad", "tab"],
+  "tableta":    ["tablet", "ipad", "tab"],
+  "funda":      ["cover", "estuche", "carcasa", "case"],
+  "carcasa":    ["funda", "cover", "estuche", "case"],
+  "estuche":    ["funda", "cover", "carcasa"],
+  // Energía
+  "bateria":    ["batería", "battery", "pila", "power bank"],
+  "batería":    ["bateria", "battery", "pila", "power bank"],
+  "power bank": ["bateria", "batería", "cargador portatil"],
 };
 
 const SORTABLE_ATTRIBUTES = ["price", "name", "id"];
@@ -128,7 +164,7 @@ async function initIndex() {
       rankingRules: RANKING_RULES,
       typoTolerance: {
         enabled: true,
-        minWordSizeForTypos: { oneTypo: 4, twoTypos: 8 },
+        minWordSizeForTypos: { oneTypo: 3, twoTypos: 6 },  // más permisivo: "celur" → "celular"
       },
       stopWords: STOP_WORDS,
       synonyms: SYNONYMS,
