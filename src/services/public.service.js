@@ -188,12 +188,29 @@ module.exports = {
           _source:       "meilisearch",
         };
       } catch (e) {
-        console.warn("⚠️  [Meilisearch] listCatalog falló, usando MySQL:", e.message);
+        console.error("⚠️  [Meilisearch] listCatalog ERROR:", e.message, e.cause?.message || "");
       }
     }
 
     // ── MySQL fallback ───────────────────────────────────────────────────────
-    return this._listCatalogMySQL(params);
+    const mysqlResult = await this._listCatalogMySQL(params);
+
+    // Multi-pass MySQL: si 0 resultados con query multi-palabra, reintentar quitando palabras
+    if (mysqlResult.total === 0 && params.search) {
+      const words = String(params.search).trim().split(/\s+/).filter(Boolean);
+      if (words.length > 1) {
+        for (let drop = 1; drop < words.length; drop++) {
+          const reducedQ = words.slice(0, words.length - drop).join(" ");
+          if (reducedQ.length < 2) break;
+          const retry = await this._listCatalogMySQL({ ...params, search: reducedQ });
+          if (retry.total > 0) {
+            return { ...retry, relaxed_query: reducedQ };
+          }
+        }
+      }
+    }
+
+    return mysqlResult;
   },
 
   async _listCatalogMySQL({
