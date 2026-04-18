@@ -194,7 +194,7 @@ async function syncProduct(productId) {
     }
 
     const doc = buildDocument(rows[0]);
-    await index.addDocuments([doc]);
+    await index.addDocuments([doc], { primaryKey: "id" });
   } catch (e) {
     console.warn(`⚠️  [Meilisearch] syncProduct(${productId}) falló:`, e.message);
   }
@@ -234,7 +234,7 @@ async function triggerFullReindex() {
 
     for (let i = 0; i < docs.length; i += BATCH_SIZE) {
       const batch = docs.slice(i, i + BATCH_SIZE);
-      await index.addDocuments(batch);
+      await index.addDocuments(batch, { primaryKey: "id" });
       console.log(`   ✓ Batch ${Math.ceil((i + 1) / BATCH_SIZE)} / ${Math.ceil(docs.length / BATCH_SIZE)}`);
     }
 
