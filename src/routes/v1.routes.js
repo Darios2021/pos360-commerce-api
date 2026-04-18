@@ -392,13 +392,23 @@ if (adminMediaRoutes) {
   console.log("⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)");
 }
 
-// ─── Meilisearch admin endpoints ───────────────────────────────────────────
-// POST /api/v1/admin/search/reindex  → dispara reindex completo (solo admins)
-// GET  /api/v1/admin/search/health   → estado del índice
+// ─── Meilisearch endpoints ─────────────────────────────────────────────────
+// Rutas bajo /sys/ para evitar el guard global de /admin/*
+// Protegidas por x-reindex-key = MEILISEARCH_MASTER_KEY
 {
   const searchService = require("../services/search.service");
 
-  router.get("/admin/search/health", requireAuth, async (req, res) => {
+  function requireMasterKey(req, res, next) {
+    const masterKey = process.env.MEILISEARCH_MASTER_KEY || "";
+    const provided  = req.headers["x-reindex-key"] || req.query.key || "";
+    if (!masterKey || provided !== masterKey) {
+      return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "x-reindex-key inválida" });
+    }
+    next();
+  }
+
+  // GET  /api/v1/sys/search/health
+  router.get("/sys/search/health", requireMasterKey, async (req, res) => {
     try {
       const status = await searchService.healthCheck();
       res.json({ ok: true, data: status });
@@ -407,25 +417,22 @@ if (adminMediaRoutes) {
     }
   });
 
-  // Acepta JWT (requireAuth) O el MEILISEARCH_MASTER_KEY como x-reindex-key
-  router.post("/admin/search/reindex", async (req, res, next) => {
-    const masterKey = process.env.MEILISEARCH_MASTER_KEY || "";
-    const headerKey = req.headers["x-reindex-key"] || "";
-    if (masterKey && headerKey === masterKey) {
-      // Autenticado por master key — continuar directo
-      res.json({ ok: true, message: "Reindex iniciado en background" });
-      searchService.triggerFullReindex().catch((e) =>
-        console.error("❌ [Meilisearch] reindex background error:", e.message)
-      );
-      return;
+  // POST /api/v1/sys/search/reindex
+  router.post("/sys/search/reindex", requireMasterKey, (req, res) => {
+    res.json({ ok: true, message: "Reindex iniciado en background" });
+    searchService.triggerFullReindex().catch((e) =>
+      console.error("❌ [Meilisearch] reindex error:", e.message)
+    );
+  });
+
+  // También con JWT para el panel admin futuro
+  router.get("/admin/search/health", requireAuth, async (req, res) => {
+    try {
+      const status = await searchService.healthCheck();
+      res.json({ ok: true, data: status });
+    } catch (e) {
+      res.status(500).json({ ok: false, message: e.message });
     }
-    // Fallback: JWT normal
-    return requireAuth(req, res, () => {
-      res.json({ ok: true, message: "Reindex iniciado en background" });
-      searchService.triggerFullReindex().catch((e) =>
-        console.error("❌ [Meilisearch] reindex background error:", e.message)
-      );
-    });
   });
 }
 
