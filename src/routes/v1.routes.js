@@ -407,12 +407,25 @@ if (adminMediaRoutes) {
     }
   });
 
-  router.post("/admin/search/reindex", requireAuth, async (req, res) => {
-    // Responder inmediatamente, el reindex corre en background
-    res.json({ ok: true, message: "Reindex iniciado en background" });
-    searchService.triggerFullReindex().catch((e) =>
-      console.error("❌ [Meilisearch] reindex background error:", e.message)
-    );
+  // Acepta JWT (requireAuth) O el MEILISEARCH_MASTER_KEY como x-reindex-key
+  router.post("/admin/search/reindex", async (req, res, next) => {
+    const masterKey = process.env.MEILISEARCH_MASTER_KEY || "";
+    const headerKey = req.headers["x-reindex-key"] || "";
+    if (masterKey && headerKey === masterKey) {
+      // Autenticado por master key — continuar directo
+      res.json({ ok: true, message: "Reindex iniciado en background" });
+      searchService.triggerFullReindex().catch((e) =>
+        console.error("❌ [Meilisearch] reindex background error:", e.message)
+      );
+      return;
+    }
+    // Fallback: JWT normal
+    return requireAuth(req, res, () => {
+      res.json({ ok: true, message: "Reindex iniciado en background" });
+      searchService.triggerFullReindex().catch((e) =>
+        console.error("❌ [Meilisearch] reindex background error:", e.message)
+      );
+    });
   });
 }
 
