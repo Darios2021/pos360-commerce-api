@@ -392,4 +392,28 @@ if (adminMediaRoutes) {
   console.log("⚠️ adminMediaRoutes no cargado (no existe adminMedia.routes.js ni admin.media.routes.js)");
 }
 
+// ─── Meilisearch admin endpoints ───────────────────────────────────────────
+// POST /api/v1/admin/search/reindex  → dispara reindex completo (solo admins)
+// GET  /api/v1/admin/search/health   → estado del índice
+{
+  const searchService = require("../services/search.service");
+
+  router.get("/admin/search/health", requireAuth, async (req, res) => {
+    try {
+      const status = await searchService.healthCheck();
+      res.json({ ok: true, data: status });
+    } catch (e) {
+      res.status(500).json({ ok: false, message: e.message });
+    }
+  });
+
+  router.post("/admin/search/reindex", requireAuth, async (req, res) => {
+    // Responder inmediatamente, el reindex corre en background
+    res.json({ ok: true, message: "Reindex iniciado en background" });
+    searchService.triggerFullReindex().catch((e) =>
+      console.error("❌ [Meilisearch] reindex background error:", e.message)
+    );
+  });
+}
+
 module.exports = router;

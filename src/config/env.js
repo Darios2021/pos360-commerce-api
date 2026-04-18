@@ -25,6 +25,10 @@ const env = {
   JWT_REFRESH_SECRET: required("JWT_REFRESH_SECRET"),
   JWT_ACCESS_EXPIRES: optional("JWT_ACCESS_EXPIRES", "1d"),
   JWT_REFRESH_EXPIRES: optional("JWT_REFRESH_EXPIRES", "30d"),
+
+  // Meilisearch (opcional — si no está configurado, la búsqueda usa MySQL)
+  MEILISEARCH_HOST:       optional("MEILISEARCH_HOST", ""),
+  MEILISEARCH_MASTER_KEY: optional("MEILISEARCH_MASTER_KEY", ""),
 };
 
 env.CORS_ORIGINS_ARRAY = env.CORS_ORIGINS === "*"

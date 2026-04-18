@@ -13,6 +13,15 @@
 
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
+const searchService = require("../services/search.service");
+
+// Fire-and-forget: sync a Meilisearch sin bloquear la respuesta HTTP
+function asyncSync(productId) {
+  searchService.syncProduct(productId).catch(() => {});
+}
+function asyncDelete(productId) {
+  searchService.deleteProduct(productId).catch(() => {});
+}
 
 // =====================
 // Helpers básicos
@@ -1147,6 +1156,8 @@ async function create(req, res, next) {
       attributes: { include: [[stockQtyLiteralByBranch(admin ? (branchIdScope || 0) : branchIdScope), "stock_qty"]] },
     });
 
+    asyncSync(createdId);
+
     return res.status(201).json({
       ok: true,
       message: "Producto creado",
@@ -1273,6 +1284,8 @@ async function update(req, res, next) {
     const x = updated?.toJSON ? updated.toJSON() : updated || {};
     const u = x?.createdByUser || null;
 
+    asyncSync(id);
+
     return res.json({
       ok: true,
       message: "Producto actualizado",
@@ -1372,6 +1385,7 @@ async function remove(req, res, next) {
         await p.destroy({ transaction: t });
       });
 
+      asyncDelete(id);
       return res.json({ ok: true, message: "Producto eliminado" });
     } catch (err) {
       if (isFkConstraintError(err)) {
@@ -1395,6 +1409,7 @@ async function remove(req, res, next) {
           );
         });
 
+        asyncDelete(id);
         return res.status(200).json({
           ok: true,
           code: "SOFT_DELETED",

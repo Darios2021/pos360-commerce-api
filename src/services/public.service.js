@@ -12,6 +12,7 @@
 // - ✅ FIX CRÍTICO: NO usar tabla inexistente "stock" -> usar v_stock_by_branch_product
 
 const { sequelize } = require("../models");
+const searchService = require("./search.service");
 
 const ESC = "!";
 function escLike(s) {
@@ -125,7 +126,57 @@ module.exports = {
   // =========================
   // Catálogo público
   // =========================
-  async listCatalog({
+  async listCatalog(params) {
+    // ── Meilisearch primero ──────────────────────────────────────────────────
+    // Solo cuando hay término de búsqueda; el browse por categoría/filtros
+    // sigue en MySQL para mantener el stock_qty en tiempo real.
+    if (searchService.isConfigured() && params.search && String(params.search).trim().length >= 2) {
+      try {
+        const brandsArr = csvList(params.brands);
+        const msResult = await searchService.searchCatalog({
+          branch_id: toInt(params.branch_id),
+          q:          String(params.search).trim(),
+          category_id: toInt(params.category_id, 0) || null,
+          brands:      brandsArr,
+          price_min:   params.price_min ?? null,
+          price_max:   params.price_max ?? null,
+          sort:        toStr(params.sort),
+          page:        toInt(params.page, 1),
+          limit:       toInt(params.limit, 24),
+        });
+
+        // Enriquecer con stock_by_branch (igual que MySQL path)
+        const productIds = msResult.items
+          .map((it) => Number(it.product_id || 0))
+          .filter(Boolean);
+
+        const stockMap = productIds.length ? await getStockByBranchMap(productIds) : {};
+        for (const it of msResult.items) {
+          it.stock_by_branch = stockMap[Number(it.product_id)] || [];
+        }
+
+        const lim = Math.min(100, Math.max(1, toInt(params.limit, 24)));
+        const pg  = Math.max(1, toInt(params.page, 1));
+        const total = msResult.total;
+        return {
+          items:  msResult.items,
+          page:   pg,
+          limit:  lim,
+          total,
+          pages:  total ? Math.ceil(total / lim) : 0,
+          _source: "meilisearch",
+        };
+      } catch (e) {
+        // Fallback silencioso a MySQL
+        console.warn("⚠️  [Meilisearch] listCatalog falló, usando MySQL:", e.message);
+      }
+    }
+
+    // ── MySQL fallback ───────────────────────────────────────────────────────
+    return this._listCatalogMySQL(params);
+  },
+
+  async _listCatalogMySQL({
     branch_id,
     search,
     category_id,
@@ -136,11 +187,11 @@ module.exports = {
     limit,
     strict_search,
     exclude_terms,
-
-    // ✅ FIX (nuevos)
     brands,
     model,
     sort,
+    price_min,
+    price_max,
   }) {
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
 
@@ -324,15 +375,36 @@ module.exports = {
   // Autocompletado
   // =========================
   async listSuggestions({ branch_id, q, limit }) {
+    const qq = String(q || "").trim();
+    if (!qq.length) return [];
+
+    // ── Meilisearch primero ──────────────────────────────────────────────────
+    if (searchService.isConfigured() && qq.length >= 2) {
+      try {
+        return await searchService.searchSuggestions({
+          branch_id: toInt(branch_id),
+          q: qq,
+          limit: Math.min(15, Math.max(1, toInt(limit, 8))),
+        });
+      } catch (e) {
+        console.warn("⚠️  [Meilisearch] listSuggestions falló, usando MySQL:", e.message);
+      }
+    }
+
+    // ── MySQL fallback ───────────────────────────────────────────────────────
+    return this._listSuggestionsMySQL({ branch_id, q: qq, limit });
+  },
+
+  async _listSuggestionsMySQL({ branch_id, q, limit }) {
+    const qq = String(q || "").trim().toLowerCase();
+    if (!qq.length) return [];
+
     const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
 
     const repl = {
       branch_id: toInt(branch_id),
       limit: Math.min(15, Math.max(1, toInt(limit, 8))),
     };
-
-    const qq = String(q || "").trim().toLowerCase();
-    if (!qq.length) return [];
 
     repl.q      = `%${escLike(qq)}%`;
     repl.qStart = `${escLike(qq)}%`;
