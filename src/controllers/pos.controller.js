@@ -1484,6 +1484,28 @@ async function createSale(req, res) {
 
     if (payments.length === 0) totalPaid = subtotal;
 
+    // Detectar divergencia entre lo cobrado y lo que suman los items.
+    // Con el frontend corregido esto nunca debería ocurrir; si ocurre
+    // es señal de un bug de precios en el cliente.
+    const priceDivergence = Math.abs(totalPaid - subtotal);
+    if (priceDivergence > 1) {
+      logPos(req, "warn", "createSale PRICE_MISMATCH: items_total != paid_total", {
+        sale_id: sale.id,
+        subtotal,
+        totalPaid,
+        divergence: priceDivergence,
+        items: normalizedItems.map((i) => ({
+          product_id: i.product_id,
+          qty: i.quantity,
+          unit_price: i.unit_price,
+        })),
+        payments: resolvedPayments.map((p) => ({
+          method_id: p.payment_method_id,
+          amount: p.amount,
+        })),
+      });
+    }
+
     sale.paid_total = totalPaid;
     sale.change_total = totalPaid - subtotal;
     await sale.save({ transaction: t });
