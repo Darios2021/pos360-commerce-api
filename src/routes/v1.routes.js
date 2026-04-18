@@ -245,6 +245,7 @@ const branchesRoutes = loadRoute("./branches.routes", { optional: false });
 const warehousesRoutes = loadRoute("./warehouses.routes", { optional: false });
 const stockRoutes = loadRoute("./stock.routes", { optional: false });
 const dashboardRoutes = loadRoute("./dashboard.routes", { optional: false });
+const analyticsRoutes = loadRoute("./analytics.routes", { optional: true });
 const posRoutes = loadRoute("./pos.routes", { optional: false });
 const meRoutes = loadRoute("./me.routes", { optional: false });
 
@@ -327,6 +328,7 @@ safeUse("/branches", requireAuth, branchesRoutes);
 safeUse("/warehouses", requireAuth, warehousesRoutes);
 safeUse("/stock", requireAuth, stockRoutes);
 safeUse("/dashboard", requireAuth, dashboardRoutes);
+if (analyticsRoutes) safeUse("/analytics", requireAuth, analyticsRoutes);
 
 safeUse("/pos", requireAuth, posRoutes);
 safeUse("/me", requireAuth, meRoutes);

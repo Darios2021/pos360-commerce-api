@@ -763,6 +763,156 @@ async function overview(req, res, next) {
       })),
     };
 
+    // ===== Analytics: ventas por hora del día (período)
+    const salesByHourRows = await sequelize.query(
+      `
+      SELECT HOUR(s.sold_at) AS h,
+        COUNT(*) AS cnt,
+        COALESCE(SUM(s.total),0) AS sum_total
+      FROM sales s
+      WHERE s.status='PAID'
+        ${whereBetweenRange}
+        ${whereBranchRange}
+      GROUP BY HOUR(s.sold_at)
+      `,
+      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
+    ).catch(() => []);
+    const hourMap = new Map((salesByHourRows || []).map((r) => [Number(r.h || 0), r]));
+    const salesByHour = Array.from({ length: 24 }, (_, h) => {
+      const r = hourMap.get(h);
+      return { hour: h, count: Number(r?.cnt || 0), total: Number(r?.sum_total || 0) };
+    });
+
+    // ===== Analytics: ventas por método de pago (período completo)
+    const paymentsPeriodRows = await sequelize.query(
+      `
+      SELECT p.method,
+        COALESCE(SUM(p.amount),0) AS sum_amount,
+        COUNT(DISTINCT p.sale_id) AS sale_cnt
+      FROM payments p
+      INNER JOIN sales s ON s.id = p.sale_id
+      WHERE s.status='PAID'
+        ${whereBetweenRange}
+        ${whereBranchRange}
+      GROUP BY p.method
+      ORDER BY sum_amount DESC
+      `,
+      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
+    ).catch(() => []);
+    const salesByPaymentPeriod = (paymentsPeriodRows || []).map((r) => ({
+      method: String(r.method || "").toUpperCase(),
+      label: methodLabel(r.method),
+      total: Number(r.sum_amount || 0),
+      count: Number(r.sale_cnt || 0),
+    }));
+
+    // ===== Analytics: ventas por tipo de comprobante (período)
+    const invoiceTypeRows = await sequelize.query(
+      `
+      SELECT COALESCE(s.invoice_type,'TICKET') AS invoice_type,
+        COUNT(*) AS cnt,
+        COALESCE(SUM(s.total),0) AS sum_total
+      FROM sales s
+      WHERE s.status='PAID'
+        ${whereBetweenRange}
+        ${whereBranchRange}
+      GROUP BY COALESCE(s.invoice_type,'TICKET')
+      ORDER BY cnt DESC
+      `,
+      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
+    ).catch(() => []);
+    const salesByInvoiceType = (invoiceTypeRows || []).map((r) => ({
+      invoice_type: String(r.invoice_type || "TICKET").toUpperCase(),
+      count: Number(r.cnt || 0),
+      total: Number(r.sum_total || 0),
+    }));
+
+    // ===== Analytics: productos por categoría (inventario)
+    const prodByCatRows = await sequelize.query(
+      `
+      SELECT c.id AS cat_id, c.name AS cat_name,
+        COUNT(p.id) AS product_count,
+        SUM(CASE WHEN p.is_active=1 THEN 1 ELSE 0 END) AS active_count,
+        SUM(CASE WHEN COALESCE(p.price_list,0)<=0 AND COALESCE(p.price,0)<=0 THEN 1 ELSE 0 END) AS no_price_count
+      FROM categories c
+      LEFT JOIN products p ON p.category_id = c.id${scope.branchId ? " AND p.branch_id = :branchId" : ""}
+      GROUP BY c.id, c.name
+      HAVING COUNT(p.id) > 0
+      ORDER BY COUNT(p.id) DESC
+      LIMIT 20
+      `,
+      { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null } }
+    ).catch(() => []);
+    const productsByCategory = (prodByCatRows || []).map((r) => ({
+      cat_id: Number(r.cat_id || 0),
+      cat_name: r.cat_name || `Cat #${r.cat_id}`,
+      product_count: Number(r.product_count || 0),
+      active_count: Number(r.active_count || 0),
+      no_price_count: Number(r.no_price_count || 0),
+    }));
+
+    // ===== Analytics: valor del inventario por depósito
+    const invValueRows = await sequelize.query(
+      `
+      SELECT
+        w.id AS wh_id, w.name AS wh_name,
+        b.id AS br_id, b.name AS br_name,
+        COALESCE(SUM(sb.qty * COALESCE(p.cost,0)),0) AS cost_value,
+        COALESCE(SUM(sb.qty * COALESCE(p.price_list, p.price, 0)),0) AS price_value,
+        COUNT(DISTINCT sb.product_id) AS prod_count,
+        COALESCE(SUM(sb.qty),0) AS total_units
+      FROM stock_balances sb
+      INNER JOIN warehouses w ON w.id = sb.warehouse_id
+      LEFT JOIN branches b ON b.id = w.branch_id
+      LEFT JOIN products p ON p.id = sb.product_id
+      WHERE sb.qty > 0
+        ${whereWhBranch}
+      GROUP BY w.id, w.name, b.id, b.name
+      ORDER BY price_value DESC
+      `,
+      { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null } }
+    ).catch(() => []);
+    const inventoryValue = (invValueRows || []).map((r) => ({
+      warehouse_id: Number(r.wh_id || 0),
+      warehouse_name: r.wh_name || `Depósito #${r.wh_id}`,
+      branch_id: Number(r.br_id || 0),
+      branch_name: r.br_name || null,
+      cost_value: Number(r.cost_value || 0),
+      price_value: Number(r.price_value || 0),
+      products_count: Number(r.prod_count || 0),
+      total_units: Number(r.total_units || 0),
+    }));
+    const totalInventoryCostValue = inventoryValue.reduce((a, r) => a + r.cost_value, 0);
+    const totalInventoryPriceValue = inventoryValue.reduce((a, r) => a + r.price_value, 0);
+
+    // ===== Analytics: top 10 productos con más stock
+    const topStockedRows = await sequelize.query(
+      `
+      SELECT
+        p.id AS product_id,
+        COALESCE(p.name, CONCAT('Producto #', p.id)) AS product_name,
+        p.sku,
+        COALESCE(SUM(sb.qty),0) AS total_qty,
+        COALESCE(SUM(sb.qty * COALESCE(p.price_list, p.price, 0)),0) AS total_value
+      FROM stock_balances sb
+      INNER JOIN warehouses w ON w.id = sb.warehouse_id
+      LEFT JOIN products p ON p.id = sb.product_id
+      WHERE sb.qty > 0
+        ${whereWhBranch}
+      GROUP BY p.id, p.name, p.sku
+      ORDER BY total_qty DESC
+      LIMIT 10
+      `,
+      { type: QueryTypes.SELECT, replacements: { branchId: scope.branchId || null } }
+    ).catch(() => []);
+    const topStockedProducts = (topStockedRows || []).map((r) => ({
+      product_id: Number(r.product_id || 0),
+      product_name: r.product_name || `Producto #${r.product_id}`,
+      sku: r.sku || null,
+      total_qty: Number(r.total_qty || 0),
+      total_value: Number(r.total_value || 0),
+    }));
+
     return res.json({
       ok: true,
       scope,
@@ -777,16 +927,19 @@ async function overview(req, res, next) {
           salesByBranch,
           lastSales,
 
-          // ✅ periodo seleccionable
-          period: range.period, // "30d" | "90d" | "12m" | "all"
+          period: range.period,
           periodFrom: range.from ? ymd(range.from) : null,
           periodTo: ymd(range.to),
 
-          salesByPeriodDaily,   // 👈 reemplaza al "salesByDay30" para el gráfico de picos
+          salesByPeriodDaily,
           topBranchPeriod,
           topCashiersPeriod,
           topProductsPeriod,
           bestMonthPeriod,
+
+          salesByHour,
+          salesByPaymentPeriod,
+          salesByInvoiceType,
         },
         inventory: {
           totalProducts,
@@ -794,9 +947,16 @@ async function overview(req, res, next) {
           noPriceProducts,
           categories: categoriesTotal,
           lastProducts: invLastProducts,
+          productsByCategory,
         },
         users: { usersTotal, branchesTotal },
-        stock: stockKpis,
+        stock: {
+          ...stockKpis,
+          inventoryValue,
+          topStockedProducts,
+          totalInventoryCostValue,
+          totalInventoryPriceValue,
+        },
       },
     });
   } catch (e) {
