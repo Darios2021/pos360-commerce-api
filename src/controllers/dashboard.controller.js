@@ -50,13 +50,15 @@ function endOfDay(d = new Date()) {
 }
 
 function methodLabel(m) {
-  const x = String(m || "").toUpperCase();
-  if (x === "CASH") return "Efectivo";
-  if (x === "CARD") return "Tarjeta / Débito";
-  if (x === "TRANSFER") return "Transferencia";
-  if (x === "QR") return "Mercado Pago";
-  if (x === "OTHER") return "Otro";
-  return x || "—";
+  const x = String(m || "").toUpperCase().trim();
+  if (["CASH","EFECTIVO"].includes(x))                               return "Efectivo";
+  if (["CARD","TARJETA","DEBIT","DEBITO"].includes(x))               return "Tarjeta / Débito";
+  if (["TRANSFER","TRANSFERENCIA"].includes(x))                      return "Transferencia";
+  if (["QR","MERCADOPAGO","MERCADO_PAGO","MP"].includes(x))          return "Mercado Pago";
+  if (["CREDIT_SJT","CREDITO_SJT","CREDITSANJUAN"].includes(x))      return "Crédito San Juan";
+  if (["CREDIT","CREDITO","CREDIT_1","CUOTAS"].includes(x))          return "Crédito";
+  if (x === "OTHER")                                                 return "Otro";
+  return m || "—";
 }
 
 function pickExistingAttrs(model, candidates, always = ["id"]) {
@@ -816,9 +818,19 @@ async function overview(req, res, next) {
     });
 
     // ===== Analytics: ventas por método de pago (período completo)
+    // Normaliza variantes del mismo medio antes de agrupar
     const paymentsPeriodRows = await sequelize.query(
       `
-      SELECT p.method,
+      SELECT
+        CASE
+          WHEN UPPER(p.method) IN ('QR','MERCADOPAGO','MERCADO_PAGO','MP') THEN 'QR'
+          WHEN UPPER(p.method) IN ('CASH','EFECTIVO')                       THEN 'CASH'
+          WHEN UPPER(p.method) IN ('CARD','TARJETA','DEBIT','DEBITO')       THEN 'CARD'
+          WHEN UPPER(p.method) IN ('TRANSFER','TRANSFERENCIA')              THEN 'TRANSFER'
+          WHEN UPPER(p.method) IN ('CREDIT_SJT','CREDITO_SJT','CREDITSANJUAN') THEN 'CREDIT_SJT'
+          WHEN UPPER(p.method) IN ('CREDIT','CREDITO','CREDIT_1','CUOTAS') THEN 'CREDIT'
+          ELSE UPPER(p.method)
+        END AS method,
         COALESCE(SUM(p.amount),0) AS sum_amount,
         COUNT(DISTINCT p.sale_id) AS sale_cnt
       FROM payments p
@@ -826,7 +838,7 @@ async function overview(req, res, next) {
       WHERE s.status='PAID'
         ${whereBetweenRange}
         ${whereBranchRange}
-      GROUP BY p.method
+      GROUP BY method
       ORDER BY sum_amount DESC
       `,
       { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
