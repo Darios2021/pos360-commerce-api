@@ -32,15 +32,21 @@ function ymd(d) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// Offset horario local (Argentina = UTC-3). Configurable con TZ_OFFSET_HOURS en .env
+const TZ_OFFSET_HOURS = parseInt(process.env.TZ_OFFSET_HOURS ?? "-3", 10);
+const TZ_OFFSET_MS    = TZ_OFFSET_HOURS * 60 * 60 * 1000;
+
+// startOfDay y endOfDay calculados en timezone local, devueltos como UTC para comparar
+// contra stored datetimes (que el servidor guarda en UTC via new Date())
 function startOfDay(d = new Date()) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+  const local = new Date(d.getTime() + TZ_OFFSET_MS);
+  local.setHours(0, 0, 0, 0);
+  return new Date(local.getTime() - TZ_OFFSET_MS);
 }
 function endOfDay(d = new Date()) {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
+  const local = new Date(d.getTime() + TZ_OFFSET_MS);
+  local.setHours(23, 59, 59, 999);
+  return new Date(local.getTime() - TZ_OFFSET_MS);
 }
 
 function methodLabel(m) {
@@ -326,16 +332,19 @@ async function overview(req, res, next) {
       paymentsToday = [];
     }
 
-    // ===== ventas últimos 7 días
+    // ===== ventas últimos 7 días (DATE_FORMAT con offset local para que los días coincidan)
+    const tzExpr = TZ_OFFSET_HOURS >= 0
+      ? `DATE_FORMAT(DATE_ADD(sold_at, INTERVAL ${TZ_OFFSET_HOURS} HOUR), '%Y-%m-%d')`
+      : `DATE_FORMAT(DATE_SUB(sold_at, INTERVAL ${Math.abs(TZ_OFFSET_HOURS)} HOUR), '%Y-%m-%d')`;
     const salesByDayRows = await Sale.findAll({
       attributes: [
-        [literal("DATE_FORMAT(sold_at, '%Y-%m-%d')"), "day"],
+        [literal(tzExpr), "day"],
         [fn("SUM", col("total")), "sum_total"],
         [fn("COUNT", col("Sale.id")), "count_sales"],
       ],
       where: { ...baseBranch, status: "PAID", sold_at: { [Op.gte]: weekFrom } },
-      group: [literal("DATE_FORMAT(sold_at, '%Y-%m-%d')")],
-      order: [[literal("DATE_FORMAT(sold_at, '%Y-%m-%d')"), "ASC"]],
+      group: [literal(tzExpr)],
+      order: [[literal(tzExpr), "ASC"]],
       raw: true,
     });
 
@@ -390,18 +399,21 @@ async function overview(req, res, next) {
     const dailyMaxDays = range.period === "all" ? 180 : range.period === "12m" ? 365 : range.period === "90d" ? 90 : 30;
     const dailyFrom = range.period === "all" ? (() => { const d = new Date(todayFrom); d.setDate(d.getDate() - (dailyMaxDays - 1)); return d; })() : (range.from || (() => { const d = new Date(todayFrom); d.setDate(d.getDate() - (dailyMaxDays - 1)); return d; })());
 
+    const tzDateExpr = TZ_OFFSET_HOURS >= 0
+      ? `DATE_FORMAT(DATE_ADD(s.sold_at, INTERVAL ${TZ_OFFSET_HOURS} HOUR), '%Y-%m-%d')`
+      : `DATE_FORMAT(DATE_SUB(s.sold_at, INTERVAL ${Math.abs(TZ_OFFSET_HOURS)} HOUR), '%Y-%m-%d')`;
     const salesDailyRows = await sequelize
       .query(
         `
         SELECT
-          DATE_FORMAT(s.sold_at, '%Y-%m-%d') AS day,
+          ${tzDateExpr} AS day,
           COALESCE(SUM(s.total),0) AS sum_total,
           COUNT(*) AS count_sales
         FROM sales s
         WHERE s.status='PAID'
           AND s.sold_at BETWEEN :dailyFrom AND :to
           ${whereBranchRange}
-        GROUP BY DATE_FORMAT(s.sold_at, '%Y-%m-%d')
+        GROUP BY ${tzDateExpr}
         ORDER BY day ASC
         `,
         {
@@ -559,11 +571,14 @@ async function overview(req, res, next) {
     // ==========================
     // ✅ Mejor mes dentro del periodo
     // ==========================
+    const tzMonthExpr = TZ_OFFSET_HOURS >= 0
+      ? `DATE_FORMAT(DATE_ADD(s.sold_at, INTERVAL ${TZ_OFFSET_HOURS} HOUR), '%Y-%m')`
+      : `DATE_FORMAT(DATE_SUB(s.sold_at, INTERVAL ${Math.abs(TZ_OFFSET_HOURS)} HOUR), '%Y-%m')`;
     const bestMonthRow = await sequelize
       .query(
         `
         SELECT
-          DATE_FORMAT(s.sold_at, '%Y-%m') AS ym,
+          ${tzMonthExpr} AS ym,
           COALESCE(SUM(s.total),0) AS sum_total,
           COUNT(*) AS count_sales
         FROM sales s
