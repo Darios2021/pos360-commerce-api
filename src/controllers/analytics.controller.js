@@ -833,8 +833,8 @@ async function stockMovementsDeep(req, res, next) {
         COALESCE(c.name,'Sin categoría') AS category_name,
         COUNT(DISTINCT sb.product_id) AS product_cnt,
         COALESCE(SUM(sb.qty),0) AS total_qty,
-        COALESCE(SUM(sb.qty * LEAST(COALESCE(NULLIF(p.price_list,0), p.price, 0), 99999999)),0) AS price_value,
-        COALESCE(SUM(sb.qty * COALESCE(p.cost, 0)),0) AS cost_value
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS price_value,
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 THEN sb.qty * COALESCE(p.cost, 0) ELSE 0 END),0) AS cost_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN products p ON p.id = sb.product_id
@@ -853,7 +853,7 @@ async function stockMovementsDeep(req, res, next) {
         COALESCE(c.name,'Sin categoría') AS category_name,
         COUNT(DISTINCT sb.product_id) AS product_cnt,
         COALESCE(SUM(sb.qty),0) AS total_qty,
-        COALESCE(SUM(sb.qty * LEAST(COALESCE(NULLIF(p.price_list,0), p.price, 0), 99999999)),0) AS price_value
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS price_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN products p ON p.id = sb.product_id

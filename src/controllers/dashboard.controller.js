@@ -901,8 +901,8 @@ async function overview(req, res, next) {
       SELECT
         w.id AS wh_id, w.name AS wh_name,
         b.id AS br_id, b.name AS br_name,
-        COALESCE(SUM(sb.qty * COALESCE(NULLIF(p.cost,0),0)),0) AS cost_value,
-        COALESCE(SUM(sb.qty * LEAST(COALESCE(NULLIF(p.price_list,0), p.price, 0), 99999999)),0) AS price_value,
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 THEN sb.qty * COALESCE(NULLIF(p.cost,0),0) ELSE 0 END),0) AS cost_value,
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS price_value,
         COUNT(DISTINCT sb.product_id) AS prod_count,
         COALESCE(SUM(sb.qty),0) AS total_units
       FROM stock_balances sb
@@ -936,8 +936,8 @@ async function overview(req, res, next) {
         p.id AS product_id,
         COALESCE(p.name, CONCAT('Producto #', p.id)) AS product_name,
         p.sku,
-        COALESCE(SUM(sb.qty),0) AS total_qty,
-        COALESCE(SUM(sb.qty * LEAST(COALESCE(NULLIF(p.price_list,0), p.price, 0), 99999999)),0) AS total_value
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 THEN sb.qty ELSE 0 END),0) AS total_qty,
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS total_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN products p ON p.id = sb.product_id
