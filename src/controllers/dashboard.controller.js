@@ -904,7 +904,8 @@ async function overview(req, res, next) {
         w.id AS wh_id, w.name AS wh_name,
         b.id AS br_id, b.name AS br_name,
         COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 THEN sb.qty * COALESCE(NULLIF(p.cost,0),0) ELSE 0 END),0) AS cost_value,
-        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS price_value,
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_discount,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_discount,0),p.price,0) ELSE 0 END),0) AS price_value,
+        COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS price_list_value,
         COUNT(DISTINCT sb.product_id) AS prod_count,
         COALESCE(SUM(sb.qty),0) AS total_units
       FROM stock_balances sb
@@ -925,11 +926,13 @@ async function overview(req, res, next) {
       branch_name: r.br_name || null,
       cost_value: Number(r.cost_value || 0),
       price_value: Number(r.price_value || 0),
+      price_list_value: Number(r.price_list_value || 0),
       products_count: Number(r.prod_count || 0),
       total_units: Number(r.total_units || 0),
     }));
     const totalInventoryCostValue = inventoryValue.reduce((a, r) => a + r.cost_value, 0);
     const totalInventoryPriceValue = inventoryValue.reduce((a, r) => a + r.price_value, 0);
+    const totalInventoryListValue = inventoryValue.reduce((a, r) => a + r.price_list_value, 0);
 
     // ===== Analytics: top 10 productos con más stock
     const topStockedRows = await sequelize.query(
@@ -1003,6 +1006,7 @@ async function overview(req, res, next) {
           topStockedProducts,
           totalInventoryCostValue,
           totalInventoryPriceValue,
+          totalInventoryListValue,
         },
       },
     });
