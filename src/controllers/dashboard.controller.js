@@ -501,13 +501,16 @@ async function overview(req, res, next) {
           s.user_id,
           ${userLabelExpr} AS user_label,
           COALESCE(SUM(s.total),0) AS sum_total,
-          COUNT(*) AS count_sales
+          COUNT(*) AS count_sales,
+          u.branch_id AS user_branch_id,
+          br.name AS branch_name
         FROM sales s
         LEFT JOIN users u ON u.id = s.user_id
+        LEFT JOIN branches br ON br.id = u.branch_id
         WHERE s.status='PAID'
           ${whereBetweenRange}
           ${whereBranchRange}
-        GROUP BY s.user_id, user_label
+        GROUP BY s.user_id, user_label, u.branch_id, br.name
         ORDER BY sum_total DESC
         LIMIT 10
         `,
@@ -518,10 +521,12 @@ async function overview(req, res, next) {
       )
       .then((rows) =>
         (rows || []).map((r) => ({
-          user_id: Number(r.user_id || 0),
-          user_label: r.user_label || (r.user_id ? `User #${r.user_id}` : "—"),
-          total: Number(r.sum_total || 0),
-          count: Number(r.count_sales || 0),
+          user_id:     Number(r.user_id || 0),
+          user_label:  r.user_label || (r.user_id ? `User #${r.user_id}` : "—"),
+          total:       Number(r.sum_total || 0),
+          count:       Number(r.count_sales || 0),
+          branch_id:   r.user_branch_id ? Number(r.user_branch_id) : null,
+          branch_name: r.branch_name || null,
         }))
       )
       .catch(() => []);
