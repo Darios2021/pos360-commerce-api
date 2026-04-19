@@ -846,6 +846,26 @@ async function stockMovementsDeep(req, res, next) {
       { branchId: scope.branchId || null }
     );
 
+    // Stock por subcategoría
+    const stockBySubCategory = await q(
+      `SELECT
+        COALESCE(sc.name,'Sin subcategoría') AS subcategory_name,
+        COALESCE(c.name,'Sin categoría') AS category_name,
+        COUNT(DISTINCT sb.product_id) AS product_cnt,
+        COALESCE(SUM(sb.qty),0) AS total_qty,
+        COALESCE(SUM(sb.qty * COALESCE(p.price_list, p.price, 0)),0) AS price_value
+      FROM stock_balances sb
+      INNER JOIN warehouses w ON w.id = sb.warehouse_id
+      LEFT JOIN products p ON p.id = sb.product_id
+      LEFT JOIN subcategories sc ON sc.id = p.subcategory_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE sb.qty > 0 ${branchCondW}
+      GROUP BY COALESCE(sc.name,'Sin subcategoría'), COALESCE(c.name,'Sin categoría')
+      ORDER BY total_qty DESC
+      LIMIT 20`,
+      { branchId: scope.branchId || null }
+    );
+
     // Días estimados de inventario por producto (stock actual / promedio ventas diarias)
     const daysOfInventory = await q(
       `SELECT
@@ -915,6 +935,10 @@ async function stockMovementsDeep(req, res, next) {
         stockByCategory: (stockByCategory || []).map(r => ({
           category: r.category_name, products: num(r.product_cnt),
           totalQty: num(r.total_qty), priceValue: num(r.price_value), costValue: num(r.cost_value),
+        })),
+        stockBySubCategory: (stockBySubCategory || []).map(r => ({
+          subcategory: r.subcategory_name, category: r.category_name, products: num(r.product_cnt),
+          totalQty: num(r.total_qty), priceValue: num(r.price_value),
         })),
         daysOfInventory: (daysOfInventory || []).map(r => ({
           id: num(r.id), name: r.name, sku: r.sku,
