@@ -167,6 +167,7 @@ function findAssocAs(fromModel, toModel) {
 // =========================
 function normalizePeriod(p) {
   const x = String(p || "").trim().toLowerCase();
+  if (["7d", "semana", "ultima_semana", "última_semana"].includes(x)) return "7d";
   if (["30d", "1m", "mes", "ultimo_mes", "último_mes"].includes(x)) return "30d";
   if (["90d", "3m", "tres_meses", "últimos_3_meses", "ultimos_3_meses"].includes(x)) return "90d";
   if (["12m", "1y", "anual", "año", "year"].includes(x)) return "12m";
@@ -185,7 +186,7 @@ function computeRange(period, todayFrom, todayTo) {
     return { period: "12m", from, to: todayTo };
   }
 
-  const days = p === "90d" ? 90 : 30;
+  const days = p === "90d" ? 90 : p === "7d" ? 7 : 30;
   const from = new Date(todayFrom);
   from.setDate(from.getDate() - (days - 1));
   return { period: p, from, to: todayTo };
@@ -396,7 +397,7 @@ async function overview(req, res, next) {
     // - si period=all: devolvemos últimos 180 días para no matar el frontend
     //   (y aparte mandamos from=null para que sepas que es histórico)
     // ==========================
-    const dailyMaxDays = range.period === "all" ? 180 : range.period === "12m" ? 365 : range.period === "90d" ? 90 : 30;
+    const dailyMaxDays = range.period === "all" ? 180 : range.period === "12m" ? 365 : range.period === "90d" ? 90 : range.period === "7d" ? 7 : 30;
     const dailyFrom = range.period === "all" ? (() => { const d = new Date(todayFrom); d.setDate(d.getDate() - (dailyMaxDays - 1)); return d; })() : (range.from || (() => { const d = new Date(todayFrom); d.setDate(d.getDate() - (dailyMaxDays - 1)); return d; })());
 
     const tzDateExpr = TZ_OFFSET_HOURS >= 0
