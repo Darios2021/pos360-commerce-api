@@ -61,9 +61,14 @@ async function loadUserAccessContext(userId) {
     .map((b) => ({ id: b.id, name: b.name }))
     .filter((b) => b?.id);
 
-  // fallback: al menos la principal
+  // fallback: al menos la principal (con nombre real)
   if (!branches.length && plain.branch_id) {
-    branches = [{ id: plain.branch_id, name: null }];
+    try {
+      const b = await Branch.findByPk(plain.branch_id, { attributes: ["id", "name"] });
+      branches = [{ id: plain.branch_id, name: b?.name || null }];
+    } catch {
+      branches = [{ id: plain.branch_id, name: null }];
+    }
   }
 
   // ✅ consistencia: branch principal debe estar habilitada (user_branches)
