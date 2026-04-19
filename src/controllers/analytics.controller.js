@@ -839,9 +839,7 @@ async function stockMovementsDeep(req, res, next) {
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN products p ON p.id = sb.product_id
       LEFT JOIN categories c ON c.id = p.category_id
-      WHERE sb.qty > 0
-        AND (p.deleted_at IS NULL OR p.id IS NULL)
-        ${branchCondW}
+      WHERE sb.qty > 0 ${branchCondW}
       GROUP BY COALESCE(c.name,'Sin categoría')
       ORDER BY total_qty DESC
       LIMIT 15`,
@@ -861,9 +859,7 @@ async function stockMovementsDeep(req, res, next) {
       LEFT JOIN products p ON p.id = sb.product_id
       LEFT JOIN subcategories sc ON sc.id = p.subcategory_id
       LEFT JOIN categories c ON c.id = p.category_id
-      WHERE sb.qty > 0
-        AND (p.deleted_at IS NULL OR p.id IS NULL)
-        ${branchCondW}
+      WHERE sb.qty > 0 ${branchCondW}
       GROUP BY COALESCE(sc.name,'Sin subcategoría'), COALESCE(c.name,'Sin categoría')
       ORDER BY total_qty DESC
       LIMIT 20`,

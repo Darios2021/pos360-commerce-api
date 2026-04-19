@@ -910,7 +910,6 @@ async function overview(req, res, next) {
       LEFT JOIN branches b ON b.id = w.branch_id
       LEFT JOIN products p ON p.id = sb.product_id
       WHERE sb.qty > 0
-        AND (p.deleted_at IS NULL OR p.id IS NULL)
         ${whereWhBranch}
       GROUP BY w.id, w.name, b.id, b.name
       ORDER BY price_value DESC
@@ -943,7 +942,6 @@ async function overview(req, res, next) {
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN products p ON p.id = sb.product_id
       WHERE sb.qty > 0
-        AND (p.deleted_at IS NULL OR p.id IS NULL)
         ${whereWhBranch}
       GROUP BY p.id, p.name, p.sku
       ORDER BY total_qty DESC
