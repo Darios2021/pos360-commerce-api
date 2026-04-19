@@ -54,7 +54,7 @@ function methodLabel(m) {
   if (x === "CASH") return "Efectivo";
   if (x === "CARD") return "Tarjeta / Débito";
   if (x === "TRANSFER") return "Transferencia";
-  if (x === "QR") return "QR";
+  if (x === "QR") return "Mercado Pago";
   if (x === "OTHER") return "Otro";
   return x || "—";
 }
