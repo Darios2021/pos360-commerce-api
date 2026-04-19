@@ -901,8 +901,8 @@ async function overview(req, res, next) {
       SELECT
         w.id AS wh_id, w.name AS wh_name,
         b.id AS br_id, b.name AS br_name,
-        COALESCE(SUM(sb.qty * COALESCE(p.cost,0)),0) AS cost_value,
-        COALESCE(SUM(sb.qty * COALESCE(p.price_list, p.price, 0)),0) AS price_value,
+        COALESCE(SUM(sb.qty * COALESCE(NULLIF(p.cost,0),0)),0) AS cost_value,
+        COALESCE(SUM(sb.qty * LEAST(COALESCE(NULLIF(p.price_list,0), p.price, 0), 99999999)),0) AS price_value,
         COUNT(DISTINCT sb.product_id) AS prod_count,
         COALESCE(SUM(sb.qty),0) AS total_units
       FROM stock_balances sb
@@ -910,6 +910,7 @@ async function overview(req, res, next) {
       LEFT JOIN branches b ON b.id = w.branch_id
       LEFT JOIN products p ON p.id = sb.product_id
       WHERE sb.qty > 0
+        AND (p.deleted_at IS NULL OR p.id IS NULL)
         ${whereWhBranch}
       GROUP BY w.id, w.name, b.id, b.name
       ORDER BY price_value DESC
@@ -937,11 +938,12 @@ async function overview(req, res, next) {
         COALESCE(p.name, CONCAT('Producto #', p.id)) AS product_name,
         p.sku,
         COALESCE(SUM(sb.qty),0) AS total_qty,
-        COALESCE(SUM(sb.qty * COALESCE(p.price_list, p.price, 0)),0) AS total_value
+        COALESCE(SUM(sb.qty * LEAST(COALESCE(NULLIF(p.price_list,0), p.price, 0), 99999999)),0) AS total_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN products p ON p.id = sb.product_id
       WHERE sb.qty > 0
+        AND (p.deleted_at IS NULL OR p.id IS NULL)
         ${whereWhBranch}
       GROUP BY p.id, p.name, p.sku
       ORDER BY total_qty DESC
