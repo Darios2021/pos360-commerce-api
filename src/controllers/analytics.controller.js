@@ -837,7 +837,7 @@ async function stockMovementsDeep(req, res, next) {
         COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 THEN sb.qty * COALESCE(p.cost, 0) ELSE 0 END),0) AS cost_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
-      LEFT JOIN products p ON p.id = sb.product_id
+      INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
       LEFT JOIN categories c ON c.id = p.category_id
       WHERE sb.qty > 0 ${branchCondW}
       GROUP BY COALESCE(c.name,'Sin categoría')
@@ -856,7 +856,7 @@ async function stockMovementsDeep(req, res, next) {
         COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS price_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
-      LEFT JOIN products p ON p.id = sb.product_id
+      INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
       LEFT JOIN subcategories sc ON sc.id = p.subcategory_id
       LEFT JOIN categories c ON c.id = p.category_id
       WHERE sb.qty > 0 ${branchCondW}
@@ -889,7 +889,7 @@ async function stockMovementsDeep(req, res, next) {
         WHERE s.status='PAID' AND s.sold_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         GROUP BY si.product_id
       ) AS daily_sales ON daily_sales.product_id = p.id
-      WHERE sb.qty > 0 ${branchCondW}
+      WHERE sb.qty > 0 AND p.is_active = 1 ${branchCondW}
       GROUP BY p.id, p.name, p.sku
       HAVING avg_daily_sales > 0
       ORDER BY days_remaining ASC

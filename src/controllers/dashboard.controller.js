@@ -714,6 +714,7 @@ async function overview(req, res, next) {
           COUNT(DISTINCT sb.product_id) AS distinct_products
         FROM stock_balances sb
         INNER JOIN warehouses w ON w.id = sb.warehouse_id
+        INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
         WHERE 1=1
           ${whereWhBranch}
         `,
@@ -737,7 +738,7 @@ async function overview(req, res, next) {
         FROM stock_balances sb
         INNER JOIN warehouses w ON w.id = sb.warehouse_id
         LEFT JOIN branches b ON b.id = w.branch_id
-        LEFT JOIN products p ON p.id = sb.product_id
+        INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
         WHERE sb.qty <= :lowThreshold
           ${whereWhBranch}
         ORDER BY sb.qty ASC
@@ -760,6 +761,7 @@ async function overview(req, res, next) {
         FROM stock_balances sb
         INNER JOIN warehouses w ON w.id = sb.warehouse_id
         LEFT JOIN branches b ON b.id = w.branch_id
+        INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
         WHERE 1=1
           ${whereWhBranch}
         GROUP BY w.branch_id, b.name
@@ -908,7 +910,7 @@ async function overview(req, res, next) {
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
       LEFT JOIN branches b ON b.id = w.branch_id
-      LEFT JOIN products p ON p.id = sb.product_id
+      INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
       WHERE sb.qty > 0
         ${whereWhBranch}
       GROUP BY w.id, w.name, b.id, b.name
@@ -940,7 +942,7 @@ async function overview(req, res, next) {
         COALESCE(SUM(CASE WHEN sb.qty BETWEEN 1 AND 999999 AND COALESCE(NULLIF(p.price_list,0),p.price,0) BETWEEN 1 AND 99999999 THEN sb.qty * COALESCE(NULLIF(p.price_list,0),p.price,0) ELSE 0 END),0) AS total_value
       FROM stock_balances sb
       INNER JOIN warehouses w ON w.id = sb.warehouse_id
-      LEFT JOIN products p ON p.id = sb.product_id
+      INNER JOIN products p ON p.id = sb.product_id AND p.is_active = 1
       WHERE sb.qty > 0
         ${whereWhBranch}
       GROUP BY p.id, p.name, p.sku
