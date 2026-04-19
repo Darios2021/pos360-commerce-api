@@ -608,29 +608,40 @@ async function overview(req, res, next) {
         ? { ym: String(bestMonthRow.ym || ""), total: Number(bestMonthRow.sum_total || 0), count: Number(bestMonthRow.count_sales || 0) }
         : null;
 
-    // ===== ventas por sucursal (últimos 30 días) (admin-only sin filtro) (lo dejo igual)
+    // ===== ventas por sucursal según período seleccionado
     let salesByBranch = [];
-    if (scope.admin && !scope.branchId) {
-      const d30 = new Date(todayFrom);
-      d30.setDate(d30.getDate() - 30);
+    let salesByBranchPeriod = [];
+    if (!scope.branchId) {
+      const branchRows = await sequelize
+        .query(
+          `
+          SELECT
+            s.branch_id,
+            b.name AS branch_name,
+            COALESCE(SUM(s.total), 0) AS sum_total,
+            COUNT(*) AS count_sales
+          FROM sales s
+          LEFT JOIN branches b ON b.id = s.branch_id
+          WHERE s.status = 'PAID'
+            ${whereBetweenRange}
+          GROUP BY s.branch_id, b.name
+          ORDER BY sum_total DESC
+          `,
+          {
+            type: QueryTypes.SELECT,
+            replacements: { from: range.from, to: range.to },
+          }
+        )
+        .catch(() => []);
 
-      const rows = await Sale.findAll({
-        attributes: ["branch_id", [fn("SUM", col("total")), "sum_total"], [fn("COUNT", col("id")), "count_sales"]],
-        where: { status: "PAID", sold_at: { [Op.gte]: d30 } },
-        group: ["branch_id"],
-        order: [[fn("SUM", col("total")), "DESC"]],
-        raw: true,
-      });
-
-      const brs = await Branch.findAll({ attributes: ["id", "name"], raw: true }).catch(() => []);
-      const m = new Map(brs.map((b) => [toInt(b.id, 0), b.name]));
-
-      salesByBranch = rows.map((r) => ({
-        branch_id: toInt(r.branch_id, 0),
-        branch_name: m.get(toInt(r.branch_id, 0)) || `Sucursal #${r.branch_id}`,
-        total: Number(r.sum_total || 0),
-        count: Number(r.count_sales || 0),
+      salesByBranchPeriod = branchRows.map((r) => ({
+        branch_id:   r.branch_id ? Number(r.branch_id) : null,
+        branch_name: r.branch_name || (r.branch_id ? `Sucursal #${r.branch_id}` : "Sin sucursal"),
+        total:       Number(r.sum_total || 0),
+        count:       Number(r.count_sales || 0),
       }));
+
+      salesByBranch = salesByBranchPeriod; // backward compat
     }
 
     // ===== inventory KPIs + lastProducts (igual)
@@ -946,6 +957,7 @@ async function overview(req, res, next) {
           paymentsToday,
           salesByDay,
           salesByBranch,
+          salesByBranchPeriod,
           lastSales,
 
           period: range.period,
