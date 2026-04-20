@@ -50,7 +50,7 @@ function allowAdminOrPermission(permissionCode) {
     if (a.is_super_admin) return next();
     if (a.is_admin) return next();
 
-    // ✅ roles “admin-like” (tu RBAC a veces no usa literalmente "admin")
+    // ✅ roles "admin-like" (tu RBAC a veces no usa literalmente "admin")
     const ADMIN_ROLES = [
       "admin",
       "super_admin",
@@ -96,8 +96,8 @@ function allowAdminOrPermission(permissionCode) {
     // ✅ permiso explícito pedido
     if (permissionCode && perms.map(normLower).includes(normLower(permissionCode))) return next();
 
-    // ✅ fallback de “solo vista POS” para permitir leer catálogo + imágenes en POS
-    const POS_VIEW_PERMS = [“pos.read”, “pos.view”, “pos.products.read”, “pos.catalog.read”];
+    // ✅ fallback de "solo vista POS" para permitir leer catálogo + imágenes en POS
+    const POS_VIEW_PERMS = ["pos.read", "pos.view", "pos.products.read", "pos.catalog.read"];
     if (hasAny(perms, POS_VIEW_PERMS)) return next();
 
     // ✅ Usuarios con sucursal asignada pueden VER productos de su sucursal
