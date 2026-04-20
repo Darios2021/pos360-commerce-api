@@ -4,6 +4,7 @@
 const { sequelize, StockTransfer, StockTransferItem, StockBalance, StockMovement, StockMovementItem,
         Warehouse, Branch, Product, ProductImage, User } = require("../models");
 const { Op } = require("sequelize");
+const socketService = require("./socket.service");
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 function toInt(v, d = 0) {
@@ -167,6 +168,19 @@ async function dispatchTransfer(transfer_id, { dispatched_by }) {
 
     return getTransferById(transfer_id, t);
   });
+
+  // Notificar a la sucursal DESTINO que hay un nuevo paquete en camino
+  try {
+    socketService.emitToBranch(result.to_branch_id, "transfer:dispatched", {
+      id:             result.id,
+      number:         result.number,
+      from_branch:    result.fromWarehouse?.branch?.name || "—",
+      item_count:     result.items?.length || 0,
+      dispatched_at:  result.dispatched_at,
+    });
+  } catch {}
+
+  return result;
 }
 
 // ─── RECEIVE ─────────────────────────────────────────────────────────────────
@@ -246,6 +260,28 @@ async function receiveTransfer(transfer_id, { receptions = [], received_by }) {
 
     return getTransferById(transfer_id, t);
   });
+
+  // Notificar a la sucursal ORIGEN que su envío fue recepcionado
+  try {
+    const fromBranchId = result.fromWarehouse?.branch_id;
+    if (fromBranchId) {
+      socketService.emitToBranch(fromBranchId, "transfer:received", {
+        id:          result.id,
+        number:      result.number,
+        status:      result.status,
+        to_branch:   result.toBranch?.name || result.toWarehouse?.branch?.name || "—",
+        received_at: result.received_at,
+      });
+    }
+    // También notificar al destino para que actualice su lista
+    socketService.emitToBranch(result.to_branch_id, "transfer:received", {
+      id:     result.id,
+      number: result.number,
+      status: result.status,
+    });
+  } catch {}
+
+  return result;
 }
 
 // ─── CANCEL ──────────────────────────────────────────────────────────────────
@@ -256,7 +292,17 @@ async function cancelTransfer(transfer_id, { cancelled_by }) {
     throw Object.assign(new Error("Solo se puede cancelar una derivación en borrador"), { status: 422 });
 
   await transfer.update({ status: "cancelled" });
-  return getTransferById(transfer_id);
+  const result = await getTransferById(transfer_id);
+
+  // Notificar a ambas sucursales que se canceló
+  try {
+    const fromBranchId = result.fromWarehouse?.branch_id;
+    const payload = { id: result.id, number: result.number, status: "cancelled" };
+    if (fromBranchId)        socketService.emitToBranch(fromBranchId,       "transfer:cancelled", payload);
+    if (result.to_branch_id) socketService.emitToBranch(result.to_branch_id, "transfer:cancelled", payload);
+  } catch {}
+
+  return result;
 }
 
 // ─── LIST ─────────────────────────────────────────────────────────────────────
