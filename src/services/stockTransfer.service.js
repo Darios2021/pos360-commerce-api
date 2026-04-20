@@ -164,7 +164,8 @@ async function receiveTransfer(transfer_id, { receptions = [], received_by }) {
   if (!transfer) throw Object.assign(new Error("Derivación no encontrada"), { status: 404 });
   if (transfer.status !== "dispatched")
     throw Object.assign(new Error("Solo se puede recepcionar una derivación despachada"), { status: 422 });
-  if (!receptions.length)
+  // Si la derivación no tiene items, permitir recepción vacía (confirma entrega sin productos)
+  if (!receptions.length && (transfer.items?.length ?? 0) > 0)
     throw Object.assign(new Error("Debe enviar las cantidades recibidas"), { status: 400 });
 
   return sequelize.transaction(async (t) => {
