@@ -93,8 +93,9 @@ async function receive(req, res) {
     const { receptions } = req.body;
     const received_by = toInt(req.user?.id || req.user?.sub, 0);
 
-    if (!Array.isArray(receptions) || !receptions.length)
+    if (!Array.isArray(receptions))
       return res.status(400).json({ ok: false, message: "Recepciones requeridas" });
+    // Array vacío es válido para transferencias sin productos (el servicio valida internamente)
 
     const transfer = await svc.receiveTransfer(toInt(req.params.id), { receptions, received_by });
     return res.json({ ok: true, transfer });
