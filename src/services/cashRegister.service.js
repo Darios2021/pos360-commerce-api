@@ -364,7 +364,7 @@ async function buildCashRegisterSummary({
     throw err;
   }
 
-  // Solo ventas activas (PAID / REFUNDED) — CANCELLED queda excluido del arqueo
+  // Solo ventas activas (PAID / REFUNDED) — CANCELLED queda excluido de los montos
   const sales = await Sale.findAll({
     where: {
       cash_register_id: id,
@@ -374,11 +374,15 @@ async function buildCashRegisterSummary({
     transaction,
   });
 
-  // Contar anuladas (para mostrar al cajero en el arqueo)
+  // Contar anuladas para auditoría (soft-cancelled, sólo disponibles con nuevo sistema)
   const cancelledCount = await Sale.count({
     where: { cash_register_id: id, status: "CANCELLED" },
     transaction,
   });
+
+  // Total de ventas registradas en la sesión (activas + anuladas)
+  // Nota: ventas hard-deleted anteriores al fix 2025-04 NO aparecen aquí
+  const totalCreated = sales.length + cancelledCount;
 
   const saleIds = sales.map((s) => toInt(s.id, 0)).filter(Boolean);
 
@@ -430,8 +434,9 @@ async function buildCashRegisterSummary({
     cash_register: toPlain(cashRegister),
     totals: {
       opening_cash: openingCash,
-      sales_count: sales.length,
-      sales_cancelled_count: cancelledCount,   // ← ventas anuladas en esta sesión
+      sales_count: sales.length,                    // ventas efectivas (PAID + REFUNDED)
+      sales_cancelled_count: cancelledCount,         // ventas anuladas (soft-cancel)
+      sales_total_created: totalCreated,             // total creadas en sesión (efectivas + anuladas)
       sales_total: Number(
         sales.reduce((a, s) => a + Number(s.total || 0), 0).toFixed(2)
       ),
