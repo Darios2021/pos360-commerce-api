@@ -452,8 +452,8 @@ async function buildCashRegisterSummary({
       cash: Number(paymentsByMethod.CASH || 0),
       transfer: Number(paymentsByMethod.TRANSFER || 0),
       card: Number(paymentsByMethod.CARD || 0),
-      qr: Number(paymentsByMethod.QR || 0),
-      mercadopago: Number(paymentsByMethod.MERCADOPAGO || 0),
+      // QR y MERCADOPAGO unificados — pagos viejos guardados como QR se suman acá
+      mercadopago: Number((paymentsByMethod.MERCADOPAGO || 0) + (paymentsByMethod.QR || 0)),
       credit_sjt: Number(paymentsByMethod.CREDIT_SJT || 0),
       other: Number(paymentsByMethod.OTHER || 0),
       raw_by_method: paymentsByMethod,
