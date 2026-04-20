@@ -109,6 +109,24 @@ async function dispatchTransfer(transfer_id, { dispatched_by }) {
     throw Object.assign(new Error("Solo se puede despachar una derivación en borrador"), { status: 422 });
 
   return sequelize.transaction(async (t) => {
+    // ── Validar stock disponible ANTES de descontar ──────────────────────────
+    for (const item of transfer.items) {
+      const qty = toDecimal(item.qty_sent);
+      const [[balance]] = await sequelize.query(
+        `SELECT COALESCE(qty, 0) AS qty FROM stock_balances
+         WHERE warehouse_id = :wh AND product_id = :prod`,
+        { replacements: { wh: transfer.from_warehouse_id, prod: item.product_id }, transaction: t }
+      );
+      const available = toDecimal(balance?.qty);
+      if (available < qty) {
+        const name = item.product?.name || `Producto #${item.product_id}`;
+        throw Object.assign(
+          new Error(`Stock insuficiente para "${name}": disponible ${available}, requerido ${qty}`),
+          { status: 422 }
+        );
+      }
+    }
+
     // Crear stock_movement OUT desde origen
     const movement = await StockMovement.create({
       type: "out",
