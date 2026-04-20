@@ -1,6 +1,6 @@
 {
   "name": "core-suite-api",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Core Suite API (Node/Express/Sequelize/MySQL) - modular structure",
   "main": "src/server.js",
   "type": "commonjs",
