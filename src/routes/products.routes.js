@@ -97,9 +97,14 @@ function allowAdminOrPermission(permissionCode) {
     if (permissionCode && perms.map(normLower).includes(normLower(permissionCode))) return next();
 
     // ✅ fallback de “solo vista POS” para permitir leer catálogo + imágenes en POS
-    // Ajustá estos códigos a tu naming real si difiere
-    const POS_VIEW_PERMS = ["pos.read", "pos.view", "pos.products.read", "pos.catalog.read"];
+    const POS_VIEW_PERMS = [“pos.read”, “pos.view”, “pos.products.read”, “pos.catalog.read”];
     if (hasAny(perms, POS_VIEW_PERMS)) return next();
+
+    // ✅ Usuarios con sucursal asignada pueden VER productos de su sucursal
+    // (el controller filtra automáticamente por branch_id del usuario)
+    const branchIds = Array.isArray(a.branch_ids) ? a.branch_ids : [];
+    const userBranchId = req.user?.branch_id || req.user?.branchId || 0;
+    if (branchIds.length > 0 || userBranchId > 0) return next();
 
     return res.status(403).json({
       ok: false,

@@ -52,26 +52,18 @@ exports.list = async (req, res) => {
       return res.json({ ok: true, data: items });
     }
 
-    // ✅ No admin: solo sucursales permitidas por user_branches
+    // ✅ No admin: devuelve todas las sucursales activas
+    // Los usuarios con sucursal necesitan ver todos los destinos posibles (para derivaciones, etc.)
     if (!userId) {
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED", message: "No user in token" });
     }
 
-    // Nota: branches en tu DB tiene (id,name,code,is_active) seguro.
-    const [rows] = await sequelize.query(
-      `
-      SELECT b.id, b.code, b.name, b.is_active
-      FROM branches b
-      INNER JOIN user_branches ub
-        ON ub.branch_id = b.id
-      WHERE ub.user_id = :userId
-        AND b.is_active = 1
-      ORDER BY b.id DESC
-      `,
-      { replacements: { userId } }
-    );
-
-    return res.json({ ok: true, data: rows || [] });
+    const items = await Branch.findAll({
+      attributes: ["id", "code", "name", "is_active"],
+      where: { is_active: true },
+      order: [["id", "ASC"]],
+    });
+    return res.json({ ok: true, data: items });
   } catch (e) {
     console.error("❌ branches.list error:", e);
     return res.status(500).json({
