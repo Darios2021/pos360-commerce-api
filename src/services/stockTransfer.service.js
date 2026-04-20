@@ -288,7 +288,7 @@ async function getTransferById(id, transaction) {
           model: Product,
           as: "product",
           attributes: ["id","name","sku","barcode"],
-          include: [{ model: ProductImage, as: "images", attributes: ["url","is_primary"], limit: 1 }],
+          include: [{ model: ProductImage, as: "images", attributes: ["url","sort_order"], order: [["sort_order","ASC"]], limit: 1 }],
         }],
       },
     ],
