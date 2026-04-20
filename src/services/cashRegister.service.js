@@ -364,14 +364,19 @@ async function buildCashRegisterSummary({
     throw err;
   }
 
+  // Solo ventas activas (PAID / REFUNDED) — CANCELLED queda excluido del arqueo
   const sales = await Sale.findAll({
     where: {
       cash_register_id: id,
-      status: {
-        [Op.in]: ["PAID", "REFUNDED"],
-      },
+      status: { [Op.in]: ["PAID", "REFUNDED"] },
     },
     attributes: ["id", "status", "total", "paid_total", "change_total", "sold_at"],
+    transaction,
+  });
+
+  // Contar anuladas (para mostrar al cajero en el arqueo)
+  const cancelledCount = await Sale.count({
+    where: { cash_register_id: id, status: "CANCELLED" },
     transaction,
   });
 
@@ -426,6 +431,7 @@ async function buildCashRegisterSummary({
     totals: {
       opening_cash: openingCash,
       sales_count: sales.length,
+      sales_cancelled_count: cancelledCount,   // ← ventas anuladas en esta sesión
       sales_total: Number(
         sales.reduce((a, s) => a + Number(s.total || 0), 0).toFixed(2)
       ),

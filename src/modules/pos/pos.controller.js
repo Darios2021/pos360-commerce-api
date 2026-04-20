@@ -1,7 +1,64 @@
-// ✅ COPY-PASTE FINAL COMPLETO (AJUSTADO)
 // src/modules/pos/pos.controller.js
 const { Op, QueryTypes } = require("sequelize");
-const { sequelize, Sale, SaleItem, Payment, Product, ProductImage, Category } = require("../../models");
+const { sequelize, Sale, SaleItem, Payment, Product, ProductImage, Category, Warehouse, StockBalance } = require("../../models");
+
+// ── Stock helpers (best-effort, never block a sale) ─────────────────────────
+async function getBranchWarehouseId(branchId, t) {
+  try {
+    const wh = await Warehouse.findOne({
+      where: { branch_id: branchId, is_active: 1 },
+      order: [["id", "ASC"]],
+      transaction: t,
+      attributes: ["id"],
+    });
+    return wh ? wh.id : null;
+  } catch { return null; }
+}
+
+async function adjustStockQty(warehouseId, productId, delta, t) {
+  // delta > 0 adds, delta < 0 removes; allows negative balances (POS never blocks sales)
+  try {
+    const [bal] = await StockBalance.findOrCreate({
+      where: { warehouse_id: warehouseId, product_id: productId },
+      defaults: { qty: 0 },
+      transaction: t,
+    });
+    bal.qty = Number(Number(bal.qty || 0) + delta);
+    await bal.save({ transaction: t });
+  } catch (err) {
+    console.warn("[POS stock] adjustStockQty skipped:", err.message);
+  }
+}
+
+/**
+ * Para cada SaleItem de una venta, aplica un delta de stock en el almacén
+ * de la sucursal. Solo para productos con track_stock = true.
+ * delta = -qty  para decrementar (al crear venta)
+ * delta = +qty  para restaurar  (al cancelar venta)
+ */
+async function applyStockDeltaForSaleItems(items, branchId, delta, t) {
+  if (!items || !items.length) return;
+  const warehouseId = await getBranchWarehouseId(branchId, t);
+  if (!warehouseId) return; // sucursal sin almacén → skip
+
+  const productIds = [...new Set(items.map((i) => toInt(i.product_id, 0)).filter(Boolean))];
+  if (!productIds.length) return;
+
+  const products = await Product.findAll({
+    where: { id: { [Op.in]: productIds }, track_stock: true },
+    attributes: ["id"],
+    transaction: t,
+  });
+  const trackedIds = new Set(products.map((p) => toInt(p.id, 0)));
+
+  for (const item of items) {
+    const pid = toInt(item.product_id, 0);
+    if (!pid || !trackedIds.has(pid)) continue;
+    const qty = Math.abs(toNum(item.quantity ?? item.qty, 0));
+    if (qty <= 0) continue;
+    await adjustStockQty(warehouseId, pid, delta * qty, t);
+  }
+}
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -238,6 +295,9 @@ async function createSale(req, res) {
       );
     }
 
+    // ── Decrementar stock (best-effort) ──────────────────────────────────────
+    await applyStockDeltaForSaleItems(prepared, branchId, -1, t);
+
     await t.commit();
 
     const full = await Sale.findByPk(sale.id, {
@@ -257,6 +317,8 @@ async function createSale(req, res) {
 
 /**
  * DELETE /pos/sales/:id
+ * Soft-cancel: cambia status a CANCELLED (preserva registros para auditoría).
+ * Restaura stock de los productos con track_stock = true.
  */
 async function deleteSale(req, res) {
   let t;
@@ -266,21 +328,48 @@ async function deleteSale(req, res) {
 
     t = await sequelize.transaction();
 
-    const sale = await Sale.findByPk(id, { transaction: t });
+    const sale = await Sale.findByPk(id, {
+      include: [{ model: SaleItem, as: "items", required: false }],
+      transaction: t,
+    });
+
     if (!sale) {
       await t.rollback();
       return res.status(404).json({ ok: false, code: "NOT_FOUND" });
     }
 
-    await Payment.destroy({ where: { sale_id: id }, transaction: t });
-    await SaleItem.destroy({ where: { sale_id: id }, transaction: t });
-    await Sale.destroy({ where: { id }, transaction: t });
+    if (sale.status === "CANCELLED") {
+      await t.rollback();
+      return res.status(409).json({ ok: false, code: "ALREADY_CANCELLED", message: "La venta ya fue anulada." });
+    }
+
+    // Soft-cancel: preservar registros para auditoría y arqueo
+    const cancelledBy = req.user?.id ?? null;
+    await sale.update(
+      {
+        status: "CANCELLED",
+        note: [sale.note, `ANULADA por usuario #${cancelledBy} el ${new Date().toISOString()}`]
+          .filter(Boolean).join(" | "),
+      },
+      { transaction: t }
+    );
+
+    // ── Restaurar stock (best-effort) ─────────────────────────────────────
+    const branchId = toInt(sale.branch_id, 0);
+    if (branchId && sale.items?.length) {
+      await applyStockDeltaForSaleItems(sale.items, branchId, +1, t);
+    }
 
     await t.commit();
-    res.json({ ok: true, message: `Venta #${id} eliminada.` });
+
+    res.json({
+      ok: true,
+      message: `Venta #${id} anulada. El stock fue restaurado.`,
+      cancelled_by: cancelledBy,
+    });
   } catch (e) {
     if (t) await t.rollback();
-    console.error("[POS deleteSale ERROR]", e);
+    console.error("[POS cancelSale ERROR]", e);
     res.status(500).json({ ok: false, message: e.message });
   }
 }
