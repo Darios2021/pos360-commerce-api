@@ -48,6 +48,9 @@ function getOverrideBranchId(req) {
 }
 
 async function branchContext(req, res, next) {
+  // ✅ Idempotencia: si ya corrió en este request, no repetir la query
+  if (req.ctx?.branchId && req.ctx?.warehouseId) return next();
+
   try {
     const userId = toInt(req.user?.id || req.user?.sub, 0);
     if (!userId) {

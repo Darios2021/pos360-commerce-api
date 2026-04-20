@@ -325,12 +325,12 @@ safeUse("/products", requireAuth, attachAccessContext, branchContext, productsRo
 safeUse("/categories", requireAuth, categoriesRoutes);
 safeUse("/subcategories", requireAuth, subcategoriesRoutes);
 safeUse("/branches", requireAuth, branchesRoutes);
-safeUse("/warehouses", requireAuth, warehousesRoutes);
-safeUse("/stock", requireAuth, stockRoutes);
-safeUse("/dashboard", requireAuth, dashboardRoutes);
-if (analyticsRoutes) safeUse("/analytics", requireAuth, analyticsRoutes);
+safeUse("/warehouses", requireAuth, attachAccessContext, branchContext, warehousesRoutes);
+safeUse("/stock",      requireAuth, attachAccessContext, branchContext, stockRoutes);
+safeUse("/dashboard",  requireAuth, attachAccessContext, branchContext, dashboardRoutes);
+if (analyticsRoutes) safeUse("/analytics", requireAuth, attachAccessContext, branchContext, analyticsRoutes);
 
-safeUse("/pos", requireAuth, posRoutes);
+safeUse("/pos", requireAuth, attachAccessContext, branchContext, posRoutes);
 safeUse("/me", requireAuth, meRoutes);
 
 // ✅ payment methods POS
