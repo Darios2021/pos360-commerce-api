@@ -288,8 +288,8 @@ async function receiveTransfer(transfer_id, { receptions = [], received_by }) {
 async function cancelTransfer(transfer_id, { cancelled_by }) {
   const transfer = await StockTransfer.findByPk(transfer_id);
   if (!transfer) throw Object.assign(new Error("Derivación no encontrada"), { status: 404 });
-  if (!["draft"].includes(transfer.status))
-    throw Object.assign(new Error("Solo se puede cancelar una derivación en borrador"), { status: 422 });
+  if (["cancelled", "received"].includes(transfer.status))
+    throw Object.assign(new Error("No se puede cancelar una derivación ya recibida o cancelada"), { status: 422 });
 
   await transfer.update({ status: "cancelled" });
   const result = await getTransferById(transfer_id);
@@ -328,6 +328,7 @@ async function listTransfers({ branchId, warehouseId, status, role, page = 1, li
       { model: User, as: "creator",    attributes: ["id","first_name","last_name"] },
       { model: User, as: "dispatcher", attributes: ["id","first_name","last_name"] },
       { model: User, as: "receiver",   attributes: ["id","first_name","last_name"] },
+      { model: StockTransferItem, as: "items", attributes: ["id"] },
     ],
     order: [["created_at", "DESC"]],
     limit: toInt(limit, 20),
