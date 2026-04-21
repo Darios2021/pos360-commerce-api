@@ -209,6 +209,7 @@ async function cashAnalytics(req, res, next) {
         ROUND(AVG(HOUR(cr.opened_at)*60 + MINUTE(cr.opened_at)),1) AS avg_open_min,
         ROUND(AVG(CASE WHEN cr.closed_at IS NOT NULL THEN HOUR(cr.closed_at)*60 + MINUTE(cr.closed_at) END),1) AS avg_close_min,
         ROUND(AVG(CASE WHEN cr.status='CLOSED' THEN TIMESTAMPDIFF(MINUTE, cr.opened_at, cr.closed_at) END),0) AS avg_duration_min,
+        COALESCE(SUM(CASE WHEN cr.status='CLOSED' THEN TIMESTAMPDIFF(MINUTE, cr.opened_at, cr.closed_at) END),0) AS total_duration_min,
         SUM(CASE WHEN cr.status='CLOSED' THEN 1 ELSE 0 END) AS closed_sessions,
         ROUND(STDDEV(HOUR(cr.opened_at)*60 + MINUTE(cr.opened_at)),1) AS stddev_open_min
       FROM cash_registers cr
@@ -298,8 +299,9 @@ async function cashAnalytics(req, res, next) {
           closed_sessions:  num(r.closed_sessions),
           avg_open_min:     r.avg_open_min  != null ? num(r.avg_open_min)  : null,
           avg_close_min:    r.avg_close_min != null ? num(r.avg_close_min) : null,
-          avg_duration_min: num(r.avg_duration_min),
-          stddev_open_min:  num(r.stddev_open_min),
+          avg_duration_min:   num(r.avg_duration_min),
+          total_duration_min: num(r.total_duration_min),
+          stddev_open_min:    num(r.stddev_open_min),
         })),
         horasCajaAbierta: (horasCajaAbierta || []).map(r => ({
           day:            r.day,
