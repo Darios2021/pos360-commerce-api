@@ -200,6 +200,41 @@ async function cashAnalytics(req, res, next) {
       replacements
     );
 
+    // Comportamiento por cajero (horario típico + consistencia)
+    const cajeroStats = await q(
+      `SELECT
+        cr.opened_by,
+        TRIM(CONCAT(COALESCE(u.first_name,''), ' ', COALESCE(u.last_name,''))) AS cajero_name,
+        COUNT(*) AS sessions,
+        ROUND(AVG(HOUR(cr.opened_at)*60 + MINUTE(cr.opened_at)),1) AS avg_open_min,
+        ROUND(AVG(CASE WHEN cr.closed_at IS NOT NULL THEN HOUR(cr.closed_at)*60 + MINUTE(cr.closed_at) END),1) AS avg_close_min,
+        ROUND(AVG(CASE WHEN cr.status='CLOSED' THEN TIMESTAMPDIFF(MINUTE, cr.opened_at, cr.closed_at) END),0) AS avg_duration_min,
+        SUM(CASE WHEN cr.status='CLOSED' THEN 1 ELSE 0 END) AS closed_sessions,
+        ROUND(STDDEV(HOUR(cr.opened_at)*60 + MINUTE(cr.opened_at)),1) AS stddev_open_min
+      FROM cash_registers cr
+      LEFT JOIN users u ON u.id = cr.opened_by
+      WHERE 1=1 ${branchCond} ${dateCondRegister}
+      GROUP BY cr.opened_by, cajero_name
+      ORDER BY sessions DESC
+      LIMIT 15`,
+      replacements
+    );
+
+    // Regularidad: horas de caja abierta por día
+    const horasCajaAbierta = await q(
+      `SELECT
+        DATE_FORMAT(cr.opened_at,'%Y-%m-%d') AS day,
+        ROUND(SUM(TIMESTAMPDIFF(MINUTE, cr.opened_at, IFNULL(cr.closed_at, NOW()))) / 60.0, 1) AS hours_open,
+        COUNT(*) AS sessions,
+        MIN(HOUR(cr.opened_at)*60 + MINUTE(cr.opened_at)) AS first_open_min,
+        MAX(CASE WHEN cr.closed_at IS NOT NULL THEN HOUR(cr.closed_at)*60 + MINUTE(cr.closed_at) ELSE NULL END) AS last_close_min
+      FROM cash_registers cr
+      WHERE 1=1 ${branchCond} ${dateCondRegister}
+      GROUP BY DATE_FORMAT(cr.opened_at,'%Y-%m-%d')
+      ORDER BY day ASC`,
+      replacements
+    );
+
     // Últimas 20 sesiones con todos los datos de auditoría
     const lastSessions = await q(
       `SELECT
@@ -256,6 +291,22 @@ async function cashAnalytics(req, res, next) {
           branch_id: num(r.branch_id), branch_name: r.branch_name || `Sucursal #${r.branch_id}`,
           sessions: num(r.sessions), avgDiff: num(r.avg_diff),
           deficitCount: num(r.deficit_count), surplusCount: num(r.surplus_count), exactCount: num(r.exact_count),
+        })),
+        cajeroStats: (cajeroStats || []).map(r => ({
+          cajero_name:      (r.cajero_name || "").trim() || `Usuario #${r.opened_by}`,
+          sessions:         num(r.sessions),
+          closed_sessions:  num(r.closed_sessions),
+          avg_open_min:     r.avg_open_min  != null ? num(r.avg_open_min)  : null,
+          avg_close_min:    r.avg_close_min != null ? num(r.avg_close_min) : null,
+          avg_duration_min: num(r.avg_duration_min),
+          stddev_open_min:  num(r.stddev_open_min),
+        })),
+        horasCajaAbierta: (horasCajaAbierta || []).map(r => ({
+          day:            r.day,
+          hours_open:     num(r.hours_open),
+          sessions:       num(r.sessions),
+          first_open_min: r.first_open_min != null ? num(r.first_open_min) : null,
+          last_close_min: r.last_close_min != null ? num(r.last_close_min) : null,
         })),
         lastSessions: (lastSessions || []).map(r => ({
           id:             num(r.id),
