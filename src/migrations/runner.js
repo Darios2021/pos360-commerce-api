@@ -14,6 +14,12 @@ const columnSteps = [
     column: "closing_declared",
     def:    "TEXT NULL COMMENT 'JSON montos declarados por medio de pago al cierre'",
   },
+  {
+    id:     "cash_registers__opening_ip",
+    table:  "cash_registers",
+    column: "opening_ip",
+    def:    "VARCHAR(45) NULL COMMENT 'IP del cliente al abrir la caja'",
+  },
 ];
 
 async function columnExists(sequelize, table, column) {

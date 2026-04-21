@@ -72,6 +72,11 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
 
+      opening_ip: {
+        type: DataTypes.STRING(45),
+        allowNull: true,
+      },
+
       // JSON con montos declarados por medio de pago al hacer el arqueo
       closing_declared: {
         type: DataTypes.TEXT,

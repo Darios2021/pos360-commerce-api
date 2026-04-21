@@ -45,15 +45,22 @@ async function open(req, res) {
       body: req.body,
     });
 
+    const opening_ip =
+      (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+      req.ip ||
+      req.socket?.remoteAddress ||
+      null;
+
     const cashRegister = await openCashRegister({
       branch_id,
       opened_by,
       opening_cash: req.body?.opening_cash,
       opening_note: req.body?.opening_note,
-      caja_type: req.body?.caja_type,
+      opening_ip,
+      caja_type:    req.body?.caja_type,
       invoice_mode: req.body?.invoice_mode,
       invoice_type: req.body?.invoice_type,
-      transaction: t,
+      transaction:  t,
     });
 
     await t.commit();

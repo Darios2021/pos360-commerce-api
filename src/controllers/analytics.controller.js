@@ -200,22 +200,24 @@ async function cashAnalytics(req, res, next) {
       replacements
     );
 
-    // Últimas 15 sesiones
+    // Últimas 20 sesiones con todos los datos de auditoría
     const lastSessions = await q(
       `SELECT
         cr.id, cr.branch_id, b.name AS branch_name,
-        cr.status, cr.opening_cash, cr.closing_cash, cr.expected_cash, cr.difference_cash,
+        cr.status, cr.caja_type, cr.invoice_mode,
+        cr.opening_cash, cr.closing_cash, cr.expected_cash, cr.difference_cash,
+        cr.opening_ip, cr.opening_note, cr.closing_note,
         cr.opened_at, cr.closed_at,
-        TIMESTAMPDIFF(MINUTE, cr.opened_at, cr.closed_at) AS duration_min,
-        u1.first_name AS opened_by_name,
-        u2.first_name AS closed_by_name
+        TIMESTAMPDIFF(MINUTE, cr.opened_at, IFNULL(cr.closed_at, NOW())) AS duration_min,
+        CONCAT(COALESCE(u1.first_name,''), ' ', COALESCE(u1.last_name,''   )) AS opened_by_name,
+        CONCAT(COALESCE(u2.first_name,''), ' ', COALESCE(u2.last_name,''   )) AS closed_by_name
       FROM cash_registers cr
-      LEFT JOIN branches b ON b.id = cr.branch_id
-      LEFT JOIN users u1 ON u1.id = cr.opened_by
-      LEFT JOIN users u2 ON u2.id = cr.closed_by
+      LEFT JOIN branches b  ON b.id  = cr.branch_id
+      LEFT JOIN users    u1 ON u1.id = cr.opened_by
+      LEFT JOIN users    u2 ON u2.id = cr.closed_by
       WHERE 1=1 ${branchCond}
       ORDER BY cr.id DESC
-      LIMIT 15`,
+      LIMIT 20`,
       { branchId: scope.branchId || null }
     );
 
@@ -256,11 +258,24 @@ async function cashAnalytics(req, res, next) {
           deficitCount: num(r.deficit_count), surplusCount: num(r.surplus_count), exactCount: num(r.exact_count),
         })),
         lastSessions: (lastSessions || []).map(r => ({
-          id: num(r.id), branch_id: num(r.branch_id), branch_name: r.branch_name,
-          status: r.status, opening_cash: num(r.opening_cash), closing_cash: num(r.closing_cash),
-          expected_cash: num(r.expected_cash), difference_cash: num(r.difference_cash),
-          opened_at: r.opened_at, closed_at: r.closed_at, duration_min: num(r.duration_min),
-          opened_by: r.opened_by_name, closed_by: r.closed_by_name,
+          id:             num(r.id),
+          branch_id:      num(r.branch_id),
+          branch_name:    r.branch_name || `Sucursal #${r.branch_id}`,
+          status:         r.status,
+          caja_type:      r.caja_type   || "GENERAL",
+          invoice_mode:   r.invoice_mode || "NO_FISCAL",
+          opening_cash:   num(r.opening_cash),
+          closing_cash:   num(r.closing_cash),
+          expected_cash:  num(r.expected_cash),
+          difference_cash:num(r.difference_cash),
+          opening_ip:     r.opening_ip  || null,
+          opening_note:   r.opening_note|| null,
+          closing_note:   r.closing_note|| null,
+          opened_at:      r.opened_at,
+          closed_at:      r.closed_at,
+          duration_min:   num(r.duration_min),
+          opened_by:      (r.opened_by_name || "").trim() || "—",
+          closed_by:      (r.closed_by_name || "").trim() || null,
         })),
       },
     });
