@@ -187,8 +187,9 @@ async function close(req, res) {
     const out = await closeCashRegister({
       cash_register_id,
       closed_by,
-      closing_cash: req.body?.closing_cash,
-      closing_note: req.body?.closing_note,
+      closing_cash:     req.body?.closing_cash,
+      closing_note:     req.body?.closing_note,
+      closing_declared: req.body?.closing_declared ?? null,
       transaction: t,
     });
 

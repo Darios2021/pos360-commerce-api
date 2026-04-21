@@ -72,6 +72,23 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
 
+      // JSON con montos declarados por medio de pago al hacer el arqueo
+      closing_declared: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        get() {
+          const raw = this.getDataValue("closing_declared");
+          if (!raw) return null;
+          try { return JSON.parse(raw); } catch { return null; }
+        },
+        set(val) {
+          this.setDataValue(
+            "closing_declared",
+            val == null ? null : JSON.stringify(val)
+          );
+        },
+      },
+
       // ✅ columnas nuevas que agregaste por ALTER TABLE
       caja_type: {
         type: DataTypes.ENUM("GENERAL", "SHIFT", "BRANCH", "MOBILE"),

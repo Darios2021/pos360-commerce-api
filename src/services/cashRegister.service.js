@@ -468,6 +468,7 @@ async function closeCashRegister({
   closed_by,
   closing_cash,
   closing_note,
+  closing_declared = null,   // { cash, card, transfer, mercadopago, credit_sjt, other }
   transaction = null,
 }) {
   const id = toInt(cash_register_id, 0);
@@ -513,11 +514,22 @@ async function closeCashRegister({
     const expectedCash = Number(summary?.totals?.expected_cash || 0);
     const differenceCash = Number((closingCash - expectedCash).toFixed(2));
 
+    // Normalizar closing_declared: sanitizar montos y descartar keys no válidas
+    let declaredJson = null;
+    if (closing_declared && typeof closing_declared === "object") {
+      const allowed = ["cash", "card", "transfer", "mercadopago", "credit_sjt", "other"];
+      declaredJson = {};
+      for (const k of allowed) {
+        declaredJson[k] = Number(toFloat(closing_declared[k], 0).toFixed(2));
+      }
+    }
+
     cashRegister.set({
       status: "CLOSED",
       closed_by: userId,
       closing_cash: closingCash,
       closing_note: closing_note || null,
+      closing_declared: declaredJson,
       closed_at: new Date(),
       expected_cash: expectedCash,
       difference_cash: differenceCash,
@@ -530,6 +542,7 @@ async function closeCashRegister({
         "closed_by",
         "closing_cash",
         "closing_note",
+        "closing_declared",
         "closed_at",
         "expected_cash",
         "difference_cash",
