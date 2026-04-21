@@ -1,29 +1,56 @@
 // src/migrations/runner.js
-// Corre migraciones SQL seguras (IF NOT EXISTS) al arrancar el servidor.
-// Agregar nuevas migraciones al array `steps` en orden.
+// Corre migraciones SQL al arrancar el servidor.
+// Compatible con MySQL 5.7+ (sin IF NOT EXISTS en ADD COLUMN).
+// Cada step define tabla, columna y definición por separado para
+// poder verificar existencia vía INFORMATION_SCHEMA antes de alterar.
 
 const { QueryTypes } = require("sequelize");
 
-const steps = [
+// Columnas a agregar si no existen
+const columnSteps = [
   {
-    id: "cash_registers__closing_declared",
-    sql: `ALTER TABLE cash_registers
-          ADD COLUMN IF NOT EXISTS closing_declared TEXT NULL
-          COMMENT 'JSON con montos declarados por medio de pago al cierre'`,
+    id:     "cash_registers__closing_declared",
+    table:  "cash_registers",
+    column: "closing_declared",
+    def:    "TEXT NULL COMMENT 'JSON montos declarados por medio de pago al cierre'",
   },
 ];
 
+async function columnExists(sequelize, table, column) {
+  try {
+    const rows = await sequelize.query(
+      `SELECT COUNT(*) AS cnt
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME   = :table
+         AND COLUMN_NAME  = :column`,
+      { type: QueryTypes.SELECT, replacements: { table, column } }
+    );
+    return Number(rows?.[0]?.cnt ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function runStartupMigrations(sequelize) {
-  for (const step of steps) {
+  for (const step of columnSteps) {
     try {
-      await sequelize.query(step.sql, { type: QueryTypes.RAW });
-      console.log(`✅ [migration] ${step.id}`);
+      const exists = await columnExists(sequelize, step.table, step.column);
+      if (exists) {
+        console.log(`ℹ️  [migration] ${step.id} — ya existe, skip`);
+        continue;
+      }
+      await sequelize.query(
+        `ALTER TABLE \`${step.table}\` ADD COLUMN \`${step.column}\` ${step.def}`,
+        { type: QueryTypes.RAW }
+      );
+      console.log(`✅ [migration] ${step.id} — columna creada`);
     } catch (e) {
-      // Si la columna ya existe con motores que no soportan IF NOT EXISTS, ignorar
-      if (e.message?.includes("Duplicate column")) {
-        console.log(`ℹ️ [migration] ${step.id} — columna ya existe, skip`);
+      // errno 1060 = Duplicate column name (race condition entre instancias)
+      if (e?.original?.errno === 1060 || e?.message?.includes("Duplicate column")) {
+        console.log(`ℹ️  [migration] ${step.id} — columna ya existe (race), skip`);
       } else {
-        console.warn(`⚠️ [migration] ${step.id} falló:`, e.message);
+        console.warn(`⚠️  [migration] ${step.id} falló:`, e.message);
       }
     }
   }
