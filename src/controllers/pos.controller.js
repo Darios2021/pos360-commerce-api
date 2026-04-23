@@ -1696,8 +1696,24 @@ async function createSale(req, res) {
 
     currentCashRegister = await getCurrentOpenCashRegister({
       branch_id: resolvedBranchId,
+      user_id: userId,
       transaction: t,
     });
+
+    if (!currentCashRegister) {
+      logPos(req, "warn", "createSale sin caja abierta asociada", {
+        resolvedBranchId,
+        userId,
+      });
+    } else if (
+      toInt(currentCashRegister.branch_id, 0) !== toInt(resolvedBranchId, 0)
+    ) {
+      logPos(req, "warn", "createSale: caja del user en branch distinta", {
+        saleBranch: resolvedBranchId,
+        cashRegisterBranch: currentCashRegister.branch_id,
+        cashRegisterId: currentCashRegister.id,
+      });
+    }
 
     console.log("[POS][createSale][cashRegister]", currentCashRegister);
 
@@ -2592,6 +2608,7 @@ async function createSaleExchange(req, res) {
 
     const currentCashRegister2 = await getCurrentOpenCashRegister({
       branch_id: userBranchId,
+      user_id: req?.user?.id,
       transaction: t,
     });
 

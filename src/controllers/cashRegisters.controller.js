@@ -21,7 +21,11 @@ async function getCurrent(req, res, next) {
       });
     }
 
-    const cashRegister = await getCurrentOpenCashRegister({ branch_id });
+    const user_id = getAuthUserId(req);
+    const cashRegister = await getCurrentOpenCashRegister({
+      branch_id,
+      user_id,
+    });
 
     return res.json({
       ok: true,

@@ -131,17 +131,37 @@ function normalizeMovementType(v) {
   return "IN";
 }
 
-async function getCurrentOpenCashRegister({ branch_id, transaction = null }) {
-  const where = {
-    branch_id: toInt(branch_id, 0),
-    status: "OPEN",
-  };
+async function getCurrentOpenCashRegister({
+  branch_id,
+  user_id = null,
+  transaction = null,
+}) {
+  const bid = toInt(branch_id, 0);
+  const uid = toInt(user_id, 0);
 
-  return CashRegister.findOne({
-    where,
-    order: [["opened_at", "DESC"], ["id", "DESC"]],
-    transaction,
-  });
+  // 1) Prioridad: caja abierta de la branch exacta (comportamiento original).
+  if (bid) {
+    const byBranch = await CashRegister.findOne({
+      where: { branch_id: bid, status: "OPEN" },
+      order: [["opened_at", "DESC"], ["id", "DESC"]],
+      transaction,
+    });
+    if (byBranch) return byBranch;
+  }
+
+  // 2) Fallback: caja abierta del mismo usuario, sin importar la branch.
+  //    Cubre casos donde el branch_id resolvido de la venta no coincide
+  //    exactamente con el branch_id de la caja que el cajero abrió.
+  if (uid) {
+    const byUser = await CashRegister.findOne({
+      where: { opened_by: uid, status: "OPEN" },
+      order: [["opened_at", "DESC"], ["id", "DESC"]],
+      transaction,
+    });
+    if (byUser) return byUser;
+  }
+
+  return null;
 }
 
 async function getOpenCashRegisterOrThrow({ branch_id, transaction = null }) {
@@ -367,9 +387,34 @@ async function buildCashRegisterSummary({
   }
 
   // Solo ventas activas (PAID / REFUNDED) — CANCELLED queda excluido de los montos
+  // Incluye ventas huérfanas (cash_register_id NULL) del mismo branch hechas durante
+  // la ventana de apertura de esta caja. Resuelve casos donde la venta se creó sin
+  // asociarse a la caja por desfasaje de branch_id en createSale.
+  const branchId = toInt(cashRegister.branch_id, 0);
+  const openedAt = cashRegister.opened_at;
+  const closedAt = cashRegister.closed_at;
+
+  const orphanTimeClauses = [{ sold_at: { [Op.gte]: openedAt } }];
+  if (closedAt) {
+    orphanTimeClauses.push({ sold_at: { [Op.lte]: closedAt } });
+  }
+
+  const saleScopeClause = branchId && openedAt
+    ? {
+        [Op.or]: [
+          { cash_register_id: id },
+          {
+            cash_register_id: null,
+            branch_id: branchId,
+            [Op.and]: orphanTimeClauses,
+          },
+        ],
+      }
+    : { cash_register_id: id };
+
   const sales = await Sale.findAll({
     where: {
-      cash_register_id: id,
+      ...saleScopeClause,
       status: { [Op.in]: ["PAID", "REFUNDED"] },
     },
     attributes: ["id", "status", "total", "paid_total", "change_total", "sold_at"],
@@ -378,7 +423,10 @@ async function buildCashRegisterSummary({
 
   // Contar anuladas para auditoría (soft-cancelled, sólo disponibles con nuevo sistema)
   const cancelledCount = await Sale.count({
-    where: { cash_register_id: id, status: "CANCELLED" },
+    where: {
+      ...saleScopeClause,
+      status: "CANCELLED",
+    },
     transaction,
   });
 
