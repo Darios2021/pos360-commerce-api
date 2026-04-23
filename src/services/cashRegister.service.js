@@ -9,6 +9,7 @@ const {
   Payment,
   Branch,
   User,
+  SaleItem,
 } = require("../models");
 
 function toInt(v, d = 0) {
@@ -433,6 +434,37 @@ async function buildCashRegisterSummary({
     throw err;
   }
 
+  // Resolver nombres de cajero y sucursal para el arqueo / PDF
+  let cashierName = "";
+  let cashierEmail = "";
+  let branchName = "";
+  try {
+    if (User && cashRegister.opened_by) {
+      const u = await User.findByPk(cashRegister.opened_by, {
+        attributes: ["id", "name", "email", "username"],
+        transaction,
+      });
+      if (u) {
+        cashierName = String(u.name || u.username || "").trim();
+        cashierEmail = String(u.email || "").trim();
+      }
+    }
+  } catch (e) {
+    console.warn("[CASH_REGISTER_SUMMARY] User load failed", e?.message);
+  }
+
+  try {
+    if (Branch && cashRegister.branch_id) {
+      const b = await Branch.findByPk(cashRegister.branch_id, {
+        attributes: ["id", "name"],
+        transaction,
+      });
+      if (b) branchName = String(b.name || "").trim();
+    }
+  } catch (e) {
+    console.warn("[CASH_REGISTER_SUMMARY] Branch load failed", e?.message);
+  }
+
   // Solo ventas activas (PAID / REFUNDED) — CANCELLED queda excluido de los montos
   // Incluye ventas huérfanas (cash_register_id NULL) del mismo branch hechas durante
   // la ventana de apertura de esta caja.
@@ -547,7 +579,41 @@ async function buildCashRegisterSummary({
     }
   }
 
-  // Detalle por venta con sus pagos (para el arqueo detallado + PDF)
+  // Items (productos) de cada venta — opcional, si SaleItem está disponible
+  const itemsBySale = {};
+  console.log("[CASH_REGISTER_SUMMARY] SaleItem available?", !!SaleItem, "saleIds:", saleIds);
+  if (SaleItem && saleIds.length) {
+    try {
+      const items = await SaleItem.findAll({
+        where: { sale_id: { [Op.in]: saleIds } },
+        attributes: [
+          "id",
+          "sale_id",
+          "product_id",
+          "product_name_snapshot",
+          "quantity",
+          "unit_price",
+        ],
+        transaction,
+      });
+      console.log("[CASH_REGISTER_SUMMARY] SaleItems loaded:", items.length);
+      for (const it of items) {
+        const sid = toInt(it.sale_id, 0);
+        if (!sid) continue;
+        if (!itemsBySale[sid]) itemsBySale[sid] = [];
+        itemsBySale[sid].push({
+          product_id: toInt(it.product_id, 0),
+          name: String(it.product_name_snapshot || "").trim() || "Producto",
+          quantity: Number(it.quantity || 0),
+          unit_price: Number(it.unit_price || 0),
+        });
+      }
+    } catch (e) {
+      console.warn("[CASH_REGISTER_SUMMARY] SaleItem load failed", e?.message, e?.stack);
+    }
+  }
+
+  // Detalle por venta con sus pagos e items (para arqueo detallado + PDF)
   const salesDetail = sales.map((s) => {
     const sid = toInt(s.id, 0);
     const sPayments = paymentsBySale[sid] || [];
@@ -561,6 +627,7 @@ async function buildCashRegisterSummary({
       sold_at: s.sold_at,
       primary_method: primaryMethod,
       payments: sPayments,
+      items: itemsBySale[sid] || [],
     };
   });
 
@@ -570,7 +637,12 @@ async function buildCashRegisterSummary({
   );
 
   return {
-    cash_register: toPlain(cashRegister),
+    cash_register: {
+      ...toPlain(cashRegister),
+      opened_by_name: cashierName || null,
+      opened_by_email: cashierEmail || null,
+      branch_name: branchName || null,
+    },
     totals: {
       opening_cash: openingCash,
       sales_count: sales.length,                    // ventas efectivas (PAID + REFUNDED)
