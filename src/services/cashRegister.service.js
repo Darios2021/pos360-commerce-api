@@ -388,44 +388,55 @@ async function buildCashRegisterSummary({
 
   // Solo ventas activas (PAID / REFUNDED) — CANCELLED queda excluido de los montos
   // Incluye ventas huérfanas (cash_register_id NULL) del mismo branch hechas durante
-  // la ventana de apertura de esta caja. Resuelve casos donde la venta se creó sin
-  // asociarse a la caja por desfasaje de branch_id en createSale.
+  // la ventana de apertura de esta caja.
   const branchId = toInt(cashRegister.branch_id, 0);
-  const openedAt = cashRegister.opened_at;
-  const closedAt = cashRegister.closed_at;
+  const openedAt = cashRegister.opened_at ? new Date(cashRegister.opened_at) : null;
+  const closedAt = cashRegister.closed_at ? new Date(cashRegister.closed_at) : null;
 
-  const orphanTimeClauses = [{ sold_at: { [Op.gte]: openedAt } }];
-  if (closedAt) {
-    orphanTimeClauses.push({ sold_at: { [Op.lte]: closedAt } });
-  }
+  // Cláusula de ventas huérfanas rescatadas por branch + ventana temporal.
+  const orphanWhere =
+    branchId && openedAt
+      ? {
+          cash_register_id: null,
+          branch_id: branchId,
+          sold_at: closedAt
+            ? { [Op.between]: [openedAt, closedAt] }
+            : { [Op.gte]: openedAt },
+        }
+      : null;
 
-  const saleScopeClause = branchId && openedAt
-    ? {
-        [Op.or]: [
-          { cash_register_id: id },
-          {
-            cash_register_id: null,
-            branch_id: branchId,
-            [Op.and]: orphanTimeClauses,
-          },
-        ],
-      }
+  // Scope total: { OR: [ { cr_id=id }, { huérfana } ] }
+  const scopeOr = orphanWhere
+    ? { [Op.or]: [{ cash_register_id: id }, orphanWhere] }
     : { cash_register_id: id };
+
+  console.log("[CASH_REGISTER_SUMMARY] scope →", {
+    id,
+    branchId,
+    openedAt,
+    closedAt,
+    hasOrphanRescue: !!orphanWhere,
+  });
 
   const sales = await Sale.findAll({
     where: {
-      ...saleScopeClause,
-      status: { [Op.in]: ["PAID", "REFUNDED"] },
+      [Op.and]: [scopeOr, { status: { [Op.in]: ["PAID", "REFUNDED"] } }],
     },
-    attributes: ["id", "status", "total", "paid_total", "change_total", "sold_at"],
+    attributes: ["id", "status", "total", "paid_total", "change_total", "sold_at", "cash_register_id", "branch_id"],
     transaction,
   });
 
-  // Contar anuladas para auditoría (soft-cancelled, sólo disponibles con nuevo sistema)
+  console.log("[CASH_REGISTER_SUMMARY] sales found →", sales.length, sales.map((s) => ({
+    id: s.id,
+    cr: s.cash_register_id,
+    branch: s.branch_id,
+    total: s.total,
+    sold_at: s.sold_at,
+  })));
+
   const cancelledCount = await Sale.count({
     where: {
-      ...saleScopeClause,
-      status: "CANCELLED",
+      [Op.and]: [scopeOr, { status: "CANCELLED" }],
     },
     transaction,
   });
