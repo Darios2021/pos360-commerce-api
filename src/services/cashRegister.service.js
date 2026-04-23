@@ -441,11 +441,19 @@ async function buildCashRegisterSummary({
   try {
     if (User && cashRegister.opened_by) {
       const u = await User.findByPk(cashRegister.opened_by, {
-        attributes: ["id", "name", "email", "username"],
+        attributes: ["id", "email", "username", "first_name", "last_name"],
         transaction,
       });
       if (u) {
-        cashierName = String(u.name || u.username || "").trim();
+        const full = [u.first_name, u.last_name]
+          .map((x) => String(x || "").trim())
+          .filter(Boolean)
+          .join(" ");
+        cashierName =
+          full ||
+          String(u.username || "").trim() ||
+          String(u.email || "").trim() ||
+          "";
         cashierEmail = String(u.email || "").trim();
       }
     }
