@@ -1700,6 +1700,13 @@ async function createSale(req, res) {
       transaction: t,
     });
 
+    console.log("[POS][createSale][CASH_REGISTER_RESOLVED]", {
+      resolvedBranchId,
+      userId,
+      foundCashRegisterId: currentCashRegister?.id || null,
+      foundCashRegisterBranch: currentCashRegister?.branch_id || null,
+    });
+
     if (!currentCashRegister) {
       logPos(req, "warn", "createSale sin caja abierta asociada", {
         resolvedBranchId,

@@ -1,4 +1,5 @@
 // src/services/cashRegister.service.js
+console.log("[CASH_REGISTER_SERVICE] cargado · build 2026-04-23-orphan-rescue-v2");
 const { Op } = require("sequelize");
 const {
   sequelize,
