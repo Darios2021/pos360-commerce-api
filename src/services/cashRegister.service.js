@@ -526,12 +526,43 @@ async function buildCashRegisterSummary({
     .reduce((acc, m) => acc + Number(m.amount || 0), 0);
 
   const paymentsByMethod = {};
+  const paymentsCountByMethod = {};
+  const paymentsBySale = {};
   for (const p of payments) {
     const key = upper(p.method) || "OTHER";
     paymentsByMethod[key] = Number(
       (paymentsByMethod[key] || 0) + Number(p.amount || 0)
     );
+    paymentsCountByMethod[key] = Number(paymentsCountByMethod[key] || 0) + 1;
+
+    const sid = toInt(p.sale_id, 0);
+    if (sid) {
+      if (!paymentsBySale[sid]) paymentsBySale[sid] = [];
+      paymentsBySale[sid].push({
+        method: key,
+        amount: Number(p.amount || 0),
+        installments: Number(p.installments || 1) || 1,
+        paid_at: p.paid_at,
+      });
+    }
   }
+
+  // Detalle por venta con sus pagos (para el arqueo detallado + PDF)
+  const salesDetail = sales.map((s) => {
+    const sid = toInt(s.id, 0);
+    const sPayments = paymentsBySale[sid] || [];
+    const primaryMethod = sPayments[0]?.method || "OTHER";
+    return {
+      id: sid,
+      status: String(s.status || ""),
+      total: Number(s.total || 0),
+      paid_total: Number(s.paid_total || 0),
+      change_total: Number(s.change_total || 0),
+      sold_at: s.sold_at,
+      primary_method: primaryMethod,
+      payments: sPayments,
+    };
+  });
 
   const cashSales = Number(paymentsByMethod.CASH || 0);
   const expectedCash = Number(
@@ -566,6 +597,15 @@ async function buildCashRegisterSummary({
       other: Number(paymentsByMethod.OTHER || 0),
       raw_by_method: paymentsByMethod,
     },
+    payments_count_by_method: {
+      cash: Number(paymentsCountByMethod.CASH || 0),
+      transfer: Number(paymentsCountByMethod.TRANSFER || 0),
+      card: Number(paymentsCountByMethod.CARD || 0),
+      mercadopago: Number((paymentsCountByMethod.MERCADOPAGO || 0) + (paymentsCountByMethod.QR || 0)),
+      credit_sjt: Number(paymentsCountByMethod.CREDIT_SJT || 0),
+      other: Number(paymentsCountByMethod.OTHER || 0),
+    },
+    sales_detail: salesDetail,
     movements: movements.map(toPlain),
     sales: sales.map(toPlain),
   };
