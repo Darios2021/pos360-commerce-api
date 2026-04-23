@@ -1,5 +1,5 @@
 // src/services/cashRegister.service.js
-console.log("[CASH_REGISTER_SERVICE] cargado · build 2026-04-23-orphan-rescue-v2");
+console.log("[CASH_REGISTER_SERVICE] cargado · build 2026-04-23-user-priority-v3");
 const { Op } = require("sequelize");
 const {
   sequelize,
@@ -140,28 +140,46 @@ async function getCurrentOpenCashRegister({
   const bid = toInt(branch_id, 0);
   const uid = toInt(user_id, 0);
 
-  // 1) Prioridad: caja abierta de la branch exacta (comportamiento original).
-  if (bid) {
-    const byBranch = await CashRegister.findOne({
-      where: { branch_id: bid, status: "OPEN" },
-      order: [["opened_at", "DESC"], ["id", "DESC"]],
-      transaction,
-    });
-    if (byBranch) return byBranch;
-  }
-
-  // 2) Fallback: caja abierta del mismo usuario, sin importar la branch.
-  //    Cubre casos donde el branch_id resolvido de la venta no coincide
-  //    exactamente con el branch_id de la caja que el cajero abrió.
+  // 1) PRIORIDAD: caja abierta del usuario logueado (en CUALQUIER branch).
+  //    Política: 1 caja por usuario. Todas sus ventas van ahí.
+  //    Evita que una venta en branch X sin caja en X quede huérfana cuando
+  //    el mismo cajero ya tiene una caja abierta en otra branch.
   if (uid) {
     const byUser = await CashRegister.findOne({
       where: { opened_by: uid, status: "OPEN" },
       order: [["opened_at", "DESC"], ["id", "DESC"]],
       transaction,
     });
-    if (byUser) return byUser;
+    if (byUser) {
+      console.log("[getCurrentOpenCashRegister] ✓ match by user", {
+        uid,
+        cashRegisterId: byUser.id,
+        cashRegisterBranch: byUser.branch_id,
+        requestedBranch: bid,
+      });
+      return byUser;
+    }
   }
 
+  // 2) Fallback: caja abierta en la branch (cubre el caso multi-cajero,
+  //    donde otro user abrió caja para ese branch).
+  if (bid) {
+    const byBranch = await CashRegister.findOne({
+      where: { branch_id: bid, status: "OPEN" },
+      order: [["opened_at", "DESC"], ["id", "DESC"]],
+      transaction,
+    });
+    if (byBranch) {
+      console.log("[getCurrentOpenCashRegister] ✓ match by branch", {
+        bid,
+        cashRegisterId: byBranch.id,
+        cashRegisterOpenedBy: byBranch.opened_by,
+      });
+      return byBranch;
+    }
+  }
+
+  console.log("[getCurrentOpenCashRegister] ✗ no match", { bid, uid });
   return null;
 }
 
