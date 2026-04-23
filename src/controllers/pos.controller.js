@@ -252,6 +252,47 @@ function sanitizeIdsCsv(ids) {
     .join(",");
 }
 
+// Stopwords mínimos para evitar que palabras triviales forzen 0 resultados.
+const POS_STOPWORDS = new Set([
+  "de", "del", "la", "las", "el", "los", "un", "una", "y", "o", "e",
+  "en", "al", "con", "para", "por", "sin", "su", "sus", "a", "ante",
+]);
+
+function splitQueryTerms(q) {
+  return String(q || "")
+    .toLowerCase()
+    .split(/[\s \-_/.,;:|]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 2 && !POS_STOPWORDS.has(w));
+}
+
+// Genera cláusulas para búsqueda multi-palabra con scoring.
+// - whereClause: al menos UNA palabra debe matchear en algún campo (OR entre palabras) → alto recall.
+// - scoreExpr: cuenta cuántas palabras matchearon → ordena productos con más matches primero.
+// - aliases: campos SQL ya prefijados (ej: "p.name", "c.name").
+function buildPosSearchClauses(q, aliases) {
+  const words = splitQueryTerms(q);
+  if (!words.length || !aliases.length) {
+    return { whereClause: "", scoreExpr: "0", replacements: {}, wordCount: 0, words: [] };
+  }
+
+  const replacements = {};
+  const perWord = words.map((word, idx) => {
+    const key = `lw${idx}`;
+    replacements[key] = `%${word}%`;
+    const ors = aliases.map((a) => `${a} LIKE :${key}`).join(" OR ");
+    return `(${ors})`;
+  });
+
+  return {
+    whereClause: `AND (${perWord.join(" OR ")})`,
+    scoreExpr: perWord.map((c) => `(CASE WHEN ${c} THEN 1 ELSE 0 END)`).join(" + "),
+    replacements,
+    wordCount: words.length,
+    words,
+  };
+}
+
 function clampInstallments(v, def = 1) {
   const n = toInt(v, def);
   if (!Number.isFinite(n)) return def;
@@ -913,10 +954,15 @@ async function listProductsForPos(req, res) {
 
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
 
-    // Smart search: si q es texto natural (no barcode/SKU) → Meilisearch.
-    // Si es código o falla Meilisearch → LIKE tradicional (protege el lector de barras).
+    // ── Smart search ──────────────────────────────────────────────────────
+    // 1) q parece código (barcode/SKU) → LIKE exacto en códigos (rápido, protege el lector).
+    // 2) q es texto natural → Meilisearch con scope de branches del user.
+    // 3) Fallback → multi-word LIKE con scoring (busca cada palabra en nombre/marca/modelo/
+    //    SKU/barcode/code/categoría/subcategoría y ordena por cantidad de matches).
+    const isCodeQuery = !!q && looksLikeCodeQuery(q);
+
     let meiliIds = null;
-    if (q && !looksLikeCodeQuery(q)) {
+    if (q && !isCodeQuery) {
       const smartBranchIds = await resolveBranchIdsForSmartSearch(req, explicit);
       if (smartBranchIds.length) {
         meiliIds = await smartSearchPosIds({ q, branchIds: smartBranchIds, limit: 500 });
@@ -925,15 +971,35 @@ async function listProductsForPos(req, res) {
     const useMeili = Array.isArray(meiliIds) && meiliIds.length > 0;
     const meiliIdsCsv = useMeili ? sanitizeIdsCsv(meiliIds) : "";
 
-    const whereLike = `AND (
-      p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
-      OR p.brand LIKE :like OR p.model LIKE :like
-    )`;
-    const whereQ = q
-      ? (useMeili ? `AND p.id IN (:meiliIds)` : whereLike)
+    const posSearchAliases = [
+      "p.name", "p.sku", "p.barcode", "p.code", "p.brand", "p.model",
+      "c.name", "s.name",
+    ];
+    const likeClauses = q && !useMeili && !isCodeQuery
+      ? buildPosSearchClauses(q, posSearchAliases)
+      : { whereClause: "", scoreExpr: "0", replacements: {}, wordCount: 0, words: [] };
+    const useMultiWordLike = likeClauses.wordCount > 0;
+
+    const whereCode = isCodeQuery
+      ? `AND (p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like)`
       : "";
-    // Preserva ranking de Meilisearch cuando aplica; si no, orden alfabético.
-    const orderBy = useMeili && meiliIdsCsv ? `FIELD(p.id, ${meiliIdsCsv})` : `p.name ASC`;
+
+    const whereQ = q
+      ? (useMeili
+          ? `AND p.id IN (:meiliIds)`
+          : (isCodeQuery ? whereCode : likeClauses.whereClause))
+      : "";
+
+    // Orden: Meilisearch > scoring multi-palabra > alfabético
+    const orderBy = useMeili && meiliIdsCsv
+      ? `FIELD(p.id, ${meiliIdsCsv})`
+      : (useMultiWordLike ? `(${likeClauses.scoreExpr}) DESC, p.name ASC` : `p.name ASC`);
+
+    // JOIN con categorías para buscar por category_name/subcategory_name (solo si hay q).
+    const searchJoins = q && !useMeili
+      ? `LEFT JOIN categories c ON c.id = p.category_id
+         LEFT JOIN subcategories s ON s.id = p.subcategory_id`
+      : "";
 
     const whereCategory = categoryId ? `AND p.category_id = :categoryId` : "";
     const whereSubcategory = subcategoryId ? `AND p.subcategory_id = :subcategoryId` : "";
@@ -952,6 +1018,7 @@ async function listProductsForPos(req, res) {
         FROM products p
         LEFT JOIN stock_balances sb
           ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
+        ${searchJoins}
         WHERE p.is_active = 1
         ${whereQ}
         ${whereCategory}
@@ -965,6 +1032,7 @@ async function listProductsForPos(req, res) {
           replacements: {
             warehouseId: requestedWarehouseId,
             like,
+            ...likeClauses.replacements,
             meiliIds: useMeili ? meiliIds : [0],
             limit,
             offset,
@@ -980,6 +1048,7 @@ async function listProductsForPos(req, res) {
         FROM products p
         LEFT JOIN stock_balances sb
           ON sb.product_id = p.id AND sb.warehouse_id = :warehouseId
+        ${searchJoins}
         WHERE p.is_active = 1
         ${whereQ}
         ${whereCategory}
@@ -991,6 +1060,7 @@ async function listProductsForPos(req, res) {
           replacements: {
             warehouseId: requestedWarehouseId,
             like,
+            ...likeClauses.replacements,
             meiliIds: useMeili ? meiliIds : [0],
             categoryId: categoryId || undefined,
             subcategoryId: subcategoryId || undefined,
@@ -1031,6 +1101,7 @@ async function listProductsForPos(req, res) {
         FROM products p
         LEFT JOIN stock_balances sb ON sb.product_id = p.id
         LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+        ${searchJoins}
         WHERE p.is_active = 1
         ${whereQ}
         ${whereCategory}
@@ -1044,6 +1115,7 @@ async function listProductsForPos(req, res) {
         {
           replacements: {
             like,
+            ...likeClauses.replacements,
             meiliIds: useMeili ? meiliIds : [0],
             limit,
             offset,
@@ -1062,6 +1134,7 @@ async function listProductsForPos(req, res) {
           FROM products p
           LEFT JOIN stock_balances sb ON sb.product_id = p.id
           LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+          ${searchJoins}
           WHERE p.is_active = 1
           ${whereQ}
           ${whereCategory}
@@ -1074,6 +1147,7 @@ async function listProductsForPos(req, res) {
         {
           replacements: {
             like,
+            ...likeClauses.replacements,
             meiliIds: useMeili ? meiliIds : [0],
             branchId: scopeBranchId || undefined,
             categoryId: categoryId || undefined,
@@ -1132,6 +1206,7 @@ async function listProductsForPos(req, res) {
       FROM products p
       LEFT JOIN stock_balances sb ON sb.product_id = p.id
       LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+      ${searchJoins}
       WHERE p.is_active = 1
       ${whereQ}
       ${whereCategory}
@@ -1139,12 +1214,13 @@ async function listProductsForPos(req, res) {
       ${whereSellable}
       GROUP BY p.id
       ${havingStock}
-      ORDER BY p.name ASC
+      ORDER BY ${orderBy}
       LIMIT :limit OFFSET :offset
       `,
       {
         replacements: {
           like,
+          ...likeClauses.replacements,
           meiliIds: useMeili ? meiliIds : [0],
           limit,
           offset,
@@ -1163,6 +1239,7 @@ async function listProductsForPos(req, res) {
         FROM products p
         LEFT JOIN stock_balances sb ON sb.product_id = p.id
         LEFT JOIN warehouses w ON w.id = sb.warehouse_id
+        ${searchJoins}
         WHERE p.is_active = 1
         ${whereQ}
         ${whereCategory}
@@ -1175,6 +1252,7 @@ async function listProductsForPos(req, res) {
       {
         replacements: {
           like,
+          ...likeClauses.replacements,
           meiliIds: useMeili ? meiliIds : [0],
           branchIds: scopeBranchIds,
           categoryId: categoryId || undefined,
@@ -1277,10 +1355,25 @@ async function listSuggestionsForPos(req, res) {
       }
     }
 
-    // Fallback SQL (scope por branches del user cuando aplique)
-    const like = `%${q}%`;
+    // ── Fallback SQL: multi-word + scoring + JOIN con categorías ──
     const exact = q;
     const startsWith = `${q}%`;
+
+    const sugAliases = [
+      "p.name", "p.brand", "p.model", "p.sku", "p.code",
+      "c.name", "s.name",
+    ];
+    const sugClauses = buildPosSearchClauses(q, sugAliases);
+
+    // Si la query (después de filtrar stopwords) no deja palabras usables, devolvemos vacío.
+    if (!sugClauses.wordCount) {
+      return res.json({ ok: true, items: [], _source: "sql" });
+    }
+
+    const sugScoreBoost = `
+      + (CASE WHEN p.name = :exact THEN 10 ELSE 0 END)
+      + (CASE WHEN p.name LIKE :startsWith THEN 5 ELSE 0 END)
+    `;
 
     let sql;
     let params;
@@ -1290,43 +1383,50 @@ async function listSuggestionsForPos(req, res) {
         SELECT
           p.id AS product_id,
           p.name, p.brand, p.model,
-          p.category_id, p.subcategory_id
+          p.category_id, p.subcategory_id,
+          c.name AS category_name,
+          s.name AS subcategory_name,
+          (${sugClauses.scoreExpr}${sugScoreBoost}) AS match_score
         FROM products p
         INNER JOIN stock_balances sb ON sb.product_id = p.id
         INNER JOIN warehouses w ON w.id = sb.warehouse_id
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN subcategories s ON s.id = p.subcategory_id
         WHERE p.is_active = 1
-          AND (p.name LIKE :like OR p.brand LIKE :like OR p.model LIKE :like)
+          ${sugClauses.whereClause}
           AND w.branch_id IN (:branchIds)
         GROUP BY p.id
-        ORDER BY
-          CASE
-            WHEN p.name = :exact THEN 0
-            WHEN p.name LIKE :startsWith THEN 1
-            ELSE 2
-          END,
-          p.name ASC
+        ORDER BY match_score DESC, p.name ASC
         LIMIT :limit
       `;
-      params = { like, exact, startsWith, branchIds: smartBranchIds, limit };
+      params = {
+        ...sugClauses.replacements,
+        exact, startsWith,
+        branchIds: smartBranchIds,
+        limit,
+      };
     } else {
       sql = `
         SELECT
           p.id AS product_id,
           p.name, p.brand, p.model,
-          p.category_id, p.subcategory_id
+          p.category_id, p.subcategory_id,
+          c.name AS category_name,
+          s.name AS subcategory_name,
+          (${sugClauses.scoreExpr}${sugScoreBoost}) AS match_score
         FROM products p
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN subcategories s ON s.id = p.subcategory_id
         WHERE p.is_active = 1
-          AND (p.name LIKE :like OR p.brand LIKE :like OR p.model LIKE :like)
-        ORDER BY
-          CASE
-            WHEN p.name = :exact THEN 0
-            WHEN p.name LIKE :startsWith THEN 1
-            ELSE 2
-          END,
-          p.name ASC
+          ${sugClauses.whereClause}
+        ORDER BY match_score DESC, p.name ASC
         LIMIT :limit
       `;
-      params = { like, exact, startsWith, limit };
+      params = {
+        ...sugClauses.replacements,
+        exact, startsWith,
+        limit,
+      };
     }
 
     const [rows] = await sequelize.query(sql, { replacements: params });
@@ -1344,9 +1444,9 @@ async function listSuggestionsForPos(req, res) {
         brand: r.brand || null,
         model: r.model || null,
         category_id: toInt(r.category_id, 0) || null,
-        category_name: null,
+        category_name: r.category_name || null,
         subcategory_id: toInt(r.subcategory_id, 0) || null,
-        subcategory_name: null,
+        subcategory_name: r.subcategory_name || null,
       });
       if (items.length >= limit) break;
     }
