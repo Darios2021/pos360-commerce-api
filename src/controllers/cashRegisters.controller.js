@@ -27,9 +27,28 @@ async function getCurrent(req, res, next) {
       user_id,
     });
 
+    // Otras cajas abiertas del mismo usuario (zombies al cambiar de sucursal).
+    // El frontend las usa para avisar que hay cajas pendientes de cerrar.
+    const { CashRegister } = require("../models");
+    const { Op } = require("sequelize");
+    const otherOpen = user_id
+      ? await CashRegister.findAll({
+          where: {
+            opened_by: user_id,
+            status: "OPEN",
+            ...(cashRegister?.id
+              ? { id: { [Op.ne]: cashRegister.id } }
+              : {}),
+          },
+          attributes: ["id", "branch_id", "opened_at", "opening_cash"],
+          order: [["opened_at", "ASC"]],
+        })
+      : [];
+
     return res.json({
       ok: true,
       data: cashRegister || null,
+      other_open_registers: otherOpen,
     });
   } catch (e) {
     console.error("[cashRegisters.getCurrent] error:", e);

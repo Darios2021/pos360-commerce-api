@@ -175,6 +175,31 @@ async function getOpenCashRegisterOrThrow({ branch_id, transaction = null }) {
   return cashRegister;
 }
 
+async function assertUserHasNoOtherCashRegisterOpen({ user_id, transaction = null }) {
+  const uid = toInt(user_id, 0);
+  if (!uid) return;
+
+  const current = await CashRegister.findOne({
+    where: { opened_by: uid, status: "OPEN" },
+    order: [["opened_at", "DESC"], ["id", "DESC"]],
+    transaction,
+  });
+
+  if (current) {
+    const err = new Error(
+      "Ya tenés una caja abierta. Cerrala antes de abrir otra."
+    );
+    err.status = 409;
+    err.code = "CAJA_USUARIO_YA_ABIERTA";
+    err.data = {
+      cash_register_id: current.id,
+      branch_id: current.branch_id,
+      opened_at: current.opened_at,
+    };
+    throw err;
+  }
+}
+
 async function assertNoOtherCashRegisterOpen({ branch_id, transaction = null }) {
   const current = await getCurrentOpenCashRegister({ branch_id, transaction });
   if (current) {
@@ -264,6 +289,9 @@ async function openCashRegister({
     throw err;
   }
 
+  // Política: un usuario solo puede tener UNA caja abierta a la vez
+  // (independiente de la branch). Evita "cajas zombies" al cambiar de sucursal.
+  await assertUserHasNoOtherCashRegisterOpen({ user_id: userId, transaction });
   await assertNoOtherCashRegisterOpen({ branch_id: branchId, transaction });
 
   const cashRegister = await CashRegister.create(
