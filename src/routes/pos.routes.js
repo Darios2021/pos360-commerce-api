@@ -18,6 +18,9 @@ const getContext =
 const listProductsForPos =
   posController.listProductsForPos || posController?.default?.listProductsForPos;
 
+const listSuggestionsForPos =
+  posController.listSuggestionsForPos || posController?.default?.listSuggestionsForPos;
+
 const createPosSale =
   posController.createSale || posController?.default?.createSale;
 
@@ -120,6 +123,9 @@ router.get("/context", safeFn("getContext", getContext));
 
 // ---- POS PRODUCTS
 router.get("/products", safeFn("listProductsForPos", listProductsForPos));
+
+// ---- POS SMART SUGGESTIONS (autocomplete inteligente)
+router.get("/suggestions", safeFn("listSuggestionsForPos", listSuggestionsForPos));
 
 /**
  * ✅ POS CREATE SALE (FRONT POS)

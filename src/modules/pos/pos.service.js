@@ -138,11 +138,23 @@ async function createPosSale(payload, ctxUser) {
       needMap.set(k, toNumber(needMap.get(k), 0) + qty);
     }
 
-    // Lock rows in stock_balances
+    // FIX #6 — Consultar track_stock antes de lockear (2026-04-22):
+    // Productos con track_stock=false no tienen fila en stock_balances → no lockear ni decrementar.
+    const allProductIds = [...new Set([...needMap.keys()].map((k) => Number(k.split(":")[1])))];
+    const trackStockRows = await sequelize.query(
+      `SELECT id, track_stock FROM products WHERE id IN (:ids)`,
+      { type: QueryTypes.SELECT, replacements: { ids: allProductIds }, transaction: t }
+    );
+    const trackStockMap = new Map(trackStockRows.map((r) => [Number(r.id), Boolean(r.track_stock)]));
+
+    // Lock rows in stock_balances (solo productos con track_stock=true)
     for (const [k, needQty] of needMap.entries()) {
       const [warehouseIdStr, productIdStr] = k.split(":");
       const warehouseId = Number(warehouseIdStr);
       const productId = Number(productIdStr);
+
+      // FIX #6: productos sin seguimiento de stock se saltan el lock
+      if (!trackStockMap.get(productId)) continue;
 
       const rows = await sequelize.query(
         `
@@ -313,6 +325,9 @@ async function createPosSale(payload, ctxUser) {
 
     // 8) Insert stock_movement_items y actualizar stock_balances
     for (const pi of preparedItems) {
+      // FIX #6: solo insertar movement item y decrementar si el producto trackea stock
+      if (!trackStockMap.get(Number(pi.product_id))) continue;
+
       await sequelize.query(
         `
         INSERT INTO stock_movement_items

@@ -7,6 +7,9 @@
 // - Transacción atómica
 // - Soporta params :id | :saleId | :sale_id
 // - Errores claros + log útil SOLO cuando falla
+//
+// FIX #1 — Restock real (2026-04-22):
+// - restock=true ahora actualiza stock_balances y registra stock_movement
 
 const { sequelize } = require("../models");
 
@@ -151,6 +154,81 @@ async function insertReturnItems({ returnId, items, transaction }) {
   );
 }
 
+/**
+ * Restaura stock en stock_balances para cada ítem devuelto.
+ * - Agrupa por warehouse_id → un stock_movement por depósito
+ * - INSERT ... ON DUPLICATE KEY UPDATE → idempotente, crea fila si no existe
+ * - Registra stock_movement_items para trazabilidad
+ */
+async function restockReturnItems({ returnId, saleId, items, createdBy, transaction }) {
+  const arr = (Array.isArray(items) ? items : []).filter(
+    (it) => toInt(it?.product_id, 0) > 0 && toInt(it?.warehouse_id, 0) > 0 && toFloat(it?.qty, 0) > 0
+  );
+  if (!arr.length) return;
+
+  // Agrupar ítems por warehouse_id
+  const byWarehouse = new Map();
+  for (const it of arr) {
+    const wid = toInt(it.warehouse_id, 0);
+    if (!byWarehouse.has(wid)) byWarehouse.set(wid, []);
+    byWarehouse.get(wid).push(it);
+  }
+
+  for (const [warehouse_id, whItems] of byWarehouse.entries()) {
+    // 1) Reponer unidades en stock_balances
+    for (const it of whItems) {
+      await sequelize.query(
+        `INSERT INTO stock_balances (warehouse_id, product_id, qty)
+         VALUES (:wid, :pid, :qty)
+         ON DUPLICATE KEY UPDATE qty = qty + :qty`,
+        {
+          replacements: {
+            wid: warehouse_id,
+            pid: toInt(it.product_id, 0),
+            qty: toFloat(it.qty, 0),
+          },
+          transaction,
+        }
+      );
+    }
+
+    // 2) Registrar stock_movement (trazabilidad)
+    await sequelize.query(
+      `INSERT INTO stock_movements (type, warehouse_id, ref_type, ref_id, note, created_by, created_at)
+       VALUES ('in', :wid, 'sale_return', :ref_id, :note, :created_by, NOW())`,
+      {
+        replacements: {
+          wid: warehouse_id,
+          ref_id: returnId,
+          note: `Devolución venta #${saleId}`,
+          created_by: createdBy ?? null,
+        },
+        transaction,
+      }
+    );
+
+    const [mrows] = await sequelize.query("SELECT LAST_INSERT_ID() AS id", { transaction });
+    const movementId = toInt(mrows?.[0]?.id, 0);
+
+    if (movementId) {
+      for (const it of whItems) {
+        await sequelize.query(
+          `INSERT INTO stock_movement_items (movement_id, product_id, qty, unit_cost)
+           VALUES (:mid, :pid, :qty, NULL)`,
+          {
+            replacements: {
+              mid: movementId,
+              pid: toInt(it.product_id, 0),
+              qty: toFloat(it.qty, 0),
+            },
+            transaction,
+          }
+        );
+      }
+    }
+  }
+}
+
 // ============================
 // POST /api/v1/pos/sales/:id/refunds
 // ============================
@@ -217,6 +295,20 @@ async function createRefund(req, res) {
     // 4) opcional items
     if (items) {
       await insertReturnItems({ returnId, items, transaction: t });
+    }
+
+    // 5) restock físico en stock_balances (FIX #1)
+    if (restock && Array.isArray(items) && items.length) {
+      await restockReturnItems({
+        returnId,
+        saleId,
+        items,
+        createdBy,
+        transaction: t,
+      });
+    } else if (restock && (!Array.isArray(items) || !items.length)) {
+      // restock=true pero sin items → no se puede reponer, advertencia en log
+      console.warn(`[posRefunds] restock=true pero sin items en devolución returnId=${returnId} saleId=${saleId} — stock no modificado`);
     }
 
     await t.commit();

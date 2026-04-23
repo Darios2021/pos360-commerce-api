@@ -8,10 +8,16 @@
 // - MP_MODE=test|prod
 // - MERCADOPAGO_ACCESS_TOKEN_TEST
 // - MERCADOPAGO_ACCESS_TOKEN_PROD
+// - MP_WEBHOOK_SECRET      ← secreto del panel MP para verificar firma (recomendado)
 //
 // Opcionales:
 // - MP_WEBHOOK_LOG_PAYLOAD=1
-// - MP_WEBHOOK_STRICT=1
+// - MP_WEBHOOK_STRICT=1    ← rechaza si firma inválida o falta topic/id
+//
+// FIX #2 — Verificación de firma HMAC-SHA256 (2026-04-22):
+// - Verifica header x-signature contra MP_WEBHOOK_SECRET
+// - Si no hay secret: advierte pero procesa (retrocompatible)
+// - Si strict=1 y firma inválida: rechaza con 401
 
 const crypto = require("crypto");
 const { sequelize } = require("../models");
@@ -90,6 +96,60 @@ async function mpGetJson(url, rid) {
   }
 
   return json;
+}
+
+/**
+ * Verifica la firma HMAC-SHA256 del webhook de MercadoPago.
+ * Docs: https://www.mercadopago.com.ar/developers/es/docs/notifications/webhooks/webhooks-verification
+ *
+ * Header x-signature: "ts=<timestamp>,v1=<hash>"
+ * Mensaje firmado:    "id:{data_id};request-id:{x-request-id};ts:{timestamp};"
+ *
+ * @returns {true}  firma válida
+ * @returns {false} firma presente pero inválida
+ * @returns {null}  MP_WEBHOOK_SECRET no configurado (no se puede verificar)
+ */
+function verifyMpSignature(req, dataId) {
+  const secret = toStr(process.env.MP_WEBHOOK_SECRET);
+  if (!secret) return null; // sin secret → no verificable
+
+  const xSignature = toStr(req.headers["x-signature"]);
+  if (!xSignature) return false;
+
+  const xRequestId = toStr(req.headers["x-request-id"]);
+
+  // Parsear ts y v1 del header "ts=...,v1=..."
+  let ts = "";
+  let v1 = "";
+  for (const part of xSignature.split(",")) {
+    const eqIdx = part.indexOf("=");
+    if (eqIdx === -1) continue;
+    const k = part.slice(0, eqIdx).trim();
+    const v = part.slice(eqIdx + 1).trim();
+    if (k === "ts") ts = v;
+    if (k === "v1") v1 = v;
+  }
+
+  if (!ts || !v1) return false;
+
+  // Construir el mensaje según la spec de MP
+  const parts = [];
+  if (dataId) parts.push(`id:${dataId}`);
+  if (xRequestId) parts.push(`request-id:${xRequestId}`);
+  parts.push(`ts:${ts}`);
+  const message = parts.join(";") + ";";
+
+  const expected = crypto.createHmac("sha256", secret).update(message).digest("hex");
+
+  // Comparación timing-safe para evitar timing attacks
+  try {
+    const bufExpected = Buffer.from(expected, "hex");
+    const bufReceived = Buffer.from(v1, "hex");
+    if (bufExpected.length !== bufReceived.length) return false;
+    return crypto.timingSafeEqual(bufExpected, bufReceived);
+  } catch {
+    return false;
+  }
 }
 
 function parseMpNotification(req) {
@@ -301,6 +361,30 @@ async function mercadopagoWebhook(req, res) {
   if (logPayload) {
     log(rid, "payload.body=", req.body || null);
     log(rid, "payload.query=", req.query || null);
+  }
+
+  // FIX #2 — Verificar firma HMAC-SHA256 del header x-signature
+  const signatureResult = verifyMpSignature(req, id);
+  if (signatureResult === null) {
+    // MP_WEBHOOK_SECRET no configurado → advertencia, continúa
+    log(rid, "⚠️ MP_WEBHOOK_SECRET no configurado — firma no verificada. Configurá la variable en .env");
+  } else if (signatureResult === false) {
+    // Firma presente pero inválida
+    log(rid, "SIGNATURE_INVALID", {
+      xSignature: req.headers["x-signature"] || null,
+      dataId: id,
+    });
+    if (strict) {
+      return res.status(401).json({
+        ok: false,
+        code: "INVALID_SIGNATURE",
+        message: "Firma del webhook inválida.",
+        rid,
+      });
+    }
+    log(rid, "⚠️ Firma inválida — continuando porque MP_WEBHOOK_STRICT != 1");
+  } else {
+    log(rid, "signature OK");
   }
 
   if (strict && (!topic || !id)) {

@@ -528,7 +528,7 @@ async function checkout(req, res) {
 
       const [prows] = await sequelize.query(
         `
-        SELECT id, name,
+        SELECT id, name, track_stock,
                COALESCE(NULLIF(price_discount, 0), NULLIF(price_list, 0), NULLIF(price, 0), 0) AS unit_price
         FROM products
         WHERE id IN (:ids)
@@ -568,6 +568,43 @@ async function checkout(req, res) {
         fulfillment_type === "delivery" ? toNum(body.shipping_total, 0) || toNum(shipping?.amount, 0) || 0 : 0;
 
       const total = subtotal + shipping_total;
+
+      // ---- (B') Validar y bloquear stock — FIX #3 (2026-04-22) ----
+      // Solo para productos con track_stock=true. Usa FOR UPDATE dentro de la TX.
+      const branch_id_for_stock = fulfillment_type === "pickup" ? pickup_branch_id : branch_id_input;
+
+      const [[whRow]] = await sequelize.query(
+        `SELECT id FROM warehouses WHERE branch_id = :bid AND is_active = 1 ORDER BY id ASC LIMIT 1`,
+        { replacements: { bid: branch_id_for_stock }, transaction: t }
+      );
+      const stock_warehouse_id = whRow?.id ? toInt(whRow.id, 0) : 0;
+
+      // Filtrar solo los que necesitan control de stock
+      const stockNeeds = orderItems
+        .filter((it) => pmap.get(it.product_id)?.track_stock)
+        .map((it) => ({ product_id: it.product_id, qty: it.qty, product_name: it.product_name }));
+
+      if (stock_warehouse_id && stockNeeds.length) {
+        for (const sn of stockNeeds) {
+          const [balRows] = await sequelize.query(
+            `SELECT qty FROM stock_balances WHERE warehouse_id = :wid AND product_id = :pid FOR UPDATE`,
+            { replacements: { wid: stock_warehouse_id, pid: sn.product_id }, transaction: t }
+          );
+          const available = toNum(balRows?.[0]?.qty, 0);
+          if (available < sn.qty) {
+            return {
+              error: {
+                status: 409,
+                code: "INSUFFICIENT_STOCK",
+                message: `Stock insuficiente: ${sn.product_name || `#${sn.product_id}`}. Disponible: ${available}, requerido: ${sn.qty}`,
+                product_id: sn.product_id,
+                available,
+                required: sn.qty,
+              },
+            };
+          }
+        }
+      }
 
       // ---- (C) Insert order ----
       const public_code = genPublicCode();
@@ -656,6 +693,16 @@ async function checkout(req, res) {
             transaction: t,
           }
         );
+      }
+
+      // ---- (D') Descontar stock — FIX #3 (2026-04-22) ----
+      if (stock_warehouse_id && stockNeeds.length) {
+        for (const sn of stockNeeds) {
+          await sequelize.query(
+            `UPDATE stock_balances SET qty = qty - :qty WHERE warehouse_id = :wid AND product_id = :pid`,
+            { replacements: { qty: sn.qty, wid: stock_warehouse_id, pid: sn.product_id }, transaction: t }
+          );
+        }
       }
 
       // ---- (E) Insert payment (NO MP) ----

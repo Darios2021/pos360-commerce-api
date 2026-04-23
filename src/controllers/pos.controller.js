@@ -18,6 +18,14 @@ const { getCurrentOpenCashRegister } = require("../services/cashRegister.service
 const { resolveFiscalSnapshot } = require("../services/fiscalSnapshot.service");
 const { maybeCreateFiscalDocument } = require("../services/fiscalDocument.service");
 
+let searchService = null;
+try {
+  // Búsqueda inteligente (Meilisearch) — se usa solo si está configurado.
+  searchService = require("../services/search.service");
+} catch (_e) {
+  searchService = null;
+}
+
 /* =========================
    Utils
 ========================= */
@@ -149,6 +157,99 @@ async function assertWarehouseBelongsToBranch(warehouseId, branchId) {
   const w = await Warehouse.findByPk(wid, { attributes: ["id", "branch_id"] });
   if (!w) return false;
   return toInt(w.branch_id, 0) === bid;
+}
+
+/* =========================
+   POS Smart Search (Meilisearch) helpers
+========================= */
+
+// Códigos (barcode / SKU / code) → se buscan con LIKE exacto en MySQL, nunca por Meilisearch.
+// Evita que typo tolerance y sinónimos interfieran con el lector de barras.
+function looksLikeCodeQuery(q) {
+  const s = String(q || "").trim();
+  if (!s) return false;
+  // Solo dígitos, 6+ chars → barcode (EAN/UPC)
+  if (/^\d{6,}$/.test(s)) return true;
+  // Alfanumérico con guiones/puntos, al menos un dígito, longitud 4+ → SKU/code
+  if (/^[A-Z0-9][A-Z0-9\-._]{3,}$/i.test(s) && /\d/.test(s)) return true;
+  return false;
+}
+
+async function resolveBranchIdsForSmartSearch(req, explicit) {
+  const admin = isAdminReq(req);
+  const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
+  const requestedBranchId = toInt(explicit?.branchId, 0) || 0;
+  const requestedWarehouseId = toInt(explicit?.warehouseId, 0) || 0;
+
+  if (requestedWarehouseId) {
+    // Resolver branch del warehouse para filtrar el índice Meilisearch
+    const w = await Warehouse.findByPk(requestedWarehouseId, { attributes: ["id", "branch_id"] });
+    const bid = toInt(w?.branch_id, 0);
+    return bid ? [bid] : [];
+  }
+
+  if (requestedBranchId) return [requestedBranchId];
+  if (!admin && allowedBranchIds.length) return allowedBranchIds;
+  return []; // admin sin scope → Meilisearch sin filter de branch no es seguro, caerá a LIKE
+}
+
+// Pregunta a Meilisearch por IDs relevantes para `q`. Scope: branches del user.
+// Devuelve array de ids ordenado por relevancia, o null si Meilisearch no aplica (fallback a LIKE).
+async function smartSearchPosIds({ q, branchIds, limit = 500 }) {
+  if (!searchService || typeof searchService.isConfigured !== "function") return null;
+  if (!searchService.isConfigured()) return null;
+  if (!q || !branchIds || !branchIds.length) return null;
+
+  try {
+    if (branchIds.length === 1) {
+      const result = await searchService.searchCatalog({
+        branch_id: branchIds[0],
+        q,
+        page: 1,
+        limit,
+      });
+      const ids = (result?.items || [])
+        .map((it) => toInt(it.product_id, 0))
+        .filter(Boolean);
+      return ids;
+    }
+
+    // Multi-branch: paralelo + merge preservando posiciones relativas (round-robin)
+    const settled = await Promise.all(
+      branchIds.map((bid) =>
+        searchService
+          .searchCatalog({ branch_id: bid, q, page: 1, limit })
+          .catch(() => ({ items: [] }))
+      )
+    );
+
+    const seen = new Set();
+    const ids = [];
+    const maxLen = settled.reduce((m, r) => Math.max(m, (r?.items || []).length), 0);
+
+    for (let i = 0; i < maxLen && ids.length < limit; i++) {
+      for (const r of settled) {
+        const it = (r?.items || [])[i];
+        const pid = toInt(it?.product_id, 0);
+        if (!pid || seen.has(pid)) continue;
+        seen.add(pid);
+        ids.push(pid);
+        if (ids.length >= limit) break;
+      }
+    }
+    return ids;
+  } catch (e) {
+    console.warn("[POS] smartSearchPosIds fallback", e?.message || e);
+    return null;
+  }
+}
+
+// Sanitiza IDs a CSV numérico seguro para usar en ORDER BY FIELD(...)
+function sanitizeIdsCsv(ids) {
+  return (ids || [])
+    .map((x) => toInt(x, 0))
+    .filter(Boolean)
+    .join(",");
 }
 
 function clampInstallments(v, def = 1) {
@@ -811,12 +912,29 @@ async function listProductsForPos(req, res) {
     `;
 
     const whereSellable = sellable ? `AND (${priceExpr}) > 0` : "";
+
+    // Smart search: si q es texto natural (no barcode/SKU) → Meilisearch.
+    // Si es código o falla Meilisearch → LIKE tradicional (protege el lector de barras).
+    let meiliIds = null;
+    if (q && !looksLikeCodeQuery(q)) {
+      const smartBranchIds = await resolveBranchIdsForSmartSearch(req, explicit);
+      if (smartBranchIds.length) {
+        meiliIds = await smartSearchPosIds({ q, branchIds: smartBranchIds, limit: 500 });
+      }
+    }
+    const useMeili = Array.isArray(meiliIds) && meiliIds.length > 0;
+    const meiliIdsCsv = useMeili ? sanitizeIdsCsv(meiliIds) : "";
+
+    const whereLike = `AND (
+      p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
+      OR p.brand LIKE :like OR p.model LIKE :like
+    )`;
     const whereQ = q
-      ? `AND (
-          p.name LIKE :like OR p.sku LIKE :like OR p.barcode LIKE :like OR p.code LIKE :like
-          OR p.brand LIKE :like OR p.model LIKE :like
-        )`
+      ? (useMeili ? `AND p.id IN (:meiliIds)` : whereLike)
       : "";
+    // Preserva ranking de Meilisearch cuando aplica; si no, orden alfabético.
+    const orderBy = useMeili && meiliIdsCsv ? `FIELD(p.id, ${meiliIdsCsv})` : `p.name ASC`;
+
     const whereCategory = categoryId ? `AND p.category_id = :categoryId` : "";
     const whereSubcategory = subcategoryId ? `AND p.subcategory_id = :subcategoryId` : "";
 
@@ -840,13 +958,14 @@ async function listProductsForPos(req, res) {
         ${whereSubcategory}
         ${whereStock}
         ${whereSellable}
-        ORDER BY p.name ASC
+        ORDER BY ${orderBy}
         LIMIT :limit OFFSET :offset
         `,
         {
           replacements: {
             warehouseId: requestedWarehouseId,
             like,
+            meiliIds: useMeili ? meiliIds : [0],
             limit,
             offset,
             categoryId: categoryId || undefined,
@@ -872,6 +991,7 @@ async function listProductsForPos(req, res) {
           replacements: {
             warehouseId: requestedWarehouseId,
             like,
+            meiliIds: useMeili ? meiliIds : [0],
             categoryId: categoryId || undefined,
             subcategoryId: subcategoryId || undefined,
           },
@@ -918,12 +1038,13 @@ async function listProductsForPos(req, res) {
         ${whereSellable}
         GROUP BY p.id
         ${havingStock}
-        ORDER BY p.name ASC
+        ORDER BY ${orderBy}
         LIMIT :limit OFFSET :offset
         `,
         {
           replacements: {
             like,
+            meiliIds: useMeili ? meiliIds : [0],
             limit,
             offset,
             branchId: scopeBranchId || undefined,
@@ -953,6 +1074,7 @@ async function listProductsForPos(req, res) {
         {
           replacements: {
             like,
+            meiliIds: useMeili ? meiliIds : [0],
             branchId: scopeBranchId || undefined,
             categoryId: categoryId || undefined,
             subcategoryId: subcategoryId || undefined,
@@ -993,6 +1115,8 @@ async function listProductsForPos(req, res) {
       scopeBranchIds,
       inStock,
       sellable,
+      useMeili,
+      meiliHits: useMeili ? meiliIds.length : 0,
       categoryId,
       subcategoryId,
     });
@@ -1021,6 +1145,7 @@ async function listProductsForPos(req, res) {
       {
         replacements: {
           like,
+          meiliIds: useMeili ? meiliIds : [0],
           limit,
           offset,
           branchIds: scopeBranchIds,
@@ -1050,6 +1175,7 @@ async function listProductsForPos(req, res) {
       {
         replacements: {
           like,
+          meiliIds: useMeili ? meiliIds : [0],
           branchIds: scopeBranchIds,
           categoryId: categoryId || undefined,
           subcategoryId: subcategoryId || undefined,
@@ -1071,6 +1197,164 @@ async function listProductsForPos(req, res) {
   } catch (e) {
     logPos(req, "error", "listProductsForPos error", { err: e.message });
     return res.status(500).json({ ok: false, code: "POS_PRODUCTS_ERROR", message: e.message });
+  }
+}
+
+/* =========================
+   GET /pos/suggestions
+   Autocomplete inteligente (Meilisearch + sinónimos + typo tolerance)
+   Scope de branches = branches del user logueado.
+   Barcode/SKU → no sugiere (usa lector directo por /products).
+========================= */
+async function listSuggestionsForPos(req, res) {
+  req._rid = req._rid || rid(req);
+
+  try {
+    const admin = isAdminReq(req);
+    const explicit = resolveExplicitPosContext(req);
+    const allowedBranchIds = normalizeBranchIds(req?.user?.branches);
+
+    if (!admin && !allowedBranchIds.length) {
+      return res.status(403).json({
+        ok: false,
+        code: "NO_BRANCH_SCOPE",
+        message: "El usuario no tiene branches asignadas.",
+      });
+    }
+
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "8", 10), 1), 15);
+
+    if (!q || q.length < 2) return res.json({ ok: true, items: [] });
+    // Códigos → sin autocomplete (el scanner/Enter ya ejecuta búsqueda exacta)
+    if (looksLikeCodeQuery(q)) return res.json({ ok: true, items: [] });
+
+    const smartBranchIds = await resolveBranchIdsForSmartSearch(req, explicit);
+
+    // Vía Meilisearch (preferida)
+    if (searchService?.isConfigured?.() && smartBranchIds.length) {
+      try {
+        const arrs = await Promise.all(
+          smartBranchIds.map((bid) =>
+            searchService
+              .searchSuggestions({ branch_id: bid, q, limit: Math.max(limit, 10) })
+              .catch(() => [])
+          )
+        );
+
+        const seenNames = new Set();
+        const seenIds = new Set();
+        const items = [];
+        const maxLen = arrs.reduce((m, a) => Math.max(m, (a || []).length), 0);
+
+        for (let i = 0; i < maxLen && items.length < limit; i++) {
+          for (const a of arrs) {
+            const s = (a || [])[i];
+            if (!s) continue;
+            const name = String(s.name || "").trim();
+            const pid = toInt(s.product_id, 0);
+            const key = name.toLowerCase();
+            if (!name || !pid || seenNames.has(key) || seenIds.has(pid)) continue;
+            seenNames.add(key);
+            seenIds.add(pid);
+            items.push({
+              product_id: pid,
+              name,
+              brand: s.brand || null,
+              model: s.model || null,
+              category_id: toInt(s.category_id, 0) || null,
+              category_name: s.category_name || null,
+              subcategory_id: toInt(s.subcategory_id, 0) || null,
+              subcategory_name: s.subcategory_name || null,
+            });
+            if (items.length >= limit) break;
+          }
+        }
+
+        return res.json({ ok: true, items, _source: "meilisearch" });
+      } catch (e) {
+        logPos(req, "warn", "suggestions meili error → fallback SQL", { err: e?.message });
+      }
+    }
+
+    // Fallback SQL (scope por branches del user cuando aplique)
+    const like = `%${q}%`;
+    const exact = q;
+    const startsWith = `${q}%`;
+
+    let sql;
+    let params;
+
+    if (smartBranchIds.length) {
+      sql = `
+        SELECT
+          p.id AS product_id,
+          p.name, p.brand, p.model,
+          p.category_id, p.subcategory_id
+        FROM products p
+        INNER JOIN stock_balances sb ON sb.product_id = p.id
+        INNER JOIN warehouses w ON w.id = sb.warehouse_id
+        WHERE p.is_active = 1
+          AND (p.name LIKE :like OR p.brand LIKE :like OR p.model LIKE :like)
+          AND w.branch_id IN (:branchIds)
+        GROUP BY p.id
+        ORDER BY
+          CASE
+            WHEN p.name = :exact THEN 0
+            WHEN p.name LIKE :startsWith THEN 1
+            ELSE 2
+          END,
+          p.name ASC
+        LIMIT :limit
+      `;
+      params = { like, exact, startsWith, branchIds: smartBranchIds, limit };
+    } else {
+      sql = `
+        SELECT
+          p.id AS product_id,
+          p.name, p.brand, p.model,
+          p.category_id, p.subcategory_id
+        FROM products p
+        WHERE p.is_active = 1
+          AND (p.name LIKE :like OR p.brand LIKE :like OR p.model LIKE :like)
+        ORDER BY
+          CASE
+            WHEN p.name = :exact THEN 0
+            WHEN p.name LIKE :startsWith THEN 1
+            ELSE 2
+          END,
+          p.name ASC
+        LIMIT :limit
+      `;
+      params = { like, exact, startsWith, limit };
+    }
+
+    const [rows] = await sequelize.query(sql, { replacements: params });
+
+    const seen = new Set();
+    const items = [];
+    for (const r of rows || []) {
+      const name = String(r.name || "").trim();
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        product_id: toInt(r.product_id, 0) || null,
+        name,
+        brand: r.brand || null,
+        model: r.model || null,
+        category_id: toInt(r.category_id, 0) || null,
+        category_name: null,
+        subcategory_id: toInt(r.subcategory_id, 0) || null,
+        subcategory_name: null,
+      });
+      if (items.length >= limit) break;
+    }
+
+    return res.json({ ok: true, items, _source: "sql" });
+  } catch (e) {
+    logPos(req, "error", "listSuggestionsForPos error", { err: e.message });
+    return res.status(500).json({ ok: false, code: "POS_SUGGESTIONS_ERROR", message: e.message });
   }
 }
 
@@ -2385,6 +2669,7 @@ async function createSaleExchange(req, res) {
 module.exports = {
   getContext,
   listProductsForPos,
+  listSuggestionsForPos,
   createSale,
   createSaleReturn,
   createSaleExchange,

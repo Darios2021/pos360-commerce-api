@@ -1,11 +1,13 @@
 // src/controllers/auth.controller.js
+// FIX #4 — No aplicar trim() a la contraseña (2026-04-22):
+// bcrypt compara el string exacto; trim() altera contraseñas con espacios intencionales.
 const authService = require("../services/auth.service");
 
 exports.login = async (req, res) => {
   try {
     const body = req.body || {};
     const identifier = (body.identifier || "").trim();
-    const password = (body.password || "").trim();
+    const password = String(body.password || ""); // sin trim — bcrypt necesita el string exacto
 
     if (!identifier || !password) {
       return res.status(400).json({
