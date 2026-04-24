@@ -7,13 +7,109 @@
 //     chequea toggles, dedupe y dispara el mensaje + log.
 // - No usa SDKs: Telegram Bot API es HTTP puro.
 
-const axios = require("axios");
 const { Op } = require("sequelize");
 
 const models = require("../models");
 const { sequelize, TelegramConfig, TelegramAlertLog } = models;
 
 const TELEGRAM_API = "https://api.telegram.org";
+
+// Helper: hace POST JSON a Telegram Bot API con fetch nativo (Node 18+).
+// Si corren en Node <18, fetch no existe → fallback a https nativo.
+async function telegramPost(url, body) {
+  if (typeof fetch === "function") {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 10000);
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const err = new Error(data?.description || `HTTP ${r.status}`);
+        err.response = { data };
+        throw err;
+      }
+      return { data };
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  // Fallback para Node < 18
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    const u = new URL(url);
+    const payload = JSON.stringify(body);
+    const req = https.request(
+      {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+        timeout: 10000,
+      },
+      (res) => {
+        let buf = "";
+        res.on("data", (c) => (buf += c));
+        res.on("end", () => {
+          let data = {};
+          try { data = JSON.parse(buf); } catch (_) {}
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve({ data });
+          else {
+            const err = new Error(data?.description || `HTTP ${res.statusCode}`);
+            err.response = { data };
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function telegramGet(url) {
+  if (typeof fetch === "function") {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 8000);
+    try {
+      const r = await fetch(url, { signal: controller.signal });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const err = new Error(data?.description || `HTTP ${r.status}`);
+        err.response = { data };
+        throw err;
+      }
+      return { data };
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    https
+      .get(url, (res) => {
+        let buf = "";
+        res.on("data", (c) => (buf += c));
+        res.on("end", () => {
+          let data = {};
+          try { data = JSON.parse(buf); } catch (_) {}
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve({ data });
+          else {
+            const err = new Error(data?.description || `HTTP ${res.statusCode}`);
+            err.response = { data };
+            reject(err);
+          }
+        });
+      })
+      .on("error", reject);
+  });
+}
 
 // Umbrales por default — se pueden overridear desde TelegramConfig.thresholds.
 const DEFAULT_THRESHOLDS = {
@@ -149,7 +245,7 @@ async function sendMessage(text, opts = {}) {
 
   try {
     const url = `${TELEGRAM_API}/bot${cfg.bot_token}/sendMessage`;
-    const res = await axios.post(url, payload, { timeout: 10000 });
+    const res = await telegramPost(url, payload);
     return { ok: true, data: res?.data || null };
   } catch (e) {
     const desc =
@@ -299,7 +395,7 @@ async function pingBot() {
   }
   try {
     const url = `${TELEGRAM_API}/bot${cfg.bot_token}/getMe`;
-    const res = await axios.get(url, { timeout: 8000 });
+    const res = await telegramGet(url);
     if (res?.data?.ok) {
       return { ok: true, bot: res.data.result };
     }

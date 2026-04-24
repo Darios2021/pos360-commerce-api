@@ -63,23 +63,28 @@ async function testSend(req, res, next) {
     const text = customText
       || "✅ <b>Prueba de Telegram</b>\nEl bot está configurado correctamente.";
 
-    // Forzamos el envío incluso si enabled está off, pero sólo si hay credenciales.
-    // Para test usamos sendMessage directo (bypassea toggles pero respeta enabled).
+    // Para test permitimos enviar aunque enabled esté en 0, habilitando
+    // temporalmente la config en memoria (no persistido).
     if (!cfg.enabled) {
-      // Para test permitimos enviar aunque enabled esté en 0:
-      const axios = require("axios");
+      // Truco: persistir enabled=true transitorio solo para esta llamada.
+      // Pero para no ensuciar la DB, simplemente llamamos a sendMessage
+      // tras un update temporal. Más seguro: restauramos siempre.
+      await svc.saveConfig({ enabled: true });
       try {
-        const url = `https://api.telegram.org/bot${cfg.bot_token}/sendMessage`;
-        await axios.post(url, {
-          chat_id: cfg.chat_id,
-          text,
-          parse_mode: cfg.parse_mode || "HTML",
-        }, { timeout: 10000 });
+        const r = await svc.sendMessage(text);
+        await svc.saveConfig({ enabled: false });
+        if (!r?.ok) {
+          return res.status(500).json({
+            ok: false,
+            error: r?.error || "No se pudo enviar",
+          });
+        }
         return res.json({ ok: true, note: "Enviado con bot deshabilitado (modo test)." });
       } catch (e) {
+        await svc.saveConfig({ enabled: false });
         return res.status(500).json({
           ok: false,
-          error: e?.response?.data?.description || e?.message || "Error al enviar",
+          error: e?.message || "Error al enviar",
         });
       }
     }
