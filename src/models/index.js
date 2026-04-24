@@ -159,6 +159,20 @@ try {
   }
 }
 
+// ===== TELEGRAM (opcionales) =====
+let TelegramConfig = null;
+let TelegramAlertLog = null;
+try {
+  TelegramConfig = require("./TelegramConfig")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ TelegramConfig no cargado");
+}
+try {
+  TelegramAlertLog = require("./TelegramAlertLog")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ TelegramAlertLog no cargado");
+}
+
 // ===== FISCAL ADMIN (opcionales) =====
 let FiscalConfig = null;
 let FiscalCertificate = null;
@@ -545,6 +559,10 @@ const models = {
   // Fiscal admin
   FiscalConfig,
   FiscalCertificate,
+
+  // Telegram
+  TelegramConfig,
+  TelegramAlertLog,
 };
 
 module.exports = models;

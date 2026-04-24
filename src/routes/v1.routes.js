@@ -284,6 +284,9 @@ const adminMediaRoutes =
 // ✅ NUEVO: fiscal admin
 const adminFiscalRoutes = loadRoute("./admin.fiscal.routes", { optional: true });
 
+// ✅ NUEVO: telegram admin (notificaciones)
+const adminTelegramRoutes = loadRoute("./admin.telegram.routes", { optional: true });
+
 // =========================
 // Mount: Public
 // =========================
@@ -376,6 +379,11 @@ if (adminShopBranchesRoutes) {
 
 if (adminShopLinksRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopLinksRoutes);
+}
+
+// ✅ NUEVO: telegram admin
+if (adminTelegramRoutes) {
+  safeUse("/admin/telegram", requireAuth, attachAccessContext, adminTelegramRoutes);
 }
 
 // ✅ NUEVO: fiscal admin
