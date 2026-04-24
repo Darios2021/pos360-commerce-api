@@ -141,29 +141,28 @@ async function getCurrentOpenCashRegister({
   const bid = toInt(branch_id, 0);
   const uid = toInt(user_id, 0);
 
-  // 1) PRIORIDAD: caja abierta del usuario logueado (en CUALQUIER branch).
-  //    Política: 1 caja por usuario. Todas sus ventas van ahí.
-  //    Evita que una venta en branch X sin caja en X quede huérfana cuando
-  //    el mismo cajero ya tiene una caja abierta en otra branch.
+  // 1) Con user_id: devolver SOLO la caja propia del usuario.
+  //    Política: 1 caja por usuario, y cada usuario opera únicamente sobre la suya.
+  //    No hacemos fallback por branch: si el user no abrió caja, no debe quedar
+  //    "enganchado" a la caja de otro cajero (eso haría que sus ventas se
+  //    imputaran a la caja de otro y confundía la UI mostrando sesión ajena).
   if (uid) {
     const byUser = await CashRegister.findOne({
       where: { opened_by: uid, status: "OPEN" },
       order: [["opened_at", "DESC"], ["id", "DESC"]],
       transaction,
     });
-    if (byUser) {
-      console.log("[getCurrentOpenCashRegister] ✓ match by user", {
-        uid,
-        cashRegisterId: byUser.id,
-        cashRegisterBranch: byUser.branch_id,
-        requestedBranch: bid,
-      });
-      return byUser;
-    }
+    console.log("[getCurrentOpenCashRegister] lookup by user", {
+      uid,
+      requestedBranch: bid,
+      found: byUser?.id || null,
+      cashRegisterBranch: byUser?.branch_id || null,
+    });
+    return byUser || null;
   }
 
-  // 2) Fallback: caja abierta en la branch (cubre el caso multi-cajero,
-  //    donde otro user abrió caja para ese branch).
+  // 2) Sin user_id: búsqueda por branch.
+  //    Solo para chequeos internos (ej. assertNoOtherCashRegisterOpen).
   if (bid) {
     const byBranch = await CashRegister.findOne({
       where: { branch_id: bid, status: "OPEN" },
