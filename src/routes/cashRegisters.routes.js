@@ -3,6 +3,7 @@ const router = require("express").Router();
 const controller = require("../controllers/cashRegisters.controller");
 
 router.get("/current", controller.getCurrent);
+router.get("/admin/list", controller.adminList);
 router.post("/open", controller.open);
 router.get("/:id/summary", controller.getSummary);
 router.post("/:id/movements", controller.addMovement);
