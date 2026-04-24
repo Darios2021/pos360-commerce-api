@@ -253,6 +253,9 @@ const meRoutes = loadRoute("./me.routes", { optional: false });
 // ✅ NUEVO: caja POS
 const cashRegistersRoutes = loadRoute("./cashRegisters.routes", { optional: true });
 
+// ✅ NUEVO: reportes (franquicia)
+const reportsRoutes = loadRoute("./reports.routes", { optional: true });
+
 // =========================
 // Admin
 // =========================
@@ -343,6 +346,14 @@ if (paymentMethodRoutes) {
 // ✅ NUEVO: CAJA (POS)
 if (cashRegistersRoutes) {
   safeUse("/pos/cash-registers", requireAuth, attachAccessContext, branchContext, cashRegistersRoutes);
+}
+
+// ✅ NUEVO: REPORTES (franquicia — ventas, stock, cajas)
+if (reportsRoutes) {
+  safeUse("/reports", requireAuth, attachAccessContext, branchContext, reportsRoutes);
+} else {
+  // eslint-disable-next-line no-console
+  console.log("⚠️ reportsRoutes no cargado (no existe reports.routes.js o exporta mal)");
 }
 
 // =========================
