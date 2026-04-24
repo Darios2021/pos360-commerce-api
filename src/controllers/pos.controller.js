@@ -996,10 +996,10 @@ async function listProductsForPos(req, res) {
       : (useMultiWordLike ? `(${likeClauses.scoreExpr}) DESC, p.name ASC` : `p.name ASC`);
 
     // JOIN con categorías para buscar por category_name/subcategory_name (solo si hay q).
-    const searchJoins = q && !useMeili
-      ? `LEFT JOIN categories c ON c.id = p.category_id
-         LEFT JOIN subcategories s ON s.id = p.subcategory_id`
-      : "";
+    // Siempre hacemos JOIN con categorías para devolver los nombres
+    // (útil para filtros facet en el frontend).
+    const searchJoins = `LEFT JOIN categories c ON c.id = p.category_id
+                         LEFT JOIN subcategories s ON s.id = p.subcategory_id`;
 
     const whereCategory = categoryId ? `AND p.category_id = :categoryId` : "";
     const whereSubcategory = subcategoryId ? `AND p.subcategory_id = :subcategoryId` : "";
@@ -1011,7 +1011,9 @@ async function listProductsForPos(req, res) {
         `
         SELECT
           p.id, p.branch_id, p.code, p.sku, p.barcode, p.name, p.brand, p.model,
-          p.category_id, p.subcategory_id, p.is_new, p.is_promo, p.is_active,
+          p.category_id, p.subcategory_id,
+          c.name AS category_name, s.name AS subcategory_name,
+          p.is_new, p.is_promo, p.is_active,
           p.price, p.price_list, p.price_discount, p.price_reseller,
           (${priceExpr}) AS effective_price,
           COALESCE(sb.qty, 0) AS qty
@@ -1094,7 +1096,9 @@ async function listProductsForPos(req, res) {
         `
         SELECT
           p.id, p.branch_id, p.code, p.sku, p.barcode, p.name, p.brand, p.model,
-          p.category_id, p.subcategory_id, p.is_new, p.is_promo, p.is_active,
+          p.category_id, p.subcategory_id,
+          c.name AS category_name, s.name AS subcategory_name,
+          p.is_new, p.is_promo, p.is_active,
           p.price, p.price_list, p.price_discount, p.price_reseller,
           (${priceExpr}) AS effective_price,
           ${qtyExpr} AS qty
