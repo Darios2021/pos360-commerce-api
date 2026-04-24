@@ -306,17 +306,115 @@ async function close(req, res) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// ADMIN LIST: listado completo de cajas con filtros, paginación y KPIs.
-// Usado por la vista de supervisión.
+// Reglas de auditoría.
+// Si en el futuro se sacan a settings por branch/org, centralizarlas acá.
+// ──────────────────────────────────────────────────────────────
+const AUDIT_MAX_SESSION_HOURS = 8;           // límite de turno
+const AUDIT_MAX_SESSION_MINUTES = AUDIT_MAX_SESSION_HOURS * 60;
+const AUDIT_SHORTAGE_SEVERE_PCT = 0.10;      // >10% del fondo → grave
+const AUDIT_SHORTAGE_SEVERE_ABS = 5000;      // o > $5.000 absoluto
+const AUDIT_SURPLUS_BIG_PCT = 0.05;          // >5% del fondo → sobrante sospechoso
+const AUDIT_SURPLUS_BIG_ABS = 1000;          // o > $1.000 absoluto
+const AUDIT_BIG_OUT_PCT = 0.20;              // egresos > 20% fondo
+const AUDIT_BIG_OUT_MIN = 500;               // y > $500 absoluto
+
+function computeAuditFlags(row) {
+  const flags = [];
+  const opening = Number(row.opening_cash || 0);
+  const diff = row.difference_cash != null ? Number(row.difference_cash) : null;
+  const manualOut = Number(row.manual_out || 0);
+  const openedAt = row.opened_at ? new Date(row.opened_at).getTime() : null;
+  const closedAt = row.closed_at ? new Date(row.closed_at).getTime() : null;
+  const isOpen = String(row.status || "").toUpperCase() === "OPEN";
+  const referenceEnd = closedAt || Date.now();
+  const durationHours = openedAt ? (referenceEnd - openedAt) / 3600000 : 0;
+
+  // Faltante de caja.
+  if (diff != null && diff < 0) {
+    const absDiff = Math.abs(diff);
+    const pct = opening > 0 ? absDiff / opening : 0;
+    const severe = absDiff >= AUDIT_SHORTAGE_SEVERE_ABS || pct >= AUDIT_SHORTAGE_SEVERE_PCT;
+    flags.push({
+      code: "SHORTAGE",
+      severity: severe ? "high" : "medium",
+      label: severe ? "Faltante grave" : "Faltante",
+      detail:
+        `Diferencia negativa de $${absDiff.toFixed(2)}` +
+        (opening > 0 ? ` (${(pct * 100).toFixed(1)}% del fondo)` : ""),
+      value: -absDiff,
+    });
+  }
+
+  // Sobrante atípico.
+  if (diff != null && diff > 0) {
+    const pct = opening > 0 ? diff / opening : 0;
+    if (diff >= AUDIT_SURPLUS_BIG_ABS || pct >= AUDIT_SURPLUS_BIG_PCT) {
+      flags.push({
+        code: "SURPLUS",
+        severity: "medium",
+        label: "Sobrante atípico",
+        detail:
+          `Diferencia positiva de $${diff.toFixed(2)}` +
+          (opening > 0 ? ` (${(pct * 100).toFixed(1)}% del fondo)` : ""),
+        value: diff,
+      });
+    }
+  }
+
+  // Excedió el turno de 8h.
+  if (durationHours > AUDIT_MAX_SESSION_HOURS) {
+    flags.push({
+      code: isOpen ? "LONG_OPEN" : "OVERTIME",
+      severity: isOpen ? "high" : "medium",
+      label: isOpen ? "Sesión abierta excedida" : "Turno excedido",
+      detail: `${durationHours.toFixed(1)}h abierta · límite ${AUDIT_MAX_SESSION_HOURS}h`,
+      value: durationHours,
+    });
+  }
+
+  // Egresos manuales grandes frente al fondo.
+  if (
+    opening > 0 &&
+    manualOut > AUDIT_BIG_OUT_MIN &&
+    manualOut > opening * AUDIT_BIG_OUT_PCT
+  ) {
+    flags.push({
+      code: "BIG_MANUAL_OUT",
+      severity: "low",
+      label: "Egresos manuales altos",
+      detail: `$${manualOut.toFixed(2)} en egresos (${((manualOut / opening) * 100).toFixed(0)}% del fondo)`,
+      value: manualOut,
+    });
+  }
+
+  const severityRank = { high: 3, medium: 2, low: 1 };
+  const topSeverity = flags.reduce(
+    (top, f) => (severityRank[f.severity] > severityRank[top] ? f.severity : top),
+    "low"
+  );
+
+  return {
+    flags,
+    has_alerts: flags.length > 0,
+    top_severity: flags.length ? topSeverity : null,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────
+// ADMIN LIST: listado completo de cajas con filtros, paginación, KPIs
+// y auditoría automática (faltantes / sobrantes / turnos excedidos).
 //
 // Query params:
-//   status      : "OPEN" | "CLOSED" | "ALL" (default ALL)
-//   branch_id   : number (opcional)
-//   user_id     : number (opcional) — filtra por cajero que abrió
-//   date_from   : ISO date (opcional) — filtro sobre opened_at
-//   date_to     : ISO date (opcional)
-//   q           : string — busca en nombre de cajero, email, notas
-//   page, limit : paginación (default 1, 25)
+//   status        : "OPEN" | "CLOSED" | "ALL" (default ALL)
+//   branch_id     : number (opcional)
+//   user_id       : number (opcional) — filtra por cajero que abrió
+//   date_from     : ISO date (opcional) — filtro sobre opened_at
+//   date_to       : ISO date (opcional)
+//   q             : string — busca en nombre de cajero, email, notas
+//   alerts_only   : "1" — solo cajas con alertas
+//   overtime_only : "1" — solo cajas que pasaron las 8h
+//   shortage_only : "1" — solo cajas con faltante
+//   page, limit   : paginación (default 1, 25)
 // ──────────────────────────────────────────────────────────────
 async function adminList(req, res, next) {
   try {
@@ -332,6 +430,9 @@ async function adminList(req, res, next) {
     const dateFrom = String(req.query?.date_from || "").trim();
     const dateTo = String(req.query?.date_to || "").trim();
     const q = String(req.query?.q || "").trim();
+    const alertsOnly = String(req.query?.alerts_only || "") === "1";
+    const overtimeOnly = String(req.query?.overtime_only || "") === "1";
+    const shortageOnly = String(req.query?.shortage_only || "") === "1";
     const page = Math.max(1, toInt(req.query?.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query?.limit, 25)));
     const offset = (page - 1) * limit;
@@ -370,6 +471,22 @@ async function adminList(req, res, next) {
       )`);
       repl.q = `%${q}%`;
     }
+
+    // Reglas de auditoría (mismos umbrales que computeAuditFlags).
+    const OVERTIME_EXPR = `(TIMESTAMPDIFF(MINUTE, cr.opened_at, IFNULL(cr.closed_at, NOW())) > ${AUDIT_MAX_SESSION_MINUTES})`;
+    const SHORTAGE_EXPR = `(cr.difference_cash IS NOT NULL AND cr.difference_cash < 0)`;
+    const SURPLUS_EXPR = `(
+      cr.difference_cash IS NOT NULL AND cr.difference_cash > 0
+      AND (
+        cr.difference_cash >= ${AUDIT_SURPLUS_BIG_ABS}
+        OR (cr.opening_cash > 0 AND cr.difference_cash >= cr.opening_cash * ${AUDIT_SURPLUS_BIG_PCT})
+      )
+    )`;
+    const ANY_ALERT_EXPR = `(${OVERTIME_EXPR} OR ${SHORTAGE_EXPR} OR ${SURPLUS_EXPR})`;
+
+    if (shortageOnly) where.push(SHORTAGE_EXPR);
+    if (overtimeOnly) where.push(OVERTIME_EXPR);
+    if (alertsOnly && !shortageOnly && !overtimeOnly) where.push(ANY_ALERT_EXPR);
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
@@ -454,36 +571,40 @@ async function adminList(req, res, next) {
       }
     );
 
-    const items = (rows || []).map((r) => ({
-      id: Number(r.id),
-      branch_id: Number(r.branch_id),
-      branch_name: r.branch_name || `Sucursal #${r.branch_id}`,
-      opened_by: Number(r.opened_by),
-      opened_by_name:
-        r.opened_by_name || r.opened_by_username || r.opened_by_email || `Usuario #${r.opened_by}`,
-      opened_by_email: r.opened_by_email || null,
-      closed_by: r.closed_by ? Number(r.closed_by) : null,
-      closed_by_name: r.closed_by_name || r.closed_by_email || null,
-      status: r.status,
-      opening_cash: Number(r.opening_cash || 0),
-      opening_note: r.opening_note || null,
-      opened_at: r.opened_at,
-      closing_cash: r.closing_cash != null ? Number(r.closing_cash) : null,
-      closing_note: r.closing_note || null,
-      closed_at: r.closed_at || null,
-      expected_cash: r.expected_cash != null ? Number(r.expected_cash) : null,
-      difference_cash: r.difference_cash != null ? Number(r.difference_cash) : null,
-      caja_type: r.caja_type || null,
-      invoice_mode: r.invoice_mode || null,
-      invoice_type: r.invoice_type || null,
-      opening_ip: r.opening_ip || null,
-      sales_count: Number(r.sales_count || 0),
-      sales_total: Number(r.sales_total || 0),
-      sales_cancelled: Number(r.sales_cancelled || 0),
-      manual_in: Number(r.manual_in || 0),
-      manual_out: Number(r.manual_out || 0),
-      movements_count: Number(r.movements_count || 0),
-    }));
+    const items = (rows || []).map((r) => {
+      const base = {
+        id: Number(r.id),
+        branch_id: Number(r.branch_id),
+        branch_name: r.branch_name || `Sucursal #${r.branch_id}`,
+        opened_by: Number(r.opened_by),
+        opened_by_name:
+          r.opened_by_name || r.opened_by_username || r.opened_by_email || `Usuario #${r.opened_by}`,
+        opened_by_email: r.opened_by_email || null,
+        closed_by: r.closed_by ? Number(r.closed_by) : null,
+        closed_by_name: r.closed_by_name || r.closed_by_email || null,
+        status: r.status,
+        opening_cash: Number(r.opening_cash || 0),
+        opening_note: r.opening_note || null,
+        opened_at: r.opened_at,
+        closing_cash: r.closing_cash != null ? Number(r.closing_cash) : null,
+        closing_note: r.closing_note || null,
+        closed_at: r.closed_at || null,
+        expected_cash: r.expected_cash != null ? Number(r.expected_cash) : null,
+        difference_cash: r.difference_cash != null ? Number(r.difference_cash) : null,
+        caja_type: r.caja_type || null,
+        invoice_mode: r.invoice_mode || null,
+        invoice_type: r.invoice_type || null,
+        opening_ip: r.opening_ip || null,
+        sales_count: Number(r.sales_count || 0),
+        sales_total: Number(r.sales_total || 0),
+        sales_cancelled: Number(r.sales_cancelled || 0),
+        manual_in: Number(r.manual_in || 0),
+        manual_out: Number(r.manual_out || 0),
+        movements_count: Number(r.movements_count || 0),
+      };
+      const audit = computeAuditFlags(base);
+      return { ...base, audit };
+    });
 
     // KPIs globales (no filtrados por página, sí por filtros aplicados).
     const kpiRows = await sequelize.query(
@@ -492,7 +613,11 @@ async function adminList(req, res, next) {
           SUM(CASE WHEN cr.status = 'OPEN' THEN 1 ELSE 0 END)   AS open_count,
           SUM(CASE WHEN cr.status = 'CLOSED' THEN 1 ELSE 0 END) AS closed_count,
           COALESCE(SUM(CASE WHEN cr.status = 'CLOSED' THEN cr.difference_cash ELSE 0 END), 0) AS total_difference,
-          COALESCE(SUM(cr.opening_cash), 0) AS total_opening
+          COALESCE(SUM(cr.opening_cash), 0) AS total_opening,
+          SUM(CASE WHEN ${SHORTAGE_EXPR} THEN 1 ELSE 0 END) AS shortage_count,
+          COALESCE(SUM(CASE WHEN ${SHORTAGE_EXPR} THEN cr.difference_cash ELSE 0 END), 0) AS shortage_total,
+          SUM(CASE WHEN ${OVERTIME_EXPR} THEN 1 ELSE 0 END) AS overtime_count,
+          SUM(CASE WHEN ${ANY_ALERT_EXPR} THEN 1 ELSE 0 END) AS alerts_count
         FROM cash_registers cr
         LEFT JOIN users u ON u.id = cr.opened_by
         ${whereSql}
@@ -541,10 +666,21 @@ async function adminList(req, res, next) {
         filtered_closed: Number(kpiRows?.[0]?.closed_count || 0),
         filtered_difference: Number(kpiRows?.[0]?.total_difference || 0),
         filtered_opening: Number(kpiRows?.[0]?.total_opening || 0),
+        filtered_alerts: Number(kpiRows?.[0]?.alerts_count || 0),
+        filtered_shortage_count: Number(kpiRows?.[0]?.shortage_count || 0),
+        filtered_shortage_total: Number(kpiRows?.[0]?.shortage_total || 0),
+        filtered_overtime: Number(kpiRows?.[0]?.overtime_count || 0),
         open_now:        Number(todayRows?.[0]?.open_now || 0),
         closed_today:    Number(todayRows?.[0]?.closed_today || 0),
         difference_today: Number(todayRows?.[0]?.difference_today || 0),
         sales_total_today: Number(todayRows?.[0]?.sales_total_today || 0),
+      },
+      audit_thresholds: {
+        max_session_hours: AUDIT_MAX_SESSION_HOURS,
+        shortage_severe_pct: AUDIT_SHORTAGE_SEVERE_PCT,
+        shortage_severe_abs: AUDIT_SHORTAGE_SEVERE_ABS,
+        surplus_big_pct: AUDIT_SURPLUS_BIG_PCT,
+        surplus_big_abs: AUDIT_SURPLUS_BIG_ABS,
       },
     });
   } catch (e) {
