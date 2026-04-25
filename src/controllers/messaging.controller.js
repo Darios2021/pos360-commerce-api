@@ -210,7 +210,8 @@ async function loadUserSignature(user_id, { force = null } = {}) {
 }
 
 // Carga los promo blocks por IDs (en el orden recibido). Filtra inactivos y
-// devuelve los campos planos que el layout consume.
+// devuelve los campos hidratados desde el producto del catálogo, listos para
+// que el layout los renderice como cards.
 async function loadPromoBlocksByIds(ids) {
   const arr = Array.isArray(ids) ? ids.map((x) => toInt(x, 0)).filter(Boolean) : [];
   if (!arr.length) return null;
@@ -219,10 +220,18 @@ async function loadPromoBlocksByIds(ids) {
     if (!EmailPromoBlock) return null;
     const rows = await EmailPromoBlock.findAll({ where: { id: arr, active: true } });
     if (!rows.length) return null;
+
+    // Hidratar (cada bloque trae datos live del producto + overrides).
+    const promoCtrl = require("./admin.emailPromoBlocks.controller");
+    const hydrated = await Promise.all(rows.map((r) => promoCtrl.hydrateBlock(r)));
+
     // Preservar orden recibido.
-    const byId = new Map(rows.map((r) => [r.id, r.toJSON()]));
+    const byId = new Map(hydrated.map((r) => [r.id, r]));
     return arr.map((id) => byId.get(id)).filter(Boolean);
-  } catch (_) { return null; }
+  } catch (e) {
+    console.warn("[messaging] loadPromoBlocksByIds:", e?.message);
+    return null;
+  }
 }
 
 async function resolveTemplate(template_id, channel, body, subject) {
