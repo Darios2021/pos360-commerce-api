@@ -205,6 +205,19 @@ async function assertUserHasNoOtherCashRegisterOpen({ user_id, transaction = nul
   });
 
   if (current) {
+    // Resolver nombre de sucursal para que el dialog "caja zombie" muestre algo
+    // útil (antes mostraba "Sucursal #?" cuando el frontend no tenía la branch
+    // cargada en su lista). Lo hacemos best-effort: si falla, devolvemos lo que
+    // tengamos y el frontend caerá a su propio resolver.
+    let branchName = null;
+    try {
+      const b = await Branch.findByPk(current.branch_id, {
+        attributes: ["id", "name"],
+        transaction,
+      });
+      branchName = b?.name || null;
+    } catch (_) {}
+
     const err = new Error(
       "Ya tenés una caja abierta. Cerrala antes de abrir otra."
     );
@@ -213,7 +226,9 @@ async function assertUserHasNoOtherCashRegisterOpen({ user_id, transaction = nul
     err.data = {
       cash_register_id: current.id,
       branch_id: current.branch_id,
+      branch_name: branchName,
       opened_at: current.opened_at,
+      opening_cash: current.opening_cash != null ? Number(current.opening_cash) : null,
     };
     throw err;
   }
