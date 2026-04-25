@@ -57,6 +57,15 @@ const Sale = require("./Sale")(sequelize, DataTypes);
 const SaleItem = require("./SaleItem")(sequelize, DataTypes);
 const Payment = require("./Payment")(sequelize, DataTypes);
 
+// ===== CUSTOMERS (POS + Ecom unificado) =====
+let Customer = null;
+try {
+  Customer = require("./Customer")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ Customer no cargado:", e?.message);
+  Customer = null;
+}
+
 // ===== PAYMENT METHOD =====
 let PaymentMethod = null;
 try {
@@ -555,6 +564,7 @@ const models = {
   // Shop / Customer
   ShopLink,
   EcomCustomer,
+  Customer,
 
   // Fiscal admin
   FiscalConfig,

@@ -247,6 +247,7 @@ const stockRoutes = loadRoute("./stock.routes", { optional: false });
 const stockTransferRoutes = loadRoute("./stockTransfer.routes", { optional: false });
 const dashboardRoutes = loadRoute("./dashboard.routes", { optional: false });
 const analyticsRoutes = loadRoute("./analytics.routes", { optional: true });
+const customersRoutes = loadRoute("./customers.routes", { optional: true });
 const posRoutes = loadRoute("./pos.routes", { optional: false });
 const meRoutes = loadRoute("./me.routes", { optional: false });
 
@@ -366,6 +367,9 @@ if (reportsRoutes) {
 // Mount: Admin
 // =========================
 safeUse("/admin/users", requireAuth, attachAccessContext, adminUsersRoutes);
+if (customersRoutes) {
+  safeUse("/admin/customers", requireAuth, attachAccessContext, customersRoutes);
+}
 
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
