@@ -438,6 +438,8 @@ async function backfill(req, res, next) {
         TRIM(IFNULL(customer_name, '')) AS customer_name,
         TRIM(IFNULL(customer_doc, '')) AS customer_doc,
         TRIM(IFNULL(customer_phone, '')) AS customer_phone,
+        TRIM(IFNULL(customer_email, '')) AS customer_email,
+        TRIM(IFNULL(customer_address, '')) AS customer_address,
         TRIM(IFNULL(customer_doc_type, '')) AS customer_doc_type,
         TRIM(IFNULL(customer_tax_condition, '')) AS customer_tax_condition,
         TRIM(IFNULL(customer_type, '')) AS customer_type
@@ -446,6 +448,7 @@ async function backfill(req, res, next) {
         TRIM(IFNULL(customer_name, '')) <> ''
         OR TRIM(IFNULL(customer_doc, '')) <> ''
         OR TRIM(IFNULL(customer_phone, '')) <> ''
+        OR TRIM(IFNULL(customer_email, '')) <> ''
       `,
       { type: sequelize.QueryTypes.SELECT }
     );
@@ -453,17 +456,26 @@ async function backfill(req, res, next) {
     // Agrupar por clave de match.
     const groups = new Map(); // key → { sale_ids: [], sample: {...} }
     for (const r of sales) {
-      const docKey = normalizeDoc(r.customer_doc);
+      const docKey   = normalizeDoc(r.customer_doc);
       const phoneKey = normalizePhone(r.customer_phone);
-      const nameKey = normalizeName(r.customer_name);
+      const emailKey = String(r.customer_email || r.email || "").trim().toLowerCase();
+      const nameKey  = normalizeName(r.customer_name);
 
-      // Excluir "Consumidor Final" y similares de la unificación porque son
-      // cosas genéricas; los dejamos por separado (no spamean el top 10 si
-      // no se setea customer_id, pero al menos no se mergean).
-      const isGeneric = ["consumidor final", "publico general", "consumidor"].includes(nameKey);
-      if (isGeneric) continue;
+      // Antes excluíamos a "Consumidor Final" del backfill, pero eso ocultaba
+      // muchos clientes reales que dejaron DNI o teléfono pero el cajero los
+      // tipeó como "Consumidor Final". Ahora la regla es:
+      //   - Si tienen doc / phone / email distintivos, los importamos
+      //     (incluso si el nombre dice "Consumidor Final"), agrupados por ese
+      //     identificador único.
+      //   - Si solo tienen nombre y NO es genérico, los importamos por nombre.
+      //   - Si tienen ÚNICAMENTE nombre genérico (sin doc/phone/email), los
+      //     ignoramos (esos quedan como ventas anónimas, sin customer_id).
+      const isGenericName = ["consumidor final", "publico general", "consumidor", "consumidor_final", ""].includes(nameKey);
 
-      const key = docKey || phoneKey || nameKey;
+      let key = docKey || phoneKey || emailKey;
+      if (!key && !isGenericName) {
+        key = nameKey;
+      }
       if (!key) continue;
 
       if (!groups.has(key)) {
@@ -476,6 +488,11 @@ async function backfill(req, res, next) {
       const g = groups.get(key);
       g.sale_ids.push(r.id);
       if (r.customer_name) g.name_variants.add(r.customer_name.trim());
+
+      // Si encontramos un sample con datos más completos (doc/phone), preferirlo
+      // como referencia para el customer que vamos a crear.
+      if (!normalizeDoc(g.sample.customer_doc) && docKey) g.sample = r;
+      else if (!normalizePhone(g.sample.customer_phone) && phoneKey && !normalizeDoc(g.sample.customer_doc)) g.sample = r;
     }
 
     let createdCount = 0;
@@ -515,6 +532,8 @@ async function backfill(req, res, next) {
           doc_type: sample.customer_doc_type || null,
           doc_number: sample.customer_doc || null,
           phone: sample.customer_phone || null,
+          email: sample.customer_email || null,
+          address: sample.customer_address || null,
           customer_type:
             ["CONSUMIDOR_FINAL","RESPONSABLE_INSCRIPTO","MONOTRIBUTO","EXENTO","OTRO"]
               .includes(String(sample.customer_type).toUpperCase())
@@ -527,6 +546,16 @@ async function backfill(req, res, next) {
         });
         createdCount++;
       } else if (row) {
+        // Si existe pero no tiene email/phone/etc, completar con lo que el sample aporte.
+        const patch = {};
+        if (!row.email && sample.customer_email)     patch.email = sample.customer_email;
+        if (!row.phone && sample.customer_phone)     patch.phone = sample.customer_phone;
+        if (!row.address && sample.customer_address) patch.address = sample.customer_address;
+        if (!row.doc_number && sample.customer_doc)  patch.doc_number = sample.customer_doc;
+        if (!row.doc_type && sample.customer_doc_type) patch.doc_type = sample.customer_doc_type;
+        if (Object.keys(patch).length && !dryRun) {
+          await row.update(patch);
+        }
         reusedCount++;
       }
 
