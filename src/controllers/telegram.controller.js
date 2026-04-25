@@ -116,6 +116,17 @@ async function ping(req, res, next) {
   }
 }
 
+// Escaneo a demanda: manda al grupo un resumen de productos con stock <= 0.
+async function scanLowStock(req, res, next) {
+  try {
+    const limit = Math.min(50, Math.max(5, Number(req.body?.limit || req.query?.limit || 30)));
+    const r = await svc.scanZeroStockProducts({ limit });
+    return res.json({ ok: !!r?.ok, ...r });
+  } catch (e) {
+    next(e);
+  }
+}
+
 // Dispara una alerta de stock fake (testing aislado del POS).
 async function testStockAlert(req, res, next) {
   try {
@@ -181,4 +192,5 @@ module.exports = {
   listLogs,
   runScansNow,
   testStockAlert,
+  scanLowStock,
 };

@@ -702,6 +702,131 @@ async function notifyCashRegisterClose({ cash_register_id }) {
   }
 }
 
+// Escaneo a demanda de productos con stock crítico (qty total <= 0).
+// Manda un mensaje resumen al grupo. NO usa dedupe (es manual).
+async function scanZeroStockProducts({ limit = 30 } = {}) {
+  try {
+    const cfg = await getConfig();
+    if (!cfg?.enabled) {
+      return { ok: false, skipped: true, reason: "disabled" };
+    }
+    if (!cfg.bot_token || !cfg.chat_id) {
+      return { ok: false, skipped: true, reason: "missing_credentials" };
+    }
+
+    // Productos activos que controlan stock con qty total <= 0.
+    // Si el producto no tiene fila en stock_balances lo contamos como 0.
+    const rows = await sequelize.query(
+      `
+        SELECT
+          p.id,
+          p.name,
+          p.sku,
+          p.code,
+          COALESCE(s.total_qty, 0) AS total_qty
+        FROM products p
+        LEFT JOIN (
+          SELECT product_id, SUM(qty) AS total_qty
+          FROM stock_balances
+          GROUP BY product_id
+        ) s ON s.product_id = p.id
+        WHERE p.is_active = 1
+          AND COALESCE(p.track_stock, 1) = 1
+          AND COALESCE(s.total_qty, 0) <= 0
+        ORDER BY p.name ASC
+      `,
+      { type: sequelize.QueryTypes.SELECT }
+    );
+
+    const total = rows.length;
+    if (total === 0) {
+      const text = "✅ <b>Sin productos en rotura</b>\nTodos los productos activos tienen stock disponible.";
+      const r = await sendMessage(text);
+      return { ok: r?.ok, total: 0 };
+    }
+
+    // Separar negativos (más graves) de cero.
+    const negative = rows.filter((r) => Number(r.total_qty) < 0);
+    const zero = rows.filter((r) => Number(r.total_qty) === 0);
+
+    const formatItem = (r) => {
+      const sku = r.sku || r.code || "";
+      const skuTag = sku ? ` <code>${escapeHtml(sku)}</code>` : "";
+      const qtyTag = Number(r.total_qty) < 0 ? ` <b>(${r.total_qty})</b>` : "";
+      return `• ${escapeHtml(r.name || `Producto #${r.id}`)}${skuTag}${qtyTag}`;
+    };
+
+    const lines = [`📊 <b>Stock crítico</b>`];
+    lines.push("");
+    lines.push(`🔴 <b>${total}</b> producto${total === 1 ? "" : "s"} sin stock disponible:`);
+    if (negative.length) {
+      lines.push(`   • ${negative.length} con stock <b>negativo</b>`);
+    }
+    if (zero.length) {
+      lines.push(`   • ${zero.length} en <b>cero</b>`);
+    }
+    lines.push("");
+
+    const allItems = [...negative, ...zero];
+    const toShow = allItems.slice(0, limit);
+
+    if (negative.length) {
+      lines.push("<b>⚠️ Stock negativo:</b>");
+      for (const r of negative.slice(0, limit)) {
+        lines.push(formatItem(r));
+      }
+      if (negative.length > limit) {
+        lines.push(`<i>… +${negative.length - limit} más</i>`);
+      }
+      lines.push("");
+    }
+
+    const remainingForZero = Math.max(0, limit - negative.length);
+    if (zero.length && remainingForZero > 0) {
+      lines.push("<b>📦 Sin stock (qty = 0):</b>");
+      const zeroToShow = zero.slice(0, remainingForZero);
+      for (const r of zeroToShow) {
+        lines.push(formatItem(r));
+      }
+      if (zero.length > zeroToShow.length) {
+        lines.push(`<i>… +${zero.length - zeroToShow.length} más</i>`);
+      }
+    } else if (zero.length && remainingForZero === 0) {
+      lines.push(`<i>+ ${zero.length} producto(s) en cero (no listados)</i>`);
+    }
+
+    lines.push("");
+    lines.push(`<i>Generado: ${new Date().toLocaleString("es-AR")}</i>`);
+
+    const text = lines.join("\n");
+    const result = await sendMessage(text);
+
+    // Loggeamos con código manual para que aparezca en el histórico.
+    await logAlert({
+      code: "STOCK_SCAN_MANUAL",
+      reference_type: "system",
+      reference_id: null,
+      dedupe_key: null,
+      chat_id: (await getConfig())?.chat_id,
+      text,
+      payload: { total, negative_count: negative.length, zero_count: zero.length },
+      success: !!result?.ok,
+      error: result?.error || null,
+    });
+
+    return {
+      ok: !!result?.ok,
+      total,
+      negative_count: negative.length,
+      zero_count: zero.length,
+      error: result?.error || null,
+    };
+  } catch (e) {
+    console.warn("[telegram.scanZeroStockProducts] error:", e?.message);
+    return { ok: false, error: e?.message };
+  }
+}
+
 async function notifyTransferDispatched({ transfer_id }) {
   try {
     if (!transfer_id) return;
@@ -971,6 +1096,7 @@ module.exports = {
   notifyTransferDispatched,
   scanLongOpenCashRegisters,
   scanPendingTransfers,
+  scanZeroStockProducts,
   startCronJobs,
   stopCronJobs,
 };
