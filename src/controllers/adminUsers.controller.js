@@ -64,6 +64,22 @@ function safeUserRow(u) {
   };
 }
 
+// Devuelve true si la lista de role_ids incluye el rol "super_admin".
+// Lo usamos para forzar todas las sucursales en user_branches: ese rol ignora
+// el filtro de scope, así que tener "Rivadavia habilitada" para un super_admin
+// es engañoso. Habilitamos todas para que el form refleje la verdad.
+async function containsSuperAdminRoleId(roleIds = []) {
+  const ids = (Array.isArray(roleIds) ? roleIds : [])
+    .map((x) => toInt(x, 0))
+    .filter(Boolean);
+  if (!ids.length) return false;
+  const rows = await Role.findAll({
+    where: { id: ids, name: { [Op.in]: ["super_admin", "superadmin"] } },
+    attributes: ["id"],
+  });
+  return rows.length > 0;
+}
+
 function getAccess(req) {
   const a = req.access || {};
   const roles = Array.isArray(a.roles) ? a.roles : [];
@@ -277,7 +293,18 @@ async function createUser(req, res) {
     }
 
     const password = await bcrypt.hash(rawPass, 10);
-    const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
+    let { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
+
+    // Si el rol es super_admin → todas las sucursales activas (mismo motivo
+    // que en updateUser: super_admin ignora el filtro y la UI no debe mostrar
+    // un acceso parcial que en realidad no existe).
+    if (await containsSuperAdminRoleId(roleIds)) {
+      const all = await Branch.findAll({
+        where: { is_active: true },
+        attributes: ["id"],
+      });
+      branchIds = all.map((b) => b.id);
+    }
 
     // ✅ users.branch_id es NOT NULL en tu DB
     const branch_id = branchIds.length ? branchIds[0] : toInt(body.branch_id, 0);
@@ -370,7 +397,19 @@ async function updateUser(req, res) {
       u.avatar_url = String(body.avatar_url || "").trim() || null;
     }
 
-    const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
+    let { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
+
+    // Si el set de roles incluye super_admin, FORZAMOS todas las sucursales
+    // activas en user_branches (super_admin ignora el filtro: si la UI muestra
+    // "1 sucursal habilitada" pero el rol bypassea el scope, queda inconsistente).
+    const isAssigningSuperAdmin = await containsSuperAdminRoleId(roleIds);
+    if (isAssigningSuperAdmin) {
+      const all = await Branch.findAll({
+        where: { is_active: true },
+        attributes: ["id"],
+      });
+      branchIds = all.map((b) => b.id);
+    }
 
     // Cinturón de seguridad: si el body manda `role_ids: []` Y el usuario tenía
     // roles antes Y el caller no marcó intención explícita con `_clear_roles=true`,
@@ -378,7 +417,7 @@ async function updateUser(req, res) {
     // exactamente lo que pasaba con el form de admin cuando no podía hidratar
     // los roles previos).
     const rolesIntended = Array.isArray(body.role_ids) || Array.isArray(body.roles);
-    const branchesIntended = Array.isArray(body.branch_ids) || Array.isArray(body.branches);
+    const branchesIntended = Array.isArray(body.branch_ids) || Array.isArray(body.branches) || isAssigningSuperAdmin;
     const explicitClearRoles = body._clear_roles === true || body.clear_roles === true;
     const explicitClearBranches = body._clear_branches === true || body.clear_branches === true;
 
