@@ -116,6 +116,20 @@ async function ping(req, res, next) {
   }
 }
 
+// Dispara los scans del cron a demanda. Útil para testear sin esperar 10min.
+async function runScansNow(req, res, next) {
+  try {
+    const results = { cash: null, transfers: null };
+    try { await svc.scanLongOpenCashRegisters(); results.cash = "ok"; }
+    catch (e) { results.cash = e?.message || "error"; }
+    try { await svc.scanPendingTransfers(); results.transfers = "ok"; }
+    catch (e) { results.transfers = e?.message || "error"; }
+    return res.json({ ok: true, results });
+  } catch (e) {
+    next(e);
+  }
+}
+
 async function listLogs(req, res, next) {
   try {
     const limit = Number(req.query?.limit || 100);
@@ -139,4 +153,5 @@ module.exports = {
   testSend,
   ping,
   listLogs,
+  runScansNow,
 };
