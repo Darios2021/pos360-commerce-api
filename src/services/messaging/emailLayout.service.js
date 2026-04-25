@@ -54,7 +54,10 @@ async function loadBrandingFromDb() {
     }
   } catch (_) {}
 
-  // shop_links activos
+  // shop_links activos. Filtramos kinds tipo "*_post" / "*_video" / "*_reel"
+  // porque esos son referencias a posts individuales del shop, no perfiles
+  // de redes sociales. Para el footer del email queremos solo los perfiles
+  // (instagram, facebook, whatsapp, etc.).
   let links = [];
   try {
     const [rows] = await sequelize.query(
@@ -62,10 +65,35 @@ async function loadBrandingFromDb() {
        WHERE is_active = 1
        ORDER BY sort_order ASC, id ASC`
     );
-    links = rows || [];
+    const seenKinds = new Set();
+    for (const r of rows || []) {
+      const k = String(r.kind || "").toLowerCase().trim();
+      // Ignorar kinds que apuntan a contenido individual (no a perfiles).
+      if (/(_post|_video|_reel|_story|_short)$/i.test(k)) continue;
+      // Deduplicar: solo el primer link por kind aparece en el footer.
+      if (seenKinds.has(k)) continue;
+      seenKinds.add(k);
+      links.push(r);
+    }
   } catch (_) {}
 
-  return { name, logoUrl, primary, secondary, links };
+  // branding_assets: íconos custom subidos por el admin (override del default).
+  // Map kind → URL del PNG. Si existe, el email lo usa en vez de la
+  // representación con iniciales coloreadas.
+  let customIcons = {};
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT kind, url FROM branding_assets`
+    );
+    for (const r of rows || []) {
+      const k = String(r.kind || "").toLowerCase().trim();
+      if (k && r.url) customIcons[k] = r.url;
+    }
+  } catch (_) {
+    // Tabla puede no existir todavía si no se sincronizó.
+  }
+
+  return { name, logoUrl, primary, secondary, links, customIcons };
 }
 
 async function getDbBranding() {
@@ -150,6 +178,9 @@ async function getBranding() {
       const k = String(l.kind || "").toLowerCase();
       return !["website", "instagram", "facebook", "whatsapp"].includes(k);
     }),
+
+    // Íconos custom subidos por el admin (override de las iniciales coloreadas).
+    customIcons: db.customIcons || {},
   };
 }
 
@@ -160,84 +191,76 @@ function normalizeHex(v, fallback) {
   return /^#[0-9a-fA-F]{6}$/.test(hex) ? hex.toLowerCase() : fallback;
 }
 
-// Mapeo de "kind" → ícono SVG inline. Usamos SVG inline (data: URI no funciona
-// bien en Gmail; los SVGs externos sí). Los íconos vienen de simpleicons.org
-// que es un CDN público con SVGs de marca consistentes y monocromos. La key
-// es el slug que usa simpleicons (ej: "instagram", "facebook", "whatsapp").
+// Mapeo de redes sociales conocidas. Cada una tiene:
+//   - label: texto a mostrar
+//   - color: hex sin # (color de marca)
+//   - symbol: caracter Unicode que representa la red. Usamos símbolos en vez
+//     de imágenes externas porque algunos clientes (Outlook, Gmail con
+//     imágenes bloqueadas) no las cargan. Los caracteres Unicode SIEMPRE se
+//     renderizan, y combinados con el color de marca quedan profesionales.
+//   - urlBuilder: arma la URL final desde el valor configurado.
 //
-// Para que se vean bien en clientes que sí cargan SVG, los pintamos del color
-// primario del negocio. Outlook clásico no muestra SVG, así que el alt text
-// sirve de fallback ("Instagram", "Facebook", etc.).
+// Los símbolos elegidos son visualmente reconocibles en cualquier cliente:
+// usamos la inicial de cada red en mayúscula sobre un círculo del color de
+// marca. Es la opción más robusta para email cross-cliente.
 const SOCIAL_ICONS = {
-  instagram: { slug: "instagram", label: "Instagram", color: "E4405F", urlBuilder: (v) =>
+  instagram: { label: "Instagram", color: "E4405F", initial: "IG", urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://instagram.com/${String(v).replace(/^@/, "")}` },
-  facebook:  { slug: "facebook",  label: "Facebook",  color: "1877F2", urlBuilder: (v) =>
+  facebook:  { label: "Facebook",  color: "1877F2", initial: "f",  urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://facebook.com/${v}` },
-  whatsapp:  { slug: "whatsapp",  label: "WhatsApp",  color: "25D366", urlBuilder: (v) =>
+  whatsapp:  { label: "WhatsApp",  color: "25D366", initial: "WA", urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://wa.me/${String(v).replace(/[^\d]/g, "")}` },
-  twitter:   { slug: "x",         label: "X (Twitter)", color: "000000", urlBuilder: (v) =>
+  twitter:   { label: "Twitter", color: "000000", initial: "X",  urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://x.com/${String(v).replace(/^@/, "")}` },
-  x:         { slug: "x",         label: "X",         color: "000000", urlBuilder: (v) =>
+  x:         { label: "X",         color: "000000", initial: "X",  urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://x.com/${String(v).replace(/^@/, "")}` },
-  tiktok:    { slug: "tiktok",    label: "TikTok",    color: "000000", urlBuilder: (v) =>
+  tiktok:    { label: "TikTok",    color: "000000", initial: "TT", urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://tiktok.com/@${String(v).replace(/^@/, "")}` },
-  youtube:   { slug: "youtube",   label: "YouTube",   color: "FF0000", urlBuilder: (v) => v },
-  linkedin:  { slug: "linkedin",  label: "LinkedIn",  color: "0A66C2", urlBuilder: (v) => v },
-  telegram:  { slug: "telegram",  label: "Telegram",  color: "26A5E4", urlBuilder: (v) =>
+  youtube:   { label: "YouTube",   color: "FF0000", initial: "YT", urlBuilder: (v) => v },
+  linkedin:  { label: "LinkedIn",  color: "0A66C2", initial: "in", urlBuilder: (v) => v },
+  telegram:  { label: "Telegram",  color: "26A5E4", initial: "TG", urlBuilder: (v) =>
     /^https?:/i.test(v) ? v : `https://t.me/${String(v).replace(/^@/, "")}` },
-  email:     { slug: "gmail",     label: "Email",     color: "EA4335", urlBuilder: (v) =>
+  email:     { label: "Email",     color: "EA4335", initial: "@",  urlBuilder: (v) =>
     v.startsWith("mailto:") ? v : `mailto:${v}` },
-  website:   { slug: "googlechrome", label: "Sitio web", color: "1f2937", urlBuilder: (v) => v },
-  spotify:   { slug: "spotify",   label: "Spotify",   color: "1DB954", urlBuilder: (v) => v },
-  github:    { slug: "github",    label: "GitHub",    color: "181717", urlBuilder: (v) => v },
+  website:   { label: "Sitio web", color: null,     initial: "W",  urlBuilder: (v) => v },
+  spotify:   { label: "Spotify",   color: "1DB954", initial: "♫",  urlBuilder: (v) => v },
+  github:    { label: "GitHub",    color: "181717", initial: "Gh", urlBuilder: (v) => v },
 };
-
-function iconUrl(slug, color) {
-  // simpleicons.org devuelve un SVG monocromo del logo de marca.
-  return `https://cdn.simpleicons.org/${encodeURIComponent(slug)}/${encodeURIComponent(color)}`;
-}
 
 function buildSocialLinks(b) {
   const links = [];
+  const customIcons = b.customIcons || {};
 
-  // Orden visual deseado: WhatsApp, Instagram, Facebook, web, otros.
-  const ordered = [
-    { kind: "whatsapp",  value: b.whatsapp },
-    { kind: "instagram", value: b.instagram },
-    { kind: "facebook",  value: b.facebook },
-    { kind: "website",   value: b.website },
-  ];
-  for (const it of ordered) {
-    if (!it.value) continue;
-    const map = SOCIAL_ICONS[it.kind];
-    if (!map) continue;
+  function pushLink(kind, rawValue, labelOverride) {
+    if (!rawValue) return;
+    const map = SOCIAL_ICONS[kind];
+    if (!map) return;
     links.push({
-      url: map.urlBuilder(it.value),
-      label: map.label,
-      icon: iconUrl(map.slug, map.color),
+      kind,
+      url: map.urlBuilder(rawValue),
+      label: labelOverride || map.label,
+      color: map.color || (b.primary ? b.primary.replace(/^#/, "") : "1f2937"),
+      initial: map.initial,
+      customIconUrl: customIcons[kind] || null,  // si el admin subió PNG, lo usamos
     });
   }
 
-  // Links extra de shop_links (kinds menos comunes).
+  // Orden visual deseado: WhatsApp primero (más usado), luego redes.
+  pushLink("whatsapp",  b.whatsapp);
+  pushLink("instagram", b.instagram);
+  pushLink("facebook",  b.facebook);
+  pushLink("website",   b.website);
+
+  // Links extra de shop_links (kinds reconocidos en SOCIAL_ICONS).
   for (const l of b.extraLinks || []) {
     const k = String(l.kind || "").toLowerCase();
-    const map = SOCIAL_ICONS[k];
-    if (map) {
-      links.push({
-        url: map.urlBuilder(l.url),
-        label: l.label || map.label,
-        icon: iconUrl(map.slug, map.color),
-      });
-    } else {
-      // Genérico: usa initial de la kind con color neutro.
-      links.push({
-        url: l.url,
-        label: l.label || l.kind || "Link",
-        icon: iconUrl("link", "6b7280"),
-      });
+    if (SOCIAL_ICONS[k]) {
+      pushLink(k, l.url, l.label);
     }
   }
-  return links;
+
+  // Limitar a 6 íconos para que el footer no se desborde.
+  return links.slice(0, 6);
 }
 
 /**
@@ -260,22 +283,37 @@ async function wrap({ body, subject = "", previewText = "" }) {
   const FONT_STACK = `-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Helvetica,Arial,sans-serif`;
 
   const socials = buildSocialLinks(b);
+  // Render: si el admin subió un PNG custom desde Branding (branding_assets),
+  // usamos esa imagen. Si no, mostramos un círculo del color de marca con
+  // las iniciales en blanco — más feo pero garantizado para TODOS los
+  // clientes de email (no requiere cargar imágenes externas).
+  function renderIconCell(l) {
+    const icon = l.customIconUrl
+      ? `<img src="${escHtml(l.customIconUrl)}" alt="${escHtml(l.label)}" width="36" height="36"
+              style="border:0;display:block;border-radius:8px;"/>`
+      : `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+           <tr>
+             <td align="center" valign="middle"
+                 style="width:36px;height:36px;background:#${l.color};border-radius:50%;color:#ffffff;font-family:${FONT_STACK};font-size:13px;font-weight:800;line-height:36px;letter-spacing:0;text-align:center;">
+               ${escHtml(l.initial)}
+             </td>
+           </tr>
+         </table>`;
+
+    return `<td align="center" valign="top" style="padding:0 10px;">
+      <a href="${escHtml(l.url)}" target="_blank" rel="noopener"
+         style="display:inline-block;text-decoration:none;font-family:${FONT_STACK};color:#6b7280;">
+        ${icon}
+        <div style="margin-top:6px;font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.2px;">
+          ${escHtml(l.label)}
+        </div>
+      </a>
+    </td>`;
+  }
+
   const socialsRow = socials.length
     ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
-         <tr>
-           ${socials
-             .map(
-               (l) => `<td align="center" style="padding:0 8px;">
-                 <a href="${escHtml(l.url)}" target="_blank" rel="noopener"
-                    style="display:inline-block;text-decoration:none;color:#6b7280;font-family:${FONT_STACK};font-size:11px;font-weight:600;line-height:1;">
-                   <img src="${escHtml(l.icon)}" alt="${escHtml(l.label)}" width="32" height="32"
-                        style="border:0;display:block;margin:0 auto 6px;"/>
-                   ${escHtml(l.label)}
-                 </a>
-               </td>`
-             )
-             .join("")}
-         </tr>
+         <tr>${socials.map(renderIconCell).join("")}</tr>
        </table>`
     : "";
 

@@ -80,6 +80,14 @@ try {
   console.log("⚠️ MessageLog no cargado:", e?.message);
 }
 
+// ===== Branding: íconos custom y assets reutilizables =====
+let BrandingAsset = null;
+try {
+  BrandingAsset = require("./BrandingAsset")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ BrandingAsset no cargado:", e?.message);
+}
+
 // ===== PAYMENT METHOD =====
 let PaymentMethod = null;
 try {
@@ -583,6 +591,9 @@ const models = {
   // CRM
   MessageTemplate,
   MessageLog,
+
+  // Branding
+  BrandingAsset,
 
   // Fiscal admin
   FiscalConfig,

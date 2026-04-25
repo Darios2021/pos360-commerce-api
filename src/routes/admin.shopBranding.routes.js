@@ -40,4 +40,9 @@ router.post("/branding/logo", upload.single("file"), ctrl.uploadLogo);
 router.post("/branding/favicon", upload.single("file"), ctrl.uploadFavicon);
 router.post("/branding/og-image", upload.single("file"), ctrl.uploadOgImage);
 
+// Íconos custom de redes sociales (CRM email).
+router.get("/branding/social-icons", ctrl.listSocialIcons);
+router.post("/branding/social-icons/:kind", upload.single("file"), ctrl.uploadSocialIcon);
+router.delete("/branding/social-icons/:kind", ctrl.deleteSocialIcon);
+
 module.exports = router;
