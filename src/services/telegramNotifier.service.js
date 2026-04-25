@@ -149,6 +149,7 @@ async function ensureTables() {
       alert_shop_new_order TINYINT(1) NOT NULL DEFAULT 0,
       alert_transfer_dispatched TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_pending TINYINT(1) NOT NULL DEFAULT 1,
+      alert_transfer_received TINYINT(1) NOT NULL DEFAULT 1,
       thresholds TEXT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -185,6 +186,7 @@ async function ensureTables() {
   const newCols = [
     { name: "alert_transfer_dispatched", ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_transfer_pending",    ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_transfer_received",   ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
   ];
   for (const c of newCols) {
     try {
@@ -225,7 +227,7 @@ async function saveConfig(patch = {}) {
     "alert_cash_overtime", "alert_cash_big_out",
     "alert_stock_zero", "alert_stock_low", "alert_stock_negative",
     "alert_stock_big_adjust", "alert_shop_new_order",
-    "alert_transfer_dispatched", "alert_transfer_pending",
+    "alert_transfer_dispatched", "alert_transfer_pending", "alert_transfer_received",
     "thresholds",
   ];
 
@@ -918,6 +920,90 @@ async function notifyTransferDispatched({ transfer_id }) {
   }
 }
 
+async function notifyTransferReceived({ transfer_id }) {
+  try {
+    if (!transfer_id) return;
+    const cfg = await getConfig();
+    console.log(`[notifyTransferReceived] transfer=${transfer_id} enabled=${cfg?.enabled} toggle=${cfg?.alert_transfer_received}`);
+    if (!cfg?.enabled || !cfg.alert_transfer_received) return;
+
+    const { StockTransfer, StockTransferItem, Warehouse, Branch, User, Product } = require("../models");
+    if (!StockTransfer) return;
+
+    const tr = await StockTransfer.findByPk(transfer_id, {
+      include: [
+        { model: Warehouse, as: "fromWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
+        { model: Warehouse, as: "toWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
+        { model: Branch, as: "toBranch", required: false },
+        {
+          model: StockTransferItem, as: "items", required: false,
+          include: Product ? [{ model: Product, as: "product", required: false, attributes: ["id", "name", "sku", "code"] }] : [],
+        },
+        { model: User, as: "receiver", required: false, attributes: ["id", "first_name", "last_name", "username", "email"] },
+      ],
+    });
+    if (!tr) return;
+
+    const fromName = tr.fromWarehouse?.branch?.name || tr.fromWarehouse?.name || "—";
+    const toName = tr.toBranch?.name || tr.toWarehouse?.branch?.name || tr.toWarehouse?.name || "—";
+    const itemsArr = Array.isArray(tr.items) ? tr.items : [];
+
+    const userName = (u) => {
+      if (!u) return "—";
+      const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+      return full || u.username || u.email || `Usuario #${u.id}`;
+    };
+
+    const isPartial = String(tr.status).toLowerCase() === "partial";
+
+    // Calcular discrepancias si hay.
+    const diffs = [];
+    for (const it of itemsArr) {
+      const sent = Number(it.qty_sent || 0);
+      const received = Number(it.qty_received || 0);
+      if (sent !== received) {
+        diffs.push({ item: it, sent, received, delta: received - sent });
+      }
+    }
+
+    const lines = [
+      `${isPartial ? "⚠️" : "✅"} <b>${isPartial ? "Derivación recibida con diferencias" : "Derivación recibida"}</b>`,
+      `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
+      `📤 De: ${escapeHtml(fromName)}`,
+      `📥 A: ${escapeHtml(toName)}`,
+      { k: "Items", v: `${itemsArr.length}` },
+      { k: "Recibida por", v: escapeHtml(userName(tr.receiver)) },
+    ];
+
+    if (isPartial && diffs.length) {
+      lines.push("");
+      lines.push("<b>⚠️ Diferencias detectadas:</b>");
+      for (const d of diffs.slice(0, 10)) {
+        const pname = d.item.product?.name || `Producto #${d.item.product_id}`;
+        const psku = d.item.product?.sku || d.item.product?.code || "";
+        const skuTag = psku ? ` <code>${escapeHtml(psku)}</code>` : "";
+        const sign = d.delta < 0 ? "-" : "+";
+        lines.push(`• ${escapeHtml(pname)}${skuTag}: enviado ${d.sent} / recibido ${d.received} (<b>${sign}${Math.abs(d.delta)}</b>)`);
+      }
+      if (diffs.length > 10) {
+        lines.push(`<i>… +${diffs.length - 10} diferencia(s) más</i>`);
+      }
+    }
+
+    await sendAlert({
+      code: "TRANSFER_RECEIVED",
+      title: isPartial ? "Derivación recibida con diferencias" : "Derivación recibida",
+      severity: isPartial ? "medium" : "low",
+      toggleKey: "alert_transfer_received",
+      reference_type: "stock_transfer",
+      reference_id: tr.id,
+      lines,
+    });
+  } catch (e) {
+    console.warn("[telegram.notifyTransferReceived] error:", e?.message);
+  }
+}
+
 // Cron: derivaciones despachadas hace +24h sin recibir.
 async function scanPendingTransfers() {
   try {
@@ -1108,6 +1194,7 @@ module.exports = {
   notifyStockChange,
   notifyCashRegisterClose,
   notifyTransferDispatched,
+  notifyTransferReceived,
   scanLongOpenCashRegisters,
   scanPendingTransfers,
   scanZeroStockProducts,

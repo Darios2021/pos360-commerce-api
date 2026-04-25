@@ -211,7 +211,7 @@ async function receiveTransfer(transfer_id, { receptions = [], received_by }) {
   if (!receptions.length && (transfer.items?.length ?? 0) > 0)
     throw Object.assign(new Error("Debe enviar las cantidades recibidas"), { status: 400 });
 
-  return sequelize.transaction(async (t) => {
+  const result = await sequelize.transaction(async (t) => {
     const movement = await StockMovement.create({
       type: "in",
       warehouse_id: transfer.to_warehouse_id,
@@ -271,6 +271,17 @@ async function receiveTransfer(transfer_id, { receptions = [], received_by }) {
 
     return getTransferById(transfer_id, t);
   });
+
+  // Telegram: alerta de recepción.
+  try {
+    console.log(`[stockTransfer.receiveTransfer] disparando notifyTransferReceived para transfer=${result.id}`);
+    const tg = require("./telegramNotifier.service");
+    tg.notifyTransferReceived({ transfer_id: result.id }).catch((e) =>
+      console.warn("[stockTransfer.receiveTransfer] notifyTransferReceived error:", e?.message)
+    );
+  } catch (e) {
+    console.warn("[stockTransfer.receiveTransfer] no se pudo cargar notifier:", e?.message);
+  }
 
   // Notificar a la sucursal ORIGEN que su envío fue recepcionado
   try {
