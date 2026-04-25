@@ -532,7 +532,17 @@ async function backfill(req, res, next) {
       // Match estrictamente por el identificador del grupo:
       let row = null;
       if (groupBy === "doc") {
-        row = await Customer.findOne({ where: { doc_number: sample.customer_doc } });
+        // Buscamos tanto por el formato crudo como por solo dígitos para
+        // capturar customers viejos que se guardaron con prefijo "DNI N°...".
+        const cleanDigits = normalizeDoc(sample.customer_doc);
+        row = await Customer.findOne({
+          where: {
+            [Op.or]: [
+              { doc_number: sample.customer_doc },
+              ...(cleanDigits ? [{ doc_number: cleanDigits }] : []),
+            ],
+          },
+        });
       } else if (groupBy === "phone") {
         row = await Customer.findOne({ where: { phone: sample.customer_phone } });
       } else if (groupBy === "email") {
@@ -553,12 +563,26 @@ async function backfill(req, res, next) {
       }
 
       if (!row && !dryRun) {
+        // Limpiar el doc_number: en sales a veces se guarda con prefijo
+        // ("DNI 23682047") porque el formulario POS concatena el doc_type.
+        // En la tabla customers queremos solo el número (que ya tenemos
+        // separado en doc_type), para que las búsquedas y comparaciones
+        // funcionen.
+        let cleanDocNumber = null;
+        if (sample.customer_doc) {
+          const raw = String(sample.customer_doc).trim();
+          // Si el raw contiene letras (ej: "DNI 23682047"), nos quedamos
+          // solo con la parte numérica. Si es puro número, lo dejamos.
+          const digits = raw.replace(/\D/g, "");
+          cleanDocNumber = digits || raw;
+        }
+
         row = await Customer.create({
           display_name: display.slice(0, 200),
           first_name: null,
           last_name: null,
           doc_type: sample.customer_doc_type || null,
-          doc_number: sample.customer_doc || null,
+          doc_number: cleanDocNumber,
           phone: sample.customer_phone || null,
           email: sample.customer_email ? String(sample.customer_email).toLowerCase() : null,
           address: sample.customer_address || null,
