@@ -16,6 +16,7 @@ router.get("/status",    ctrl.status);
 router.post("/preview",  ctrl.preview);
 router.post("/test-email", ctrl.testEmail);
 router.post("/preview-layout", ctrl.previewLayout);
+router.post("/preview-whatsapp", ctrl.previewWhatsApp);
 
 // Envíos
 router.post("/send",       ctrl.sendOne);

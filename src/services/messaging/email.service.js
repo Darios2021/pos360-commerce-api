@@ -37,10 +37,78 @@ function isConfigured() {
   );
 }
 
+// El email del FROM debe coincidir con el SMTP_USER (la casilla autenticada).
+// Si difieren SPF/DKIM rebotan en Gmail/Outlook → SPAM. Forzamos el del USER
+// y dejamos SMTP_FROM_EMAIL como override sólo si tiene el mismo dominio.
+function getFromEmail() {
+  const user = String(process.env.SMTP_USER || "").trim().toLowerCase();
+  const fromEnv = String(process.env.SMTP_FROM_EMAIL || "").trim().toLowerCase();
+  if (!fromEnv) return user;
+  // Si SMTP_FROM_EMAIL tiene otro dominio → ignoramos y usamos el del USER
+  // para evitar SPF fail (Hostinger sólo firma DKIM con el dominio del User).
+  const userDomain = user.split("@")[1] || "";
+  const fromDomain = fromEnv.split("@")[1] || "";
+  if (userDomain && fromDomain && userDomain !== fromDomain) {
+    console.warn(
+      `[email.service] SMTP_FROM_EMAIL (${fromEnv}) tiene otro dominio que SMTP_USER ` +
+      `(${user}). Usando ${user} para preservar SPF/DKIM.`
+    );
+    return user;
+  }
+  return fromEnv;
+}
+
+function getFromName() {
+  return process.env.SMTP_FROM_NAME || process.env.BUSINESS_NAME || "Notificaciones";
+}
+
 function getFrom() {
-  const name  = process.env.SMTP_FROM_NAME  || process.env.BUSINESS_NAME || "Notificaciones";
-  const email = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
-  return `"${name}" <${email}>`;
+  return `"${getFromName()}" <${getFromEmail()}>`;
+}
+
+// Genera un Message-ID RFC-compliant con el dominio del FROM. Sin esto algunos
+// SMTP relays generan IDs raros y los filtros bajan score.
+function generateMessageId() {
+  const fromEmail = getFromEmail();
+  const domain = (fromEmail.split("@")[1] || "localhost").trim();
+  const rand = Math.random().toString(36).slice(2, 11);
+  const ts = Date.now().toString(36);
+  return `<${ts}.${rand}@${domain}>`;
+}
+
+// Headers anti-SPAM. El header crítico es `List-Unsubscribe` con one-click —
+// Gmail desde Feb 2024 castiga fuerte a remitentes que no lo tienen, sobre
+// todo en envíos masivos. RFC 8058.
+//
+// Si el negocio expone una URL de unsubscribe (ej. desde el shop público),
+// la podés setear vía CRM_UNSUBSCRIBE_URL. Si no, usamos un mailto.
+function getDeliverabilityHeaders({ isBulk = false } = {}) {
+  const fromEmail = getFromEmail();
+  const unsubscribeUrl = String(process.env.CRM_UNSUBSCRIBE_URL || "").trim();
+  const unsubscribeMailto = String(process.env.CRM_UNSUBSCRIBE_MAILTO || fromEmail).trim();
+
+  const parts = [];
+  if (unsubscribeMailto) parts.push(`<mailto:${unsubscribeMailto}?subject=unsubscribe>`);
+  if (unsubscribeUrl) parts.push(`<${unsubscribeUrl}>`);
+
+  const headers = {
+    "X-Mailer": "POS360-CRM",
+    "X-Auto-Response-Suppress": "OOF, AutoReply",
+  };
+
+  if (parts.length) {
+    headers["List-Unsubscribe"] = parts.join(", ");
+    headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+  }
+
+  // Para envíos a >1 destinatario, marcamos como bulk para que filtros
+  // anti-loop no lo confundan con tráfico transaccional 1:1.
+  if (isBulk) {
+    headers["Precedence"] = "bulk";
+    headers["Auto-Submitted"] = "auto-generated";
+  }
+
+  return headers;
 }
 
 function getTransporter() {
@@ -105,11 +173,14 @@ async function ping() {
  *                                        destacados estilo Oncity). El layout
  *                                        los renderiza en grid 2-col.
  * @param {boolean}[params.includeLocation=true] mostrar bloque ubicación.
+ * @param {boolean}[params.isBulk=false]  marca el envío como bulk para sumar
+ *                                         headers Precedence/Auto-Submitted.
  */
 async function sendEmail({
   to, subject, body, toName, replyTo,
   useLayout = true, previewText,
   signature = null, promoBlocks = null, includeLocation = true,
+  isBulk = false,
 }) {
   if (!isConfigured()) {
     return {
@@ -158,10 +229,15 @@ async function sendEmail({
   }
 
   try {
+    const messageId = generateMessageId();
+    const headers = getDeliverabilityHeaders({ isBulk });
+
     const info = await transport.sendMail({
       from: getFrom(),
       to: toName ? `"${toName}" <${to}>` : to,
       subject: subject || "(sin asunto)",
+      messageId,
+      headers,
       ...(html ? { html } : {}),
       ...(text ? { text } : {}),
       replyTo: replyTo || process.env.SMTP_REPLY_TO || undefined,

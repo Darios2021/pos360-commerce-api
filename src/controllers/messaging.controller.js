@@ -25,6 +25,7 @@ const tplSvc = require("../services/messaging/templates.service");
 const emailSvc = require("../services/messaging/email.service");
 const waSvc = require("../services/messaging/whatsapp.service");
 const layoutSvc = require("../services/messaging/emailLayout.service");
+const waFormatter = require("../services/messaging/whatsappFormatter.service");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -388,9 +389,18 @@ async function sendOne(req, res, next) {
         includeLocation,
       });
     } else {
+      const enriched = (promoBlocks?.length || signature || includeLocation)
+        ? await waFormatter.formatRichMessage({
+            body: rendered.body,
+            customer: ctxData.customer,
+            promoBlocks,
+            signature,
+            includeLocation,
+          })
+        : rendered.body;
       result = await waSvc.sendWhatsApp({
         to,
-        body: rendered.body,
+        body: enriched,
         preferLink,
       });
     }
@@ -512,9 +522,22 @@ async function sendBulk(req, res, next) {
             signature: bulkSignature,
             promoBlocks: bulkPromos,
             includeLocation: bulkIncludeLocation,
+            isBulk: ids.length > 1,
           });
         } else {
-          result = await waSvc.sendWhatsApp({ to, body: rendered.body, preferLink });
+          // WhatsApp: si hay promos / firma / pedimos ubicación, formateamos
+          // el mensaje rico (markdown WhatsApp + emojis + separadores) en
+          // lugar de mandar solo el body crudo.
+          const enriched = (bulkPromos?.length || bulkSignature || bulkIncludeLocation)
+            ? await waFormatter.formatRichMessage({
+                body: rendered.body,
+                customer: ctxData.customer,
+                promoBlocks: bulkPromos,
+                signature: bulkSignature,
+                includeLocation: bulkIncludeLocation,
+              })
+            : rendered.body;
+          result = await waSvc.sendWhatsApp({ to, body: enriched, preferLink });
         }
 
         await log.update({
@@ -679,6 +702,43 @@ async function testEmail(req, res, next) {
 // iframe / nueva pestaña. Útil para diseñar plantillas viendo cómo van a
 // llegar realmente.
 // ============================================================
+// Preview del mensaje formateado de WhatsApp (texto plano con markdown
+// WhatsApp). El frontend lo muestra en un mockup tipo burbuja.
+async function previewWhatsApp(req, res, next) {
+  try {
+    if (!gateAdmin(req, res)) return;
+
+    const body = String(req.body?.body || "").trim();
+    const includeSignature = req.body?.include_signature;
+    const includeLocation = req.body?.include_location !== false;
+    const customer_id = toInt(req.body?.customer_id, 0);
+
+    let customer = null;
+    if (customer_id) {
+      const data = await loadCustomerWithStats(customer_id);
+      customer = data?.customer || null;
+    } else {
+      // Demo: cliente ficticio para que el saludo aparezca personalizado.
+      customer = { first_name: "Ana", display_name: "Ana López" };
+    }
+
+    const signature = await loadUserSignature(toInt(req.user?.id, 0), {
+      force: typeof includeSignature === "boolean" ? includeSignature : null,
+    });
+    const promoBlocks = await loadPromoBlocksByIds(req.body?.promo_block_ids);
+
+    const message = await waFormatter.formatRichMessage({
+      body,
+      customer,
+      promoBlocks,
+      signature,
+      includeLocation,
+    });
+
+    return res.json({ ok: true, data: { message } });
+  } catch (e) { next(e); }
+}
+
 async function previewLayout(req, res) {
   if (!gateAdmin(req, res)) return;
   const subject = s(req.body?.subject) || "Vista previa";
@@ -729,4 +789,5 @@ module.exports = {
   listLogsByCustomer,
   testEmail,
   previewLayout,
+  previewWhatsApp,
 };
