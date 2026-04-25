@@ -8,11 +8,23 @@ function toInt(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
-function isAdmin(req) {
-  const roles = (req.access?.roles || req.user?.roles || []).map((r) =>
-    typeof r === "string" ? r : r?.name || r?.code || ""
+// Roles del usuario (case-insensitive). Soporta string/obj.
+function rolesOf(req) {
+  return (req.access?.roles || req.user?.roles || []).map((r) =>
+    String(typeof r === "string" ? r : r?.name || r?.code || "").toLowerCase().trim()
   );
-  return roles.some((r) => ["super_admin","admin","superadmin"].includes(r.toLowerCase()));
+}
+
+// super_admin = único rol que ve TODAS las sucursales.
+// Cualquier otro usuario (incluido un "admin" de sucursal) queda scopeado a su branch.
+function isSuperAdmin(req) {
+  if (req.ctx?.isSuperAdmin === true) return true;
+  return rolesOf(req).some((r) => ["super_admin", "superadmin"].includes(r));
+}
+
+// Solo admin / super_admin pueden eliminar derivaciones.
+function canDeleteTransfer(req) {
+  return rolesOf(req).some((r) => ["super_admin", "superadmin", "admin"].includes(r));
 }
 
 function handleError(res, err) {
@@ -26,9 +38,19 @@ async function list(req, res) {
     const { status, page = 1, limit = 20 } = req.query;
     const branchId   = toInt(req.ctx?.branchId || req.user?.branch_id, 0);
     const warehouseId = toInt(req.ctx?.warehouseId, 0);
-    const role = isAdmin(req) ? "admin" : "user";
+    const allowedBranchIds = Array.isArray(req.ctx?.allowedBranchIds)
+      ? req.ctx.allowedBranchIds.map((x) => toInt(x, 0)).filter(Boolean)
+      : [];
 
-    const data = await svc.listTransfers({ branchId, warehouseId, status, role, page, limit });
+    const data = await svc.listTransfers({
+      branchId,
+      warehouseId,
+      allowedBranchIds,
+      status,
+      isSuperAdmin: isSuperAdmin(req),
+      page,
+      limit,
+    });
     return res.json({ ok: true, ...data });
   } catch (err) { handleError(res, err); }
 }
@@ -39,13 +61,28 @@ async function getById(req, res) {
     const transfer = await svc.getTransferById(toInt(req.params.id));
     if (!transfer) return res.status(404).json({ ok: false, message: "Derivación no encontrada" });
 
-    // Sucursales solo ven sus propias derivaciones
-    if (!isAdmin(req)) {
+    // Sucursales solo ven sus propias derivaciones (super_admin ve todo)
+    if (!isSuperAdmin(req)) {
       const branchId = toInt(req.ctx?.branchId || req.user?.branch_id, 0);
       const warehouseId = toInt(req.ctx?.warehouseId, 0);
-      const isOwner = toInt(transfer.from_warehouse_id) === warehouseId ||
-                      toInt(transfer.to_branch_id)      === branchId;
-      if (!isOwner) return res.status(403).json({ ok: false, message: "Sin acceso a esta derivación" });
+      const allowedBranchIds = Array.isArray(req.ctx?.allowedBranchIds)
+        ? req.ctx.allowedBranchIds.map((x) => toInt(x, 0)).filter(Boolean)
+        : [];
+
+      const fromBranchId = toInt(transfer.fromWarehouse?.branch_id, 0);
+      const toBranchId   = toInt(transfer.to_branch_id, 0);
+
+      const matchesActive =
+        toInt(transfer.from_warehouse_id) === warehouseId ||
+        fromBranchId === branchId ||
+        toBranchId === branchId;
+      const matchesAllowed =
+        (fromBranchId && allowedBranchIds.includes(fromBranchId)) ||
+        (toBranchId   && allowedBranchIds.includes(toBranchId));
+
+      if (!matchesActive && !matchesAllowed) {
+        return res.status(403).json({ ok: false, message: "Sin acceso a esta derivación" });
+      }
     }
 
     return res.json({ ok: true, transfer });
@@ -111,4 +148,19 @@ async function cancel(req, res) {
   } catch (err) { handleError(res, err); }
 }
 
-module.exports = { list, getById, create, update, dispatch, receive, cancel };
+// DELETE /stock/transfers/:id  (hard-delete, solo admin/super_admin)
+async function remove(req, res) {
+  try {
+    if (!canDeleteTransfer(req)) {
+      return res.status(403).json({
+        ok: false,
+        message: "Solo administradores pueden eliminar derivaciones.",
+      });
+    }
+    const deleted_by = toInt(req.user?.id || req.user?.sub, 0);
+    const result = await svc.deleteTransfer(toInt(req.params.id), { deleted_by });
+    return res.json({ ok: true, ...result });
+  } catch (err) { handleError(res, err); }
+}
+
+module.exports = { list, getById, create, update, dispatch, receive, cancel, remove };

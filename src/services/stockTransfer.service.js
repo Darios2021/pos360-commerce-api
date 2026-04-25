@@ -327,19 +327,110 @@ async function cancelTransfer(transfer_id, { cancelled_by }) {
   return result;
 }
 
+// ─── DELETE (hard) ────────────────────────────────────────────────────────────
+/**
+ * Hard-delete de una derivación.
+ * Estados permitidos:
+ *   - draft     → solo borra (no hubo movimiento de stock)
+ *   - cancelled → solo borra
+ *   - dispatched → restaura stock al depósito origen y borra
+ * Estados bloqueados:
+ *   - received / partial → tirar 422 (la mercadería ya está en destino)
+ */
+async function deleteTransfer(transfer_id, { deleted_by }) {
+  const transfer = await getTransferById(transfer_id);
+  if (!transfer) throw Object.assign(new Error("Derivación no encontrada"), { status: 404 });
+
+  const status = String(transfer.status || "").toLowerCase();
+
+  if (["received", "partial"].includes(status)) {
+    throw Object.assign(
+      new Error("No se puede eliminar una derivación ya recibida. Ajustá el stock manualmente."),
+      { status: 422 }
+    );
+  }
+
+  return sequelize.transaction(async (t) => {
+    // 1) Si está dispatched, revertir el OUT de origen.
+    if (status === "dispatched") {
+      for (const item of transfer.items || []) {
+        const qty = toDecimal(item.qty_sent);
+        if (qty <= 0) continue;
+        await sequelize.query(`
+          INSERT INTO stock_balances (warehouse_id, product_id, qty)
+          VALUES (:wh, :prod, :qty)
+          ON DUPLICATE KEY UPDATE qty = qty + :qty
+        `, {
+          replacements: { wh: transfer.from_warehouse_id, prod: item.product_id, qty },
+          transaction: t,
+        });
+      }
+
+      // 2) Borrar movements + items relacionados a esta transfer.
+      const movements = await StockMovement.findAll({
+        where: {
+          ref_type: { [Op.in]: ["transfer_dispatch", "transfer_receive"] },
+          ref_id: String(transfer.id),
+        },
+        attributes: ["id"],
+        transaction: t,
+      });
+      const movementIds = movements.map((m) => m.id);
+      if (movementIds.length) {
+        await StockMovementItem.destroy({
+          where: { movement_id: { [Op.in]: movementIds } },
+          transaction: t,
+        });
+        await StockMovement.destroy({
+          where: { id: { [Op.in]: movementIds } },
+          transaction: t,
+        });
+      }
+    }
+
+    // 3) Borrar items y la transfer.
+    await StockTransferItem.destroy({ where: { transfer_id }, transaction: t });
+    await StockTransfer.destroy({ where: { id: transfer_id }, transaction: t });
+
+    return { id: transfer_id, deleted: true, restored_stock: status === "dispatched" };
+  });
+}
+
 // ─── LIST ─────────────────────────────────────────────────────────────────────
-async function listTransfers({ branchId, warehouseId, status, role, page = 1, limit = 20 }) {
+// Scope: solo super_admin ve todas las derivaciones del sistema. Cualquier
+// otro usuario (incluido un "admin" de sucursal) queda restringido a las
+// derivaciones que tocan su sucursal activa o las sucursales habilitadas
+// en user_branches (allowedBranchIds).
+async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], status, isSuperAdmin = false, page = 1, limit = 20 }) {
   const where = {};
-  const isAdmin = role === "admin" || role === "super_admin";
 
   if (status) where.status = status;
 
-  // Central ve lo que despachó; sucursal ve lo que le enviaron
-  if (!isAdmin) {
-    where[Op.or] = [
-      { from_warehouse_id: warehouseId },
-      { to_branch_id: branchId },
-    ];
+  if (!isSuperAdmin) {
+    const branchIds = Array.from(new Set([
+      ...(Array.isArray(allowedBranchIds) ? allowedBranchIds : []),
+      branchId,
+    ].map((x) => toInt(x, 0)).filter(Boolean)));
+
+    const ors = [];
+    if (warehouseId) ors.push({ from_warehouse_id: warehouseId });
+    if (branchIds.length) {
+      ors.push({ to_branch_id: { [Op.in]: branchIds } });
+      // origen también puede ser de cualquier sucursal habilitada
+      // (para esto resolvemos sus warehouse ids)
+      const origWhs = await Warehouse.findAll({
+        where: { branch_id: { [Op.in]: branchIds } },
+        attributes: ["id"],
+      });
+      const origWhIds = origWhs.map((w) => toInt(w.id, 0)).filter(Boolean);
+      if (origWhIds.length) ors.push({ from_warehouse_id: { [Op.in]: origWhIds } });
+    }
+
+    if (!ors.length) {
+      // sin contexto de sucursal → no muestra nada (evita filtrado falso-permisivo)
+      return { transfers: [], total: 0, page: toInt(page, 1), limit: toInt(limit, 20) };
+    }
+    where[Op.or] = ors;
   }
 
   const { rows, count } = await StockTransfer.findAndCountAll({
@@ -385,4 +476,4 @@ async function getTransferById(id, transaction) {
 }
 
 module.exports = { createTransfer, updateDraft, dispatchTransfer, receiveTransfer,
-                   cancelTransfer, listTransfers, getTransferById };
+                   cancelTransfer, deleteTransfer, listTransfers, getTransferById };

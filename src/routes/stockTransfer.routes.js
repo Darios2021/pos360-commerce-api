@@ -11,6 +11,7 @@ router.post("/",   ctrl.create);
 // Detalle y edición de draft
 router.get("/:id",    ctrl.getById);
 router.put("/:id",    ctrl.update);
+router.delete("/:id", ctrl.remove);
 
 // Acciones de estado
 router.post("/:id/dispatch", ctrl.dispatch);
