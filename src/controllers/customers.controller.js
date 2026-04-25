@@ -500,25 +500,53 @@ async function backfill(req, res, next) {
     let updatedSales = 0;
     const summary = [];
 
+    // Cuando el nombre del sample es genérico ("Consumidor Final") y el grupo
+    // se identifica por DNI/teléfono, NO usamos ese nombre como display porque
+    // colisionaría con todos los demás Consumidor Final. Generamos un display
+    // único basado en el dato distintivo.
+    function buildBackfillDisplay(sample, key) {
+      const rawName = String(sample.customer_name || "").trim();
+      const normName = normalizeName(rawName);
+      const isGenericName = ["consumidor final", "consumidor", "publico general", ""].includes(normName);
+      if (rawName && !isGenericName) return rawName;
+      if (sample.customer_doc)   return `Cliente DNI ${sample.customer_doc}`;
+      if (sample.customer_phone) return `Cliente Tel ${sample.customer_phone}`;
+      if (sample.customer_email) return `Cliente ${sample.customer_email}`;
+      return `Cliente ${String(key).slice(0, 30)}`;
+    }
+
     for (const [key, g] of groups) {
       const sample = g.sample;
-      const display = sample.customer_name || `Cliente ${key}`;
+      const display = buildBackfillDisplay(sample, key);
 
-      // Buscar customer existente que matchee.
+      // Tipo de identificador del grupo: por qué se está agrupando.
+      // Esto define qué match es legítimo y cuál no, para evitar que dos
+      // grupos distintos terminen pegados al mismo customer (bug anterior:
+      // el match por nombre genérico mezclaba todos los DNI distintos en
+      // el primer customer "Consumidor Final" creado).
+      const groupBy =
+        normalizeDoc(sample.customer_doc) ? "doc" :
+        normalizePhone(sample.customer_phone) ? "phone" :
+        String(sample.customer_email || "").trim().toLowerCase() ? "email" : "name";
+
+      // Match estrictamente por el identificador del grupo:
       let row = null;
-      if (sample.customer_doc) {
+      if (groupBy === "doc") {
         row = await Customer.findOne({ where: { doc_number: sample.customer_doc } });
-      }
-      if (!row && sample.customer_phone) {
+      } else if (groupBy === "phone") {
         row = await Customer.findOne({ where: { phone: sample.customer_phone } });
-      }
-      if (!row) {
-        // Match por nombre normalizado (case-insensitive con LIKE).
+      } else if (groupBy === "email") {
+        row = await Customer.findOne({ where: { email: sample.customer_email.toLowerCase() } });
+      } else {
+        // Solo cuando el grupo se identifica por NOMBRE (sin doc/phone/email)
+        // intentamos matchear por display_name normalizado. Esto evita que
+        // dos clientes con DNI distintos terminen pegados porque ambos se
+        // llaman "Consumidor Final".
         const norm = normalizeName(display);
         if (norm) {
           row = await Customer.findOne({
             where: literal(
-              `LOWER(REPLACE(REPLACE(REPLACE(display_name, 'á','a'),'é','e'),'í','i')) = ${sequelize.escape(norm)}`
+              `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(display_name,'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u')) = ${sequelize.escape(norm)}`
             ),
           });
         }
@@ -532,7 +560,7 @@ async function backfill(req, res, next) {
           doc_type: sample.customer_doc_type || null,
           doc_number: sample.customer_doc || null,
           phone: sample.customer_phone || null,
-          email: sample.customer_email || null,
+          email: sample.customer_email ? String(sample.customer_email).toLowerCase() : null,
           address: sample.customer_address || null,
           customer_type:
             ["CONSUMIDOR_FINAL","RESPONSABLE_INSCRIPTO","MONOTRIBUTO","EXENTO","OTRO"]
@@ -548,7 +576,7 @@ async function backfill(req, res, next) {
       } else if (row) {
         // Si existe pero no tiene email/phone/etc, completar con lo que el sample aporte.
         const patch = {};
-        if (!row.email && sample.customer_email)     patch.email = sample.customer_email;
+        if (!row.email && sample.customer_email)     patch.email = String(sample.customer_email).toLowerCase();
         if (!row.phone && sample.customer_phone)     patch.phone = sample.customer_phone;
         if (!row.address && sample.customer_address) patch.address = sample.customer_address;
         if (!row.doc_number && sample.customer_doc)  patch.doc_number = sample.customer_doc;
