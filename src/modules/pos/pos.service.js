@@ -2,6 +2,7 @@
 // src/modules/pos/pos.service.js
 const { QueryTypes } = require("sequelize");
 const { initPosModels } = require("./pos.models");
+const { trackStockChangeRaw } = require("../../services/stockNotifyHelper");
 
 function toNumber(v, d = 0) {
   const n = Number(v);
@@ -345,6 +346,17 @@ async function createPosSale(payload, ctxUser) {
         }
       );
 
+      // Captura prev antes del UPDATE para alertas de stock.
+      const __prevRows = await sequelize.query(
+        `SELECT qty FROM stock_balances WHERE warehouse_id = :warehouse_id AND product_id = :product_id`,
+        {
+          type: QueryTypes.SELECT,
+          transaction: t,
+          replacements: { warehouse_id: pi.warehouse_id, product_id: pi.product_id },
+        }
+      );
+      const __prevQty = Number(__prevRows?.[0]?.qty || 0);
+
       await sequelize.query(
         `
         UPDATE stock_balances
@@ -360,6 +372,16 @@ async function createPosSale(payload, ctxUser) {
           },
         }
       );
+
+      // Alertas Telegram: post-commit, fire-and-forget.
+      await trackStockChangeRaw({
+        warehouse_id: pi.warehouse_id,
+        product_id: pi.product_id,
+        prev: __prevQty,
+        qty: -Number(pi.quantity || 0),
+        t,
+        source: "pos_sale",
+      });
     }
 
     // 9) Devuelve venta completa

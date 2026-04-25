@@ -697,11 +697,35 @@ async function checkout(req, res) {
 
       // ---- (D') Descontar stock — FIX #3 (2026-04-22) ----
       if (stock_warehouse_id && stockNeeds.length) {
+        let __tg = null;
+        try { __tg = require("../services/stockNotifyHelper"); } catch (_) {}
         for (const sn of stockNeeds) {
+          // Capturar prev antes del UPDATE para alertas de stock.
+          let __prevQty = 0;
+          try {
+            const [r] = await sequelize.query(
+              `SELECT qty FROM stock_balances WHERE warehouse_id = :wid AND product_id = :pid`,
+              { replacements: { wid: stock_warehouse_id, pid: sn.product_id }, transaction: t }
+            );
+            __prevQty = Number(r?.[0]?.qty || 0);
+          } catch (_) {}
+
           await sequelize.query(
             `UPDATE stock_balances SET qty = qty - :qty WHERE warehouse_id = :wid AND product_id = :pid`,
             { replacements: { qty: sn.qty, wid: stock_warehouse_id, pid: sn.product_id }, transaction: t }
           );
+
+          // Alertas Telegram (fire-and-forget post-commit).
+          if (__tg?.trackStockChangeRaw) {
+            await __tg.trackStockChangeRaw({
+              warehouse_id: stock_warehouse_id,
+              product_id: sn.product_id,
+              prev: __prevQty,
+              qty: -Number(sn.qty || 0),
+              t,
+              source: "ecom_checkout",
+            });
+          }
         }
       }
 

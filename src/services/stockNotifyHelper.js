@@ -50,4 +50,40 @@ async function trackStockChange({ sb, prev, qty, t, source = "movement" }) {
   }
 }
 
-module.exports = { trackStockChange };
+// Variante para paths que usan SQL raw (sin instancia Sequelize).
+// El caller pasa prev y qty (delta) manualmente.
+async function trackStockChangeRaw({ warehouse_id, product_id, prev, qty, t, source = "movement" }) {
+  try {
+    if (!product_id) {
+      console.log("[trackStockChangeRaw] sin product_id, skip");
+      return;
+    }
+    const prevN = Number(prev || 0);
+    const deltaN = Number(qty || 0);
+    const nextN = prevN + deltaN;
+
+    console.log(`[trackStockChangeRaw] product=${product_id} wh=${warehouse_id} prev=${prevN} next=${nextN} delta=${deltaN} source=${source}`);
+
+    const tg = require("./telegramNotifier.service");
+    const fire = () => {
+      console.log(`[trackStockChangeRaw] firing notifyStockChange product=${product_id} prev=${prevN} next=${nextN}`);
+      return tg.notifyStockChange({
+        product_id,
+        warehouse_id,
+        prev: prevN,
+        next: nextN,
+        delta: deltaN,
+        source,
+      }).catch((e) => console.warn("[trackStockChangeRaw.fire] error:", e?.message));
+    };
+    if (t && typeof t.afterCommit === "function") {
+      t.afterCommit(fire);
+    } else {
+      fire();
+    }
+  } catch (e) {
+    console.warn("[trackStockChangeRaw] error:", e?.message);
+  }
+}
+
+module.exports = { trackStockChange, trackStockChangeRaw };
