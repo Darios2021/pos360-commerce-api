@@ -20,6 +20,36 @@ const {
   StockMovementItem,
 } = require("../models");
 const { createStockMovement } = require("../services/stock.service");
+const access = require("../utils/accessScope");
+
+// Verifica que un warehouse pertenezca a una sucursal habilitada del usuario.
+// super_admin pasa siempre. Devuelve true si autorizado, o envía 403/400 y false.
+async function authorizeWarehouseAccess(req, res, warehouseId) {
+  if (access.isSuperAdmin(req)) return true;
+  const allowed = access.getAllowedBranchIds(req);
+  if (!allowed.length) {
+    res.status(400).json({
+      ok: false,
+      code: "BRANCH_REQUIRED",
+      message: "No se pudo determinar la sucursal del usuario.",
+    });
+    return false;
+  }
+  const wh = await Warehouse.findByPk(warehouseId, { attributes: ["id", "branch_id"] });
+  if (!wh) {
+    res.status(404).json({ ok: false, code: "WAREHOUSE_NOT_FOUND", message: "Depósito no encontrado." });
+    return false;
+  }
+  if (!allowed.includes(parseInt(wh.branch_id, 10))) {
+    res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN_BRANCH",
+      message: "No podés operar sobre depósitos de otra sucursal.",
+    });
+    return false;
+  }
+  return true;
+}
 
 // =====================
 // Helpers
@@ -61,6 +91,9 @@ exports.getStock = async (req, res) => {
     if (!warehouse_id) {
       return res.status(400).json({ ok: false, code: "WAREHOUSE_REQUIRED", message: "warehouse_id requerido" });
     }
+
+    // Sellado de scope: el depósito debe pertenecer a una sucursal habilitada del usuario.
+    if (!(await authorizeWarehouseAccess(req, res, warehouse_id))) return;
 
     const q = String(req.query.q || "").trim();
     const whereProduct = {};
@@ -166,6 +199,29 @@ exports.initStock = async (req, res) => {
       }
     }
 
+    // Sellado de scope: branch admin / cajero solo pueden init en sus sucursales.
+    if (!access.isSuperAdmin(req)) {
+      const allowed = access.getAllowedBranchIds(req);
+      const wh2 = await Warehouse.findByPk(warehouse_id, { attributes: ["id", "branch_id"], transaction: t });
+      if (!wh2 || !allowed.includes(parseInt(wh2.branch_id, 10))) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "No podés inicializar stock en otra sucursal.",
+        });
+      }
+      // Cajero no debería operar stock manualmente — esto es acción admin.
+      if (!access.isBranchAdmin(req)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN",
+          message: "Solo administradores pueden inicializar stock.",
+        });
+      }
+    }
+
     const where = { warehouse_id, product_id };
 
     // ✅ Lock fila (si existe)
@@ -206,6 +262,18 @@ exports.initStock = async (req, res) => {
 // =====================
 exports.createMovement = async (req, res) => {
   try {
+    // Solo admin (branch admin o super) puede crear movimientos manuales.
+    if (!access.isBranchAdmin(req)) {
+      return res.status(403).json({
+        ok: false,
+        code: "FORBIDDEN",
+        message: "Solo administradores pueden crear movimientos de stock.",
+      });
+    }
+    // Si tiene warehouse_id en el body, validar que pertenezca a sus branches.
+    const bodyWh = toInt(req.body?.warehouse_id, 0);
+    if (bodyWh && !(await authorizeWarehouseAccess(req, res, bodyWh))) return;
+
     const userId = req.user?.sub || req.user?.id || null;
     const movement = await createStockMovement(req.body || {}, userId);
 
@@ -230,7 +298,28 @@ exports.listMovements = async (req, res) => {
     const warehouse_id = req.query.warehouse_id ? toInt(req.query.warehouse_id, 0) : null;
 
     const where = {};
-    if (warehouse_id) where.warehouse_id = warehouse_id;
+
+    if (warehouse_id) {
+      // Si especifica un warehouse, validar acceso.
+      if (!(await authorizeWarehouseAccess(req, res, warehouse_id))) return;
+      where.warehouse_id = warehouse_id;
+    } else if (!access.isSuperAdmin(req)) {
+      // Sin filtro: limitar a depósitos de sus sucursales.
+      const allowed = access.getAllowedBranchIds(req);
+      if (!allowed.length) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario.",
+        });
+      }
+      const whs = await Warehouse.findAll({
+        where: { branch_id: { [Op.in]: allowed } },
+        attributes: ["id"],
+      });
+      const whIds = whs.map((w) => w.id);
+      where.warehouse_id = whIds.length ? { [Op.in]: whIds } : -1;
+    }
 
     const items = await StockMovement.findAll({
       where,

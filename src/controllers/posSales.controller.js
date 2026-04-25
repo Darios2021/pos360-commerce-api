@@ -25,7 +25,9 @@ const {
   User,
   SaleRefund,
   SaleExchange,
+  StockBalance,
 } = require("../models");
+const access = require("../utils/accessScope");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -179,33 +181,25 @@ function getAuthBranchId(req) {
   );
 }
 
+// `isAdminReq` se redirige a `access.isSuperAdmin` para que las decisiones
+// de data-scope dejen de tratar al admin de sucursal como global.
+// Para gating de acciones (ej: "puede ver detalle / hacer refund / anular")
+// existen ahora `canPostSale` (dueño o admin) y los handlers individuales
+// hacen sus propios chequeos cross-branch / cross-user.
 function isAdminReq(req) {
-  const u = req?.usuario || req?.user || req?.auth || {};
-  const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
-  if (email === "admin@360pos.local" || email.includes("admin@360pos.local")) return true;
-
-  if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
-
-  const roleNames = [];
-  if (typeof u?.role === "string") roleNames.push(u.role);
-  if (typeof u?.rol === "string") roleNames.push(u.rol);
-
-  if (Array.isArray(u?.roles)) {
-    for (const r of u.roles) {
-      if (!r) continue;
-      if (typeof r === "string") roleNames.push(r);
-      else if (typeof r?.name === "string") roleNames.push(r.name);
-      else if (typeof r?.role === "string") roleNames.push(r.role);
-      else if (typeof r?.role?.name === "string") roleNames.push(r.role.name);
-    }
-  }
-
-  const norm = (s) => String(s || "").trim().toLowerCase();
-  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
+  return access.isSuperAdmin(req);
 }
 
 function canPostSale(req, sale) {
-  if (isAdminReq(req)) return true;
+  // Super_admin: siempre. Branch admin: si la venta es de su sucursal.
+  // Otros (cajero): solo si la venta es propia.
+  if (access.isSuperAdmin(req)) return true;
+
+  const ctxBranchId = getAuthBranchId(req);
+  if (parseInt(sale?.branch_id, 10) !== parseInt(ctxBranchId, 10)) return false;
+
+  if (access.isBranchAdmin(req)) return true;
+
   const uid = getAuthUserId(req);
   if (!uid) return false;
   return toInt(sale?.user_id, 0) === toInt(uid, 0);
@@ -274,7 +268,14 @@ function readProductFilter(req) {
 }
 
 function buildWhereFromQuery(req) {
-  const admin = isAdminReq(req);
+  // SCOPE EFECTIVO
+  //  - super_admin: ve ventas de todas las sucursales (puede acotar con ?branch_id=)
+  //  - branch admin: ve ventas de su sucursal activa (no puede salirse)
+  //  - cajero: solo SUS ventas (user_id = ctxUserId), forzado a su sucursal
+  const superAdmin  = access.isSuperAdmin(req);
+  const branchAdmin = access.isBranchAdmin(req); // incluye super_admin
+  const isCajero    = !branchAdmin;
+  const ctxUserId   = access.getUserId(req);
 
   const q = String(req.query.q || "").trim();
   const status = String(req.query.status || "").trim().toUpperCase();
@@ -284,7 +285,7 @@ function buildWhereFromQuery(req) {
 
   const where = {};
 
-  if (admin) {
+  if (superAdmin) {
     const requested = toInt(req.query.branch_id ?? req.query.branchId, 0);
     if (requested > 0) where.branch_id = requested;
   } else {
@@ -305,8 +306,22 @@ function buildWhereFromQuery(req) {
   else if (from) where.sold_at = { [Op.gte]: from };
   else if (to) where.sold_at = { [Op.lte]: to };
 
-  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
-  if (seller_id > 0) where.user_id = seller_id;
+  // Filtro de vendedor:
+  //  - cajero: forzado a sus ventas (ignora ?seller_id=).
+  //  - admin / super_admin: opcional via query.
+  if (isCajero) {
+    if (!ctxUserId) {
+      return {
+        ok: false,
+        code: "AUTH_REQUIRED",
+        message: "No se pudo determinar el usuario autenticado.",
+      };
+    }
+    where.user_id = ctxUserId;
+  } else {
+    const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+    if (seller_id > 0) where.user_id = seller_id;
+  }
 
   const customer = req.query.customer;
   if (customer != null && String(customer).trim()) {
@@ -700,7 +715,15 @@ async function statsSales(req, res, next) {
 // ============================
 async function getSaleById(req, res, next) {
   try {
-    const admin = isAdminReq(req);
+    // Para acceso al detalle:
+    //  - super_admin: cualquier venta.
+    //  - branch admin: solo ventas de su sucursal.
+    //  - cajero: solo SUS ventas.
+    const superAdmin  = access.isSuperAdmin(req);
+    const branchAdmin = access.isBranchAdmin(req);
+    const isCajero    = !branchAdmin;
+    // `admin` legado se usa más abajo solo para gating de la verificación cross-branch.
+    const admin = superAdmin;
 
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
@@ -748,6 +771,18 @@ async function getSaleById(req, res, next) {
           message: "No podés ver una venta de otra sucursal.",
         });
       }
+
+      // Cajero: además, debe ser DUEÑO de la venta.
+      if (isCajero) {
+        const ctxUserId = access.getUserId(req);
+        if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
+          return res.status(403).json({
+            ok: false,
+            code: "FORBIDDEN_USER",
+            message: "Solo podés ver tus propias ventas.",
+          });
+        }
+      }
     }
 
     let refunds = [];
@@ -786,6 +821,17 @@ async function listRefundsBySale(req, res, next) {
           .status(403)
           .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver devoluciones de otra sucursal." });
       }
+      // Cajero: solo sobre sus propias ventas.
+      if (!access.isBranchAdmin(req)) {
+        const ctxUserId = access.getUserId(req);
+        if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
+          return res.status(403).json({
+            ok: false,
+            code: "FORBIDDEN_USER",
+            message: "Solo podés ver devoluciones de tus propias ventas.",
+          });
+        }
+      }
     }
 
     const data = SaleRefund ? await SaleRefund.findAll({ where: { sale_id }, order: [["created_at", "DESC"]] }) : [];
@@ -811,6 +857,17 @@ async function listExchangesBySale(req, res, next) {
         return res
           .status(403)
           .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver cambios de otra sucursal." });
+      }
+      // Cajero: solo sobre sus propias ventas.
+      if (!access.isBranchAdmin(req)) {
+        const ctxUserId = access.getUserId(req);
+        if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
+          return res.status(403).json({
+            ok: false,
+            code: "FORBIDDEN_USER",
+            message: "Solo podés ver cambios de tus propias ventas.",
+          });
+        }
       }
     }
 
@@ -1479,6 +1536,75 @@ async function createExchange(req, res) {
   }
 }
 
+/**
+ * Restaura el stock de los items de la venta sumando qty al warehouse
+ * registrado en cada SaleItem (que es donde el createSale lo descontó).
+ * Solo restaura productos con `track_stock = true`. Best-effort.
+ */
+async function restoreStockForSaleItems(items, t) {
+  if (!Array.isArray(items) || !items.length) return { restored: 0, skipped: 0 };
+
+  const productIds = [...new Set(items.map((it) => toInt(it.product_id, 0)).filter(Boolean))];
+  if (!productIds.length) return { restored: 0, skipped: 0 };
+
+  const products = await Product.findAll({
+    where: { id: { [Op.in]: productIds }, track_stock: true },
+    attributes: ["id"],
+    transaction: t,
+  });
+  const trackedIds = new Set(products.map((p) => toInt(p.id, 0)));
+
+  let restored = 0;
+  let skipped  = 0;
+
+  for (const it of items) {
+    const productId   = toInt(it.product_id, 0);
+    const warehouseId = toInt(it.warehouse_id, 0);
+    const qty         = Number(it.quantity || 0);
+    if (!productId || !warehouseId || !qty) { skipped++; continue; }
+    if (!trackedIds.has(productId))           { skipped++; continue; }
+
+    try {
+      const sb = await StockBalance.findOne({
+        where: { warehouse_id: warehouseId, product_id: productId },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (sb) {
+        await sb.update({ qty: literal(`qty + ${qty}`) }, { transaction: t });
+      } else {
+        await StockBalance.create(
+          { warehouse_id: warehouseId, product_id: productId, qty },
+          { transaction: t }
+        );
+      }
+      restored++;
+    } catch (e) {
+      console.warn("[posSales.restoreStock] item skipped:", { productId, warehouseId, qty, err: e?.message });
+      skipped++;
+    }
+  }
+
+  return { restored, skipped };
+}
+
+/**
+ * DELETE /pos/sales/:id
+ *
+ * Comportamiento por defecto: SOFT-CANCEL.
+ *   - Marca la venta como status='CANCELLED' (preserva auditoría y arqueo).
+ *   - Restaura el stock al warehouse de cada item (revierte el OUT del createSale).
+ *   - No toca payments ni items.
+ *
+ * Con ?force=1: HARD-DELETE (admin override).
+ *   - Restaura el stock IGUAL.
+ *   - Borra payments, items y la venta. Si hay returns/exchanges, los limpia.
+ *
+ * Bloqueos:
+ *   - Si la venta ya está CANCELLED → 409.
+ *   - Si tiene returns y no se manda force → 409.
+ *   - Solo admin o usuarios de la misma sucursal de la venta.
+ */
 async function deleteSale(req, res, next) {
   const t = await sequelize.transaction();
   try {
@@ -1500,7 +1626,10 @@ async function deleteSale(req, res, next) {
       return res.status(400).json({ ok: false, message: "ID inválido" });
     }
 
-    const sale = await Sale.findByPk(id, { transaction: t });
+    const sale = await Sale.findByPk(id, {
+      include: [{ model: SaleItem, as: "items", required: false }],
+      transaction: t,
+    });
     if (!sale) {
       await t.rollback();
       return res.status(404).json({ ok: false, message: "Venta no encontrada" });
@@ -1515,7 +1644,40 @@ async function deleteSale(req, res, next) {
       });
     }
 
-    const force = String(req.query.force || "0") === "1";
+    // Cajero (no admin de sucursal): solo puede anular SU propia venta.
+    if (!admin && !access.isBranchAdmin(req)) {
+      const ctxUserId = access.getUserId(req);
+      if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_USER",
+          message: "Solo podés anular tus propias ventas.",
+        });
+      }
+    }
+
+    if (String(sale.status) === "CANCELLED") {
+      await t.rollback();
+      return res.status(409).json({
+        ok: false,
+        code: "ALREADY_CANCELLED",
+        message: "La venta ya está anulada.",
+      });
+    }
+
+    const forceQuery = String(req.query.force || "0") === "1";
+    // Solo admin (super o de sucursal) puede pedir hard-delete con ?force=1.
+    const force = forceQuery && access.isBranchAdmin(req);
+    if (forceQuery && !force) {
+      await t.rollback();
+      return res.status(403).json({
+        ok: false,
+        code: "FORBIDDEN",
+        message: "Solo administradores pueden forzar el borrado completo de una venta.",
+      });
+    }
+    const restock = String(req.query.restock || "1") !== "0"; // permitir desactivar reposición con ?restock=0
 
     const [rr] = await sequelize.query(`SELECT COUNT(*) AS c FROM sale_returns WHERE sale_id = :sale_id`, {
       replacements: { sale_id: id },
@@ -1529,12 +1691,41 @@ async function deleteSale(req, res, next) {
         ok: false,
         code: "SALE_HAS_RETURNS",
         message:
-          "La venta tiene devoluciones/cambios. No se elimina por seguridad. Usá ?force=1 si realmente querés borrar todo.",
+          "La venta tiene devoluciones/cambios. No se anula por seguridad. Usá ?force=1 si realmente querés borrar todo.",
         data: { returnsCount },
       });
     }
 
-    if (force && returnsCount > 0) {
+    // ── Restaurar stock (revierte el OUT del createSale) ────────────────────
+    let stockReport = { restored: 0, skipped: 0 };
+    if (restock) {
+      stockReport = await restoreStockForSaleItems(sale.items || [], t);
+    }
+
+    if (!force) {
+      // SOFT-CANCEL por defecto: preserva la venta para auditoría y arqueo.
+      const cancelledBy = req.user?.id ?? null;
+      const note = [
+        sale.note,
+        `ANULADA por usuario #${cancelledBy} el ${new Date().toISOString()}`,
+      ].filter(Boolean).join(" | ");
+
+      await sale.update(
+        { status: "CANCELLED", note },
+        { transaction: t, fields: ["status", "note"] }
+      );
+
+      await t.commit();
+      return res.json({
+        ok: true,
+        message: "Venta anulada. El stock fue restaurado.",
+        cancelled_by: cancelledBy,
+        stock: stockReport,
+      });
+    }
+
+    // HARD-DELETE (force=1): se mantiene comportamiento previo, ahora con restock.
+    if (returnsCount > 0) {
       await sequelize.query(
         `DELETE FROM sale_exchanges
          WHERE original_sale_id = :sale_id OR new_sale_id = :sale_id OR return_id IN (SELECT id FROM sale_returns WHERE sale_id = :sale_id)`,
@@ -1559,7 +1750,11 @@ async function deleteSale(req, res, next) {
     await sale.destroy({ transaction: t });
 
     await t.commit();
-    return res.json({ ok: true, message: "Venta eliminada" });
+    return res.json({
+      ok: true,
+      message: "Venta eliminada. El stock fue restaurado.",
+      stock: stockReport,
+    });
   } catch (e) {
     try {
       await t.rollback();

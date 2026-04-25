@@ -35,7 +35,7 @@ function handleError(res, err) {
 // GET /stock/transfers
 async function list(req, res) {
   try {
-    const { status, page = 1, limit = 20 } = req.query;
+    const { status, page = 1, limit = 20, search = "", q = "" } = req.query;
     const branchId   = toInt(req.ctx?.branchId || req.user?.branch_id, 0);
     const warehouseId = toInt(req.ctx?.warehouseId, 0);
     const allowedBranchIds = Array.isArray(req.ctx?.allowedBranchIds)
@@ -47,6 +47,7 @@ async function list(req, res) {
       warehouseId,
       allowedBranchIds,
       status,
+      search: search || q,
       isSuperAdmin: isSuperAdmin(req),
       page,
       limit,
@@ -163,4 +164,36 @@ async function remove(req, res) {
   } catch (err) { handleError(res, err); }
 }
 
-module.exports = { list, getById, create, update, dispatch, receive, cancel, remove };
+// POST /stock/transfers/bulk/receive  (recepción masiva)
+async function bulkReceive(req, res) {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!ids.length) {
+      return res.status(400).json({ ok: false, message: "ids requerido (array)" });
+    }
+    const received_by = toInt(req.user?.id || req.user?.sub, 0);
+    const result = await svc.bulkReceiveTransfers(ids, { received_by });
+    return res.json({ ok: true, ...result });
+  } catch (err) { handleError(res, err); }
+}
+
+// POST /stock/transfers/bulk/delete  (eliminación masiva, solo admin/super_admin)
+async function bulkDelete(req, res) {
+  try {
+    if (!canDeleteTransfer(req)) {
+      return res.status(403).json({
+        ok: false,
+        message: "Solo administradores pueden eliminar derivaciones.",
+      });
+    }
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!ids.length) {
+      return res.status(400).json({ ok: false, message: "ids requerido (array)" });
+    }
+    const deleted_by = toInt(req.user?.id || req.user?.sub, 0);
+    const result = await svc.bulkDeleteTransfers(ids, { deleted_by });
+    return res.json({ ok: true, ...result });
+  } catch (err) { handleError(res, err); }
+}
+
+module.exports = { list, getById, create, update, dispatch, receive, cancel, remove, bulkReceive, bulkDelete };

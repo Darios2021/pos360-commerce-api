@@ -15,6 +15,7 @@ const {
   StockBalance,
   StockMovement,
 } = require("../models");
+const access = require("../utils/accessScope");
 
 // =========================
 // Helpers
@@ -92,61 +93,92 @@ function getAuthBranchId(req) {
 }
 
 /**
- * ✅ Admin detector robusto
+ * Admin detector — DEPRECATED. Mantenido por compatibilidad con código existente.
+ * Devuelve true sólo para super_admin / root / owner (los que SÍ ven todo el sistema).
+ * Para "admin de sucursal" usar `access.isBranchAdmin(req)` y `resolveBranchScope`.
  */
 function isAdminReq(req) {
-  const u = req?.user || req?.auth || {};
-  const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
-  if (email === "admin@360pos.local" || email.includes("admin@360pos.local")) return true;
-
-  if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
-
-  const roleNames = [];
-  if (typeof u?.role === "string") roleNames.push(u.role);
-  if (typeof u?.rol === "string") roleNames.push(u.rol);
-
-  if (Array.isArray(u?.roles)) {
-    for (const r of u.roles) {
-      if (!r) continue;
-      if (typeof r === "string") roleNames.push(r);
-      else if (typeof r?.name === "string") roleNames.push(r.name);
-      else if (typeof r?.role === "string") roleNames.push(r.role);
-      else if (typeof r?.role?.name === "string") roleNames.push(r.role.name);
-    }
-  }
-
-  const norm = (s) => String(s || "").trim().toLowerCase();
-  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
+  return access.isSuperAdmin(req);
 }
 
 /**
- * ✅ Decide scope de sucursal:
- * - Admin: todas (si no manda branch_id) o filtra (si manda branch_id)
- * - No-admin: obligado a su branch (desde auth)
+ * Decide scope de sucursal:
+ *   - super_admin                 → todas las sucursales (o filtra si manda branch_id).
+ *   - admin / cajero / cualquiera → restringido a sus sucursales habilitadas.
+ *
+ * Devuelve también `kind` ("global" | "branch" | "user") para que los handlers
+ * puedan aplicar restricciones extra a cajeros (ej: filtrar ventas por seller_id).
  */
 function resolveBranchScope(req) {
-  const admin = isAdminReq(req);
+  const scope = access.getAccessScope(req);
   const qBranch = toInt(req.query.branch_id ?? req.query.branchId, 0);
+  const activeBranch = toInt(req?.ctx?.branchId, 0) || access.getBranchId(req);
 
-  if (admin) {
+  if (scope.kind === "global") {
+    // super_admin: opcional acotar a una sucursal con ?branch_id=
     return {
       admin: true,
+      kind: "global",
+      isCajero: false,
       branchId: qBranch > 0 ? qBranch : null,
+      branchIds: qBranch > 0 ? [qBranch] : [],
+      userId: null,
       mode: qBranch > 0 ? "SINGLE_BRANCH" : "ALL_BRANCHES",
     };
   }
 
-  const branchId = getAuthBranchId(req);
+  // Branch admin o cajero: scope acotado a la branch activa (las queries del dashboard
+  // usan scope.branchId como filtro único). Si el usuario tiene varias branches en
+  // user_branches, puede cambiar la activa con X-Branch-Id (lo maneja branchContext).
+  const allowed = scope.branchIds || [];
+  let branchId = qBranch > 0 ? qBranch : activeBranch;
+
+  // Validar que la branch pedida/activa esté entre las habilitadas.
+  if (allowed.length && branchId && !allowed.includes(branchId)) {
+    branchId = allowed[0];
+  }
+  if (!branchId && allowed.length) branchId = allowed[0];
+
+  const isAdmin = scope.kind === "branch";
+
   return {
-    admin: false,
-    branchId: branchId > 0 ? branchId : null,
-    mode: "USER_BRANCH",
+    // mantenemos `admin: true` para "puede ver toda la sucursal" (super_admin o admin)
+    admin: isAdmin,
+    kind: scope.kind,
+    isCajero: scope.kind === "user",
+    branchId: branchId || null,
+    branchIds: branchId ? [branchId] : [],
+    userId: scope.userId || null,
+    mode: isAdmin ? "BRANCH_ADMIN" : "USER_BRANCH",
   };
 }
 
-function withBranchWhere(whereBase, branchId) {
+function withBranchWhere(whereBase, scopeOrBranchId) {
   const where = { ...(whereBase || {}) };
-  if (branchId) where.branch_id = branchId;
+
+  // Compat: si se pasa un número (firma vieja) lo trato como branchId único.
+  if (typeof scopeOrBranchId === "number" || typeof scopeOrBranchId === "string") {
+    const bid = toInt(scopeOrBranchId, 0);
+    if (bid) where.branch_id = bid;
+    return where;
+  }
+
+  // Nueva firma: scope completo.
+  const scope = scopeOrBranchId || {};
+  const ids = scope.branchIds || (scope.branchId ? [scope.branchId] : []);
+  if (scope.kind === "global" && !ids.length) return where;
+  if (ids.length === 1) where.branch_id = ids[0];
+  else if (ids.length > 1) where.branch_id = { [Op.in]: ids };
+  else if (scope.kind !== "global") where.branch_id = -1; // sin branches → 0 resultados
+
+  // Cajero: además filtrar por seller_id (dueño de la venta).
+  if (scope.kind === "user" && scope.userId) {
+    where[Op.and] = [
+      ...(where[Op.and] || []),
+      { [Op.or]: [{ seller_id: scope.userId }, { user_id: scope.userId }] },
+    ];
+  }
+
   return where;
 }
 
@@ -264,7 +296,11 @@ async function overview(req, res, next) {
     const prevMonthTo = new Date(monthFrom);
     prevMonthTo.setMilliseconds(-1);
 
+    // baseBranch: filtro común a todas las queries de Sale.
+    // - admin / super_admin → solo branch_id
+    // - cajero              → branch_id + user_id (solo sus ventas)
     const baseBranch = scope.branchId ? { branch_id: scope.branchId } : {};
+    if (scope.isCajero && scope.userId) baseBranch.user_id = scope.userId;
 
     const todayWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [todayFrom, todayTo] } };
     const weekWhere = { ...baseBranch, status: "PAID", sold_at: { [Op.between]: [weekFrom, todayTo] } };
@@ -315,11 +351,17 @@ async function overview(req, res, next) {
           WHERE s.status = 'PAID'
             AND s.sold_at BETWEEN :from AND :to
             ${scope.branchId ? "AND s.branch_id = :branchId" : ""}
+            ${scope.isCajero && scope.userId ? "AND s.user_id = :userId" : ""}
           GROUP BY p.method
           `,
           {
             type: QueryTypes.SELECT,
-            replacements: { from: todayFrom, to: todayTo, branchId: scope.branchId || null },
+            replacements: {
+              from: todayFrom,
+              to: todayTo,
+              branchId: scope.branchId || null,
+              userId: scope.userId || null,
+            },
           }
         );
 
@@ -391,7 +433,10 @@ async function overview(req, res, next) {
     // ✅ Periodo seleccionable (para gráficos/tops)
     // ==========================
     const range = computeRange(req.query.period, todayFrom, todayTo);
-    const whereBranchRange = scope.branchId ? "AND s.branch_id = :branchId" : "";
+    // Fragmento SQL común que aplica scope branch + (cajero) sobre alias `s`.
+    const whereBranchRange =
+      (scope.branchId ? "AND s.branch_id = :branchId" : "") +
+      (scope.isCajero && scope.userId ? " AND s.user_id = :userId" : "");
     const whereBetweenRange = range.from ? "AND s.sold_at BETWEEN :from AND :to" : "AND s.sold_at <= :to";
 
     // ==========================
@@ -421,7 +466,7 @@ async function overview(req, res, next) {
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { dailyFrom, to: range.to, branchId: scope.branchId || null },
+          replacements: { dailyFrom, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null },
         }
       )
       .catch(() => []);
@@ -518,7 +563,7 @@ async function overview(req, res, next) {
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null },
+          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null },
         }
       )
       .then((rows) =>
@@ -562,7 +607,7 @@ async function overview(req, res, next) {
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null },
+          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null },
         }
       )
       .then((rows) =>
@@ -599,7 +644,7 @@ async function overview(req, res, next) {
         `,
         {
           type: QueryTypes.SELECT,
-          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null },
+          replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null },
         }
       )
       .then((rows) => rows?.[0] || null)
@@ -811,7 +856,7 @@ async function overview(req, res, next) {
         ${whereBranchRange}
       GROUP BY HOUR(s.sold_at)
       `,
-      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
+      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null } }
     ).catch(() => []);
     const hourMap = new Map((salesByHourRows || []).map((r) => [Number(r.h || 0), r]));
     const salesByHour = Array.from({ length: 24 }, (_, h) => {
@@ -843,7 +888,7 @@ async function overview(req, res, next) {
       GROUP BY method
       ORDER BY sum_amount DESC
       `,
-      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
+      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null } }
     ).catch(() => []);
     const salesByPaymentPeriod = (paymentsPeriodRows || []).map((r) => ({
       method: String(r.method || "").toUpperCase(),
@@ -865,7 +910,7 @@ async function overview(req, res, next) {
       GROUP BY COALESCE(s.invoice_type,'TICKET')
       ORDER BY cnt DESC
       `,
-      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null } }
+      { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null } }
     ).catch(() => []);
     const salesByInvoiceType = (invoiceTypeRows || []).map((r) => ({
       invoice_type: String(r.invoice_type || "TICKET").toUpperCase(),

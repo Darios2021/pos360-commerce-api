@@ -5,6 +5,24 @@ const {
   sequelize,
 } = require("../models");
 
+const access = require("../utils/accessScope");
+
+// Verifica que el usuario pueda operar sobre la sucursal indicada.
+// super_admin: cualquier sucursal. resto: solo si está en allowedBranchIds.
+function authorizeBranchScope(req, res, branchId) {
+  if (access.isSuperAdmin(req)) return true;
+  const allowed = access.getAllowedBranchIds(req);
+  if (!allowed.length) {
+    res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." });
+    return false;
+  }
+  if (!allowed.includes(parseInt(branchId, 10))) {
+    res.status(403).json({ ok: false, code: "FORBIDDEN_BRANCH", message: "No podés operar sobre la configuración fiscal de otra sucursal." });
+    return false;
+  }
+  return true;
+}
+
 const { encrypt } = require("../services/fiscal/crypto.service");
 const {
   onlyDigits,
@@ -48,6 +66,7 @@ async function getConfig(req, res, next) {
         message: "branch_id es obligatorio.",
       });
     }
+    if (!authorizeBranchScope(req, res, branchId)) return;
 
     const row = await getConfigByBranch(branchId);
 
@@ -127,6 +146,10 @@ async function putConfig(req, res, next) {
     if (!branchId) {
       await t.rollback();
       return res.status(400).json({ ok: false, message: "branch_id es obligatorio." });
+    }
+    if (!authorizeBranchScope(req, res, branchId)) {
+      await t.rollback();
+      return;
     }
 
     await requireBranch(branchId);
@@ -226,6 +249,7 @@ async function listCertificates(req, res, next) {
         message: "branch_id es obligatorio.",
       });
     }
+    if (!authorizeBranchScope(req, res, branchId)) return;
 
     await requireBranch(branchId);
 
@@ -269,6 +293,10 @@ async function upsertCertificate(req, res, next) {
     if (!branchId) {
       await t.rollback();
       return res.status(400).json({ ok: false, message: "branch_id es obligatorio." });
+    }
+    if (!authorizeBranchScope(req, res, branchId)) {
+      await t.rollback();
+      return;
     }
 
     await requireBranch(branchId);
@@ -346,6 +374,7 @@ async function testConnection(req, res, next) {
         message: "branch_id es obligatorio.",
       });
     }
+    if (!authorizeBranchScope(req, res, branchId)) return;
 
     const branch = await requireBranch(branchId);
     const config = await getConfigByBranch(branchId);

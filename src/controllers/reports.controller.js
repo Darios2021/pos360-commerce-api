@@ -14,6 +14,7 @@ const {
   Branch,
   User,
 } = require("../models");
+const access = require("../utils/accessScope");
 
 function toInt(v, def = null) {
   const n = Number(v);
@@ -83,8 +84,43 @@ async function getSalesReport(req, res, next) {
       where.status = statusFilter;
     }
 
-    if (branch_id) where.branch_id = branch_id;
-    if (user_id) where.user_id = user_id;
+    // SCOPE EFECTIVO
+    //  - super_admin: puede pasar branch_id y user_id libremente.
+    //  - branch admin: forzado a su sucursal activa.
+    //  - cajero: forzado a su sucursal + sus propias ventas (user_id = self).
+    const superAdmin  = access.isSuperAdmin(req);
+    const branchAdmin = access.isBranchAdmin(req);
+    const ctxBranchId = access.getBranchId(req);
+    const ctxUserId   = access.getUserId(req);
+
+    if (superAdmin) {
+      if (branch_id) where.branch_id = branch_id;
+      if (user_id) where.user_id = user_id;
+    } else {
+      if (!ctxBranchId) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario.",
+        });
+      }
+      where.branch_id = ctxBranchId;
+
+      if (!branchAdmin) {
+        // cajero: solo sus ventas
+        if (!ctxUserId) {
+          return res.status(401).json({
+            ok: false,
+            code: "AUTH_REQUIRED",
+            message: "No se pudo determinar el usuario autenticado.",
+          });
+        }
+        where.user_id = ctxUserId;
+      } else if (user_id) {
+        // branch admin: opcional acotar a un cajero específico
+        where.user_id = user_id;
+      }
+    }
 
     // Traer ventas con user/branch/payments
     const sales = await Sale.findAll({

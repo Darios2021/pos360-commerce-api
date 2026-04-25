@@ -14,6 +14,7 @@
 const { Op, Sequelize } = require("sequelize");
 const { Product, Category, Subcategory, ProductImage, sequelize } = require("../models");
 const searchService = require("../services/search.service");
+const access = require("../utils/accessScope");
 
 // Fire-and-forget: sync a Meilisearch sin bloquear la respuesta HTTP
 function asyncSync(productId) {
@@ -568,10 +569,12 @@ async function getBranchesMatrix(req, res, next) {
     const productId = toInt(req.params.id, 0);
     if (!productId) return res.status(400).json({ ok: false, code: "VALIDATION", message: "ID inválido" });
 
-    const admin = isAdminReq(req);
+    // Solo super_admin ve la matriz completa de TODAS las sucursales.
+    // Branch admin / cajero: ven solo su sucursal activa.
+    const superAdmin = access.isSuperAdmin(req);
     const ctxBranchId = getBranchId(req);
 
-    if (!admin && !ctxBranchId) {
+    if (!superAdmin && !ctxBranchId) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -579,7 +582,7 @@ async function getBranchesMatrix(req, res, next) {
       });
     }
 
-    if (!admin) {
+    if (!superAdmin) {
       const [[ok]] = await sequelize.query(
         `
         SELECT 1 AS ok
@@ -601,7 +604,7 @@ async function getBranchesMatrix(req, res, next) {
       }
     }
 
-    const onlyOne = !admin ? "WHERE b.id = :onlyBranchId" : "";
+    const onlyOne = !superAdmin ? "WHERE b.id = :onlyBranchId" : "";
 
     const [rows] = await sequelize.query(
       `
@@ -636,7 +639,7 @@ async function getBranchesMatrix(req, res, next) {
       ORDER BY b.name ASC
       `,
       {
-        replacements: admin ? { pid: productId } : { pid: productId, onlyBranchId: ctxBranchId },
+        replacements: superAdmin ? { pid: productId } : { pid: productId, onlyBranchId: ctxBranchId },
       }
     );
 
@@ -655,7 +658,12 @@ async function getBranchesMatrix(req, res, next) {
 
 async function list(req, res, next) {
   try {
-    const admin = isAdminReq(req);
+    // SCOPE EFECTIVO
+    //  - super_admin: ve productos de TODAS las sucursales (puede acotar con ?branch_id=)
+    //  - admin (branch admin) o cajero: SIEMPRE acotado a su sucursal activa
+    const superAdmin  = access.isSuperAdmin(req);
+    const branchAdmin = access.isBranchAdmin(req); // incluye super_admin
+    const admin       = branchAdmin;               // legado: cualquier admin gestiona su sucursal
 
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(200, Math.max(1, toInt(req.query.limit, 20)));
@@ -664,7 +672,7 @@ async function list(req, res, next) {
     const q = String(req.query.q || "").trim();
 
     const ctxBranchId = getBranchId(req);
-    if (!admin && !ctxBranchId) {
+    if (!superAdmin && !ctxBranchId) {
       return res.status(400).json({
         ok: false,
         code: "BRANCH_REQUIRED",
@@ -672,15 +680,15 @@ async function list(req, res, next) {
       });
     }
 
-    // admin puede pasar branch_id (scope)
+    // ?branch_id= solo lo respeta super_admin. Resto queda en su ctxBranchId.
     const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
-    const branchIdScope = admin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
+    const branchIdScope = superAdmin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
 
-    // owner branch (solo admin)
-    const ownerBranchId = admin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
+    // owner branch (solo super_admin puede filtrar por dueño en otras sucursales)
+    const ownerBranchId = superAdmin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
 
     // stock qty
-    const stockBranchId = admin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
+    const stockBranchId = superAdmin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
 
     const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || 0;
     const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || 0;
@@ -753,7 +761,7 @@ async function list(req, res, next) {
       if (Number.isFinite(qNum)) repl.qid = toInt(qNum, 0);
     }
 
-    if (admin && ownerBranchId > 0) {
+    if (superAdmin && ownerBranchId > 0) {
       repl.ownerBranchId = ownerBranchId;
       whereSql.push("p.branch_id = :ownerBranchId");
     }
@@ -768,8 +776,10 @@ async function list(req, res, next) {
     }
 
     // ✅ SCOPE por product_branches:
+    //    Si NO es super_admin, SIEMPRE filtramos por su sucursal activa.
+    //    Si es super_admin, solo filtramos cuando manda branch_id explícito.
     let joinPb = "";
-    if (!admin || branchIdQuery > 0) {
+    if (!superAdmin || branchIdQuery > 0) {
       const bid = toInt(branchIdScope, 0);
       repl.scopeBranchId = bid;
       joinPb = `JOIN product_branches pb ON pb.product_id = p.id AND pb.branch_id = :scopeBranchId AND pb.is_active = 1`;
@@ -777,7 +787,7 @@ async function list(req, res, next) {
 
     // Stock filters
     if (wantWithStock) {
-      if (!admin || branchIdQuery > 0) {
+      if (!superAdmin || branchIdQuery > 0) {
         repl.stockBranchId = toInt(branchIdScope, 0);
         whereSql.push(`EXISTS (
           SELECT 1
@@ -791,7 +801,7 @@ async function list(req, res, next) {
         whereSql.push(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = p.id AND sb.qty > 0)`);
       }
     } else if (wantWithoutStock) {
-      if (!admin || branchIdQuery > 0) {
+      if (!superAdmin || branchIdQuery > 0) {
         repl.stockBranchId = toInt(branchIdScope, 0);
         whereSql.push(`NOT EXISTS (
           SELECT 1

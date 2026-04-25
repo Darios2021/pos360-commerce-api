@@ -6,6 +6,7 @@
 // - POST /branches: solo admin
 
 const { Branch, sequelize } = require("../models");
+const access = require("../utils/accessScope");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -76,12 +77,14 @@ exports.list = async (req, res) => {
 
 exports.create = async (req, res) => {
   try {
-    // 🔒 Solo admin
-    if (!isAdminReq(req)) {
+    // 🔒 Solo super_admin puede crear nuevas sucursales.
+    //    Un "admin de sucursal" administra DENTRO de su sucursal pero no puede
+    //    crear sucursales nuevas (eso es decisión de organización).
+    if (!access.isSuperAdmin(req)) {
       return res.status(403).json({
         ok: false,
         code: "FORBIDDEN",
-        message: "No tenés permisos para crear sucursales.",
+        message: "Solo un super administrador puede crear sucursales.",
       });
     }
 

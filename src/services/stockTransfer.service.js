@@ -424,10 +424,12 @@ async function deleteTransfer(transfer_id, { deleted_by } = {}) {
 // otro usuario (incluido un "admin" de sucursal) queda restringido a las
 // derivaciones que tocan su sucursal activa o las sucursales habilitadas
 // en user_branches (allowedBranchIds).
-async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], status, isSuperAdmin = false, page = 1, limit = 20 }) {
-  const where = {};
+async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], status, search, isSuperAdmin = false, page = 1, limit = 20 }) {
+  const cleanLimit = Math.min(50, Math.max(1, toInt(limit, 20)));
+  const cleanPage  = Math.max(1, toInt(page, 1));
 
-  if (status) where.status = status;
+  // 1) Construir cláusula de scope (independiente de status/search) para reutilizar en el conteo por estado.
+  const scopeWhere = {};
 
   if (!isSuperAdmin) {
     const branchIds = Array.from(new Set([
@@ -439,8 +441,6 @@ async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], sta
     if (warehouseId) ors.push({ from_warehouse_id: warehouseId });
     if (branchIds.length) {
       ors.push({ to_branch_id: { [Op.in]: branchIds } });
-      // origen también puede ser de cualquier sucursal habilitada
-      // (para esto resolvemos sus warehouse ids)
       const origWhs = await Warehouse.findAll({
         where: { branch_id: { [Op.in]: branchIds } },
         attributes: ["id"],
@@ -450,28 +450,73 @@ async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], sta
     }
 
     if (!ors.length) {
-      // sin contexto de sucursal → no muestra nada (evita filtrado falso-permisivo)
-      return { transfers: [], total: 0, page: toInt(page, 1), limit: toInt(limit, 20) };
+      return {
+        transfers: [],
+        total: 0,
+        page: cleanPage,
+        limit: cleanLimit,
+        count_by_status: {},
+      };
     }
-    where[Op.or] = ors;
+    scopeWhere[Op.or] = ors;
   }
 
-  const { rows, count } = await StockTransfer.findAndCountAll({
-    where,
-    include: [
-      { model: Warehouse, as: "fromWarehouse", include: [{ model: Branch, as: "branch" }] },
-      { model: Warehouse, as: "toWarehouse",   include: [{ model: Branch, as: "branch" }] },
-      { model: User, as: "creator",    attributes: ["id","first_name","last_name"] },
-      { model: User, as: "dispatcher", attributes: ["id","first_name","last_name"] },
-      { model: User, as: "receiver",   attributes: ["id","first_name","last_name"] },
-      { model: StockTransferItem, as: "items", attributes: ["id"] },
-    ],
-    order: [["created_at", "DESC"]],
-    limit: toInt(limit, 20),
-    offset: (toInt(page, 1) - 1) * toInt(limit, 20),
-  });
+  // 2) Where con filtros de status + search aplicados.
+  const where = { ...scopeWhere };
+  if (status) where.status = status;
 
-  return { transfers: rows, total: count, page: toInt(page, 1), limit: toInt(limit, 20) };
+  const q = String(search || "").trim();
+  if (q) {
+    const like = `%${q}%`;
+    const searchOr = [
+      { number: { [Op.like]: like } },
+      { note:   { [Op.like]: like } },
+    ];
+    where[Op.and] = [...(where[Op.and] || []), { [Op.or]: searchOr }];
+  }
+
+  // 3) Paginación + conteos por estado en paralelo.
+  const [page_result, statusRows] = await Promise.all([
+    StockTransfer.findAndCountAll({
+      where,
+      include: [
+        { model: Warehouse, as: "fromWarehouse", include: [{ model: Branch, as: "branch" }] },
+        { model: Warehouse, as: "toWarehouse",   include: [{ model: Branch, as: "branch" }] },
+        { model: User, as: "creator",    attributes: ["id","first_name","last_name"] },
+        { model: User, as: "dispatcher", attributes: ["id","first_name","last_name"] },
+        { model: User, as: "receiver",   attributes: ["id","first_name","last_name"] },
+        { model: StockTransferItem, as: "items", attributes: ["id"] },
+      ],
+      order: [["created_at", "DESC"]],
+      limit: cleanLimit,
+      offset: (cleanPage - 1) * cleanLimit,
+      distinct: true,
+    }),
+    StockTransfer.findAll({
+      where: scopeWhere,
+      attributes: [
+        "status",
+        [sequelize.fn("COUNT", sequelize.col("id")), "cnt"],
+      ],
+      group: ["status"],
+      raw: true,
+    }),
+  ]);
+
+  const count_by_status = {};
+  for (const r of statusRows || []) {
+    count_by_status[String(r.status || "unknown")] = toInt(r.cnt, 0);
+  }
+  const total_all = Object.values(count_by_status).reduce((a, b) => a + b, 0);
+
+  return {
+    transfers: page_result.rows,
+    total: page_result.count,
+    total_all,
+    count_by_status,
+    page: cleanPage,
+    limit: cleanLimit,
+  };
 }
 
 // ─── GET BY ID ────────────────────────────────────────────────────────────────
@@ -498,5 +543,64 @@ async function getTransferById(id, transaction) {
   });
 }
 
+// ─── BULK RECEIVE ────────────────────────────────────────────────────────────
+/**
+ * Recepción masiva. Para cada id `dispatched`, marca todas las cantidades
+ * recibidas iguales a las enviadas (qty_received = qty_sent → status RECEIVED).
+ * Devuelve el detalle por id (ok / error / skipped).
+ */
+async function bulkReceiveTransfers(ids = [], { received_by } = {}) {
+  const cleanIds = Array.from(new Set((ids || []).map((x) => toInt(x, 0)).filter(Boolean)));
+  const results = [];
+
+  for (const id of cleanIds) {
+    try {
+      const tr = await getTransferById(id);
+      if (!tr) {
+        results.push({ id, ok: false, skipped: true, reason: "not_found" });
+        continue;
+      }
+      if (String(tr.status).toLowerCase() !== "dispatched") {
+        results.push({ id, ok: false, skipped: true, reason: `status_${tr.status}` });
+        continue;
+      }
+
+      const receptions = (tr.items || []).map((it) => ({
+        item_id: it.id,
+        qty_received: toDecimal(it.qty_sent),
+      }));
+
+      const result = await receiveTransfer(id, { receptions, received_by });
+      results.push({ id, ok: true, status: result?.status });
+    } catch (e) {
+      results.push({ id, ok: false, error: e?.message || "error" });
+    }
+  }
+
+  const ok    = results.filter((r) => r.ok).length;
+  const fail  = results.length - ok;
+  return { results, summary: { total: results.length, ok, fail } };
+}
+
+// ─── BULK DELETE ─────────────────────────────────────────────────────────────
+async function bulkDeleteTransfers(ids = [], { deleted_by } = {}) {
+  const cleanIds = Array.from(new Set((ids || []).map((x) => toInt(x, 0)).filter(Boolean)));
+  const results = [];
+
+  for (const id of cleanIds) {
+    try {
+      const r = await deleteTransfer(id, { deleted_by });
+      results.push({ id, ok: true, ...r });
+    } catch (e) {
+      results.push({ id, ok: false, error: e?.message || "error" });
+    }
+  }
+
+  const ok   = results.filter((r) => r.ok).length;
+  const fail = results.length - ok;
+  return { results, summary: { total: results.length, ok, fail } };
+}
+
 module.exports = { createTransfer, updateDraft, dispatchTransfer, receiveTransfer,
-                   cancelTransfer, deleteTransfer, listTransfers, getTransferById };
+                   cancelTransfer, deleteTransfer, listTransfers, getTransferById,
+                   bulkReceiveTransfers, bulkDeleteTransfers };

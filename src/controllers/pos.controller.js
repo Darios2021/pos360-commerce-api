@@ -70,18 +70,17 @@ function normalizeBranchIds(raw) {
     .filter(Boolean);
 }
 
+// IMPORTANTE: en este controller, `isAdminReq` se usa históricamente para decidir
+// si el usuario puede:
+//   - sobrescribir branch/warehouse en createSale
+//   - ver productos / suggestions de cualquier sucursal
+//   - hacer refunds/exchanges sobre cualquier venta
+// Esos eran privilegios excesivos para "admin de sucursal". Por eso ahora
+// `isAdminReq` SOLO es true para super_admin. Los admins de sucursal quedan
+// scopeados como cualquier usuario normal a su sucursal activa.
+const access = require("../utils/accessScope");
 function isAdminReq(req) {
-  const u = req?.user || {};
-  const roles = normalizeRoles(u.roles);
-
-  if (roles.includes("admin") || roles.includes("superadmin") || roles.includes("super_admin")) return true;
-
-  const role = String(u.role || u.user_role || "").toLowerCase();
-  if (role === "admin" || role === "superadmin" || role === "super_admin") return true;
-
-  if (u.is_admin === true) return true;
-
-  return false;
+  return access.isSuperAdmin(req);
 }
 
 function rid(req) {

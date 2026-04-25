@@ -8,6 +8,7 @@ const {
   buildCashRegisterSummary,
   closeCashRegister,
 } = require("../services/cashRegister.service");
+const access = require("../utils/accessScope");
 
 async function getCurrent(req, res, next) {
   try {
@@ -179,6 +180,46 @@ async function addMovement(req, res) {
       body: req.body,
     });
 
+    // Sellado de scope para movimientos manuales (IN/OUT):
+    //  - super_admin / branch admin: pueden imputar movimientos a cualquier caja
+    //    de su sucursal (admin: su sucursal, super_admin: cualquier sucursal).
+    //  - cajero: solo movimientos sobre SU propia caja.
+    const superAdmin = access.isSuperAdmin(req);
+    if (!superAdmin) {
+      const branchAdmin = access.isBranchAdmin(req);
+      const ctxBranchId = parseInt(req?.ctx?.branchId, 10) || getAuthBranchId(req);
+
+      const { CashRegister } = require("../models");
+      const cr = await CashRegister.findByPk(cash_register_id, {
+        attributes: ["id", "branch_id", "opened_by", "status"],
+        transaction: t,
+      });
+      if (!cr) {
+        await t.rollback();
+        return res.status(404).json({
+          ok: false,
+          code: "CASH_REGISTER_NOT_FOUND",
+          message: "Caja no encontrada.",
+        });
+      }
+      if (parseInt(cr.branch_id, 10) !== parseInt(ctxBranchId, 10)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "No podés operar sobre cajas de otra sucursal.",
+        });
+      }
+      if (!branchAdmin && parseInt(cr.opened_by, 10) !== parseInt(user_id, 10)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_USER",
+          message: "Solo podés agregar movimientos a tu propia caja.",
+        });
+      }
+    }
+
     const movement = await createManualCashMovement({
       cash_register_id,
       user_id,
@@ -228,6 +269,43 @@ async function getSummary(req, res) {
       cash_register_id,
     });
 
+    // Sellado de scope:
+    //  - super_admin: ve cualquier caja.
+    //  - branch admin: solo cajas de su sucursal activa.
+    //  - cajero: solo SUS propias cajas.
+    const superAdmin  = access.isSuperAdmin(req);
+    if (!superAdmin) {
+      const branchAdmin = access.isBranchAdmin(req);
+      const ctxBranchId = parseInt(req?.ctx?.branchId, 10) || getAuthBranchId(req);
+      const ctxUserId   = getAuthUserId(req);
+
+      const { CashRegister } = require("../models");
+      const cr = await CashRegister.findByPk(cash_register_id, {
+        attributes: ["id", "branch_id", "opened_by"],
+      });
+      if (!cr) {
+        return res.status(404).json({
+          ok: false,
+          code: "CASH_REGISTER_NOT_FOUND",
+          message: "Caja no encontrada.",
+        });
+      }
+      if (parseInt(cr.branch_id, 10) !== parseInt(ctxBranchId, 10)) {
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "No podés ver el resumen de una caja de otra sucursal.",
+        });
+      }
+      if (!branchAdmin && parseInt(cr.opened_by, 10) !== parseInt(ctxUserId, 10)) {
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_USER",
+          message: "Solo podés ver el resumen de tu propia caja.",
+        });
+      }
+    }
+
     const summary = await buildCashRegisterSummary({ cash_register_id });
 
     return res.json({
@@ -264,6 +342,46 @@ async function close(req, res) {
       closed_by,
       body: req.body,
     });
+
+    // Sellado de scope para cierre:
+    //  - super_admin: cierra cualquier caja.
+    //  - branch admin: cierra cualquier caja de SU sucursal.
+    //  - cajero: solo cierra SU propia caja.
+    const superAdmin  = access.isSuperAdmin(req);
+    if (!superAdmin) {
+      const branchAdmin = access.isBranchAdmin(req);
+      const ctxBranchId = parseInt(req?.ctx?.branchId, 10) || getAuthBranchId(req);
+
+      const { CashRegister } = require("../models");
+      const cr = await CashRegister.findByPk(cash_register_id, {
+        attributes: ["id", "branch_id", "opened_by", "status"],
+        transaction: t,
+      });
+      if (!cr) {
+        await t.rollback();
+        return res.status(404).json({
+          ok: false,
+          code: "CASH_REGISTER_NOT_FOUND",
+          message: "Caja no encontrada.",
+        });
+      }
+      if (parseInt(cr.branch_id, 10) !== parseInt(ctxBranchId, 10)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "No podés cerrar una caja de otra sucursal.",
+        });
+      }
+      if (!branchAdmin && parseInt(cr.opened_by, 10) !== parseInt(closed_by, 10)) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_USER",
+          message: "Solo podés cerrar tu propia caja.",
+        });
+      }
+    }
 
     const out = await closeCashRegister({
       cash_register_id,
@@ -423,10 +541,21 @@ async function adminList(req, res, next) {
       return Number.isFinite(n) ? n : d;
     };
 
+    // Scope efectivo:
+    //  - super_admin: ve todas las cajas (puede filtrar con ?branch_id=, ?user_id=)
+    //  - branch admin: ve solo cajas de su sucursal activa (no puede salirse)
+    //  - cajero / otros: ve solo SUS propias cajas (opened_by = userId)
+    const superAdmin  = access.isSuperAdmin(req);
+    const branchAdmin = access.isBranchAdmin(req); // incluye super_admin
+    const isCajero    = !branchAdmin;
+
+    const ctxBranchId = toInt(req?.ctx?.branchId, 0) || getAuthBranchId(req);
+    const ctxUserId   = getAuthUserId(req);
+
     const statusRaw = String(req.query?.status || "ALL").toUpperCase();
     const status = ["OPEN", "CLOSED"].includes(statusRaw) ? statusRaw : null;
-    const branchId = toInt(req.query?.branch_id, 0);
-    const userId = toInt(req.query?.user_id, 0);
+    const branchIdQuery = toInt(req.query?.branch_id, 0);
+    const userIdQuery   = toInt(req.query?.user_id, 0);
     const dateFrom = String(req.query?.date_from || "").trim();
     const dateTo = String(req.query?.date_to || "").trim();
     const q = String(req.query?.q || "").trim();
@@ -445,13 +574,46 @@ async function adminList(req, res, next) {
       where.push("cr.status = :status");
       repl.status = status;
     }
-    if (branchId) {
-      where.push("cr.branch_id = :branchId");
-      repl.branchId = branchId;
+
+    // Resolver branchId efectivo según rol.
+    let effectiveBranchId = 0;
+    if (superAdmin) {
+      effectiveBranchId = branchIdQuery; // 0 = sin filtro
+    } else {
+      // branch admin / cajero: forzado a su sucursal activa
+      effectiveBranchId = ctxBranchId;
+      if (!effectiveBranchId) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario.",
+        });
+      }
     }
-    if (userId) {
+    if (effectiveBranchId) {
+      where.push("cr.branch_id = :branchId");
+      repl.branchId = effectiveBranchId;
+    }
+
+    // Resolver userId efectivo:
+    //  - cajero: forzado a SUS cajas (no puede ver las de otros)
+    //  - branch admin / super_admin: opcional ?user_id=
+    let effectiveUserId = 0;
+    if (isCajero) {
+      effectiveUserId = ctxUserId;
+      if (!effectiveUserId) {
+        return res.status(401).json({
+          ok: false,
+          code: "AUTH_REQUIRED",
+          message: "No se pudo determinar el usuario autenticado.",
+        });
+      }
+    } else if (userIdQuery) {
+      effectiveUserId = userIdQuery;
+    }
+    if (effectiveUserId) {
       where.push("cr.opened_by = :userId");
-      repl.userId = userId;
+      repl.userId = effectiveUserId;
     }
     if (dateFrom) {
       where.push("cr.opened_at >= :dateFrom");
@@ -625,31 +787,51 @@ async function adminList(req, res, next) {
       { replacements: repl, type: sequelize.QueryTypes.SELECT }
     );
 
-    // KPIs del día de hoy (independientes de filtros).
+    // KPIs del día de hoy. Aplico el mismo scope que la lista para coherencia.
+    //  - super_admin sin filtros: vista global.
+    //  - branch admin / cajero: scope obligatorio a su sucursal (y a su userId si es cajero).
+    const todayBranchSql = effectiveBranchId ? "AND branch_id = :branchId" : "";
+    const todaySaleBranchSql = effectiveBranchId ? "AND s.branch_id = :branchId" : "";
+    const todayUserSql = effectiveUserId ? "AND opened_by = :userId" : "";
+    const todaySaleUserSql = effectiveUserId ? "AND s.user_id = :userId" : "";
     const todayRows = await sequelize.query(
       `
         SELECT
           (
             SELECT COUNT(*) FROM cash_registers
             WHERE status = 'OPEN'
+              ${todayBranchSql}
+              ${todayUserSql}
           ) AS open_now,
           (
             SELECT COUNT(*) FROM cash_registers
             WHERE status = 'CLOSED'
               AND DATE(closed_at) = CURDATE()
+              ${todayBranchSql}
+              ${todayUserSql}
           ) AS closed_today,
           (
             SELECT COALESCE(SUM(difference_cash), 0) FROM cash_registers
             WHERE status = 'CLOSED'
               AND DATE(closed_at) = CURDATE()
+              ${todayBranchSql}
+              ${todayUserSql}
           ) AS difference_today,
           (
             SELECT COALESCE(SUM(s.total), 0) FROM sales s
             WHERE s.status IN ('PAID', 'REFUNDED')
               AND DATE(s.sold_at) = CURDATE()
+              ${todaySaleBranchSql}
+              ${todaySaleUserSql}
           ) AS sales_total_today
       `,
-      { type: sequelize.QueryTypes.SELECT }
+      {
+        type: sequelize.QueryTypes.SELECT,
+        replacements: {
+          ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
+          ...(effectiveUserId   ? { userId: effectiveUserId } : {}),
+        },
+      }
     );
 
     return res.json({

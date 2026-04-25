@@ -3,6 +3,7 @@
 
 const { QueryTypes } = require("sequelize");
 const { sequelize } = require("../models");
+const access = require("../utils/accessScope");
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function toInt(v, d = 0) {
@@ -22,43 +23,48 @@ function endOfDay(d = new Date()) {
   const x = new Date(d); x.setHours(23, 59, 59, 999); return x;
 }
 
+// DEPRECATED: legado. Solo super_admin ve global. Para gating de acciones usar `access.isBranchAdmin`.
 function isAdminReq(req) {
-  const u = req?.user || req?.auth || {};
-  const email = String(u?.email || u?.identifier || u?.username || "").toLowerCase();
-  if (email === "admin@360pos.local" || email.includes("admin@360pos.local")) return true;
-  if (u?.is_admin === true || u?.isAdmin === true || u?.admin === true) return true;
-  const roleNames = [];
-  if (typeof u?.role === "string") roleNames.push(u.role);
-  if (typeof u?.rol === "string") roleNames.push(u.rol);
-  if (Array.isArray(u?.roles)) {
-    for (const r of u.roles) {
-      if (!r) continue;
-      if (typeof r === "string") roleNames.push(r);
-      else if (typeof r?.name === "string") roleNames.push(r.name);
-    }
-  }
-  const norm = (s) => String(s || "").trim().toLowerCase();
-  return roleNames.map(norm).some((x) => ["admin", "super_admin", "superadmin", "root", "owner"].includes(x));
+  return access.isSuperAdmin(req);
 }
 
 function getAuthBranchId(req) {
-  return (
-    toInt(req?.ctx?.branchId, 0) || toInt(req?.ctx?.branch_id, 0) ||
-    toInt(req?.user?.branch_id, 0) || toInt(req?.user?.branchId, 0) ||
-    toInt(req?.auth?.branch_id, 0) || toInt(req?.auth?.branchId, 0) ||
-    toInt(req?.branch?.id, 0) || toInt(req?.branchId, 0) ||
-    toInt(req?.branchContext?.branch_id, 0) || toInt(req?.branchContext?.id, 0) || 0
-  );
+  return access.getBranchId(req);
 }
 
 function resolveBranchScope(req) {
-  const admin = isAdminReq(req);
+  const scope = access.getAccessScope(req);
   const qBranch = toInt(req.query.branch_id ?? req.query.branchId, 0);
-  if (admin) {
-    return { admin: true, branchId: qBranch > 0 ? qBranch : null, mode: qBranch > 0 ? "SINGLE_BRANCH" : "ALL_BRANCHES" };
+  const activeBranch = toInt(req?.ctx?.branchId, 0) || access.getBranchId(req);
+
+  if (scope.kind === "global") {
+    return {
+      admin: true,
+      kind: "global",
+      isCajero: false,
+      branchId: qBranch > 0 ? qBranch : null,
+      branchIds: qBranch > 0 ? [qBranch] : [],
+      userId: null,
+      mode: qBranch > 0 ? "SINGLE_BRANCH" : "ALL_BRANCHES",
+    };
   }
-  const branchId = getAuthBranchId(req);
-  return { admin: false, branchId: branchId > 0 ? branchId : null, mode: "USER_BRANCH" };
+
+  // branch admin / cajero: scope acotado a la branch activa.
+  const allowed = scope.branchIds || [];
+  let branchId = qBranch > 0 ? qBranch : activeBranch;
+  if (allowed.length && branchId && !allowed.includes(branchId)) branchId = allowed[0];
+  if (!branchId && allowed.length) branchId = allowed[0];
+
+  const isAdmin = scope.kind === "branch";
+  return {
+    admin: isAdmin,
+    kind: scope.kind,
+    isCajero: scope.kind === "user",
+    branchId: branchId || null,
+    branchIds: branchId ? [branchId] : [],
+    userId: scope.userId || null,
+    mode: isAdmin ? "BRANCH_ADMIN" : "USER_BRANCH",
+  };
 }
 
 function normalizePeriod(p) {
@@ -87,6 +93,21 @@ function q(sql, replacements, retDefault = []) {
 
 function num(v) { return Number(v || 0); }
 
+// Helper: arma fragmentos SQL extra de scope para queries sobre `sales` (alias `s`).
+//   - Branch admin / cajero ya tienen `branchCond` aplicado, pero el cajero
+//     necesita un filtro adicional `s.user_id = :userId`.
+function saleUserCond(scope, alias = "s") {
+  return scope?.isCajero && scope?.userId ? ` AND ${alias}.user_id = :userId` : "";
+}
+function cashUserCond(scope, alias = "cr") {
+  return scope?.isCajero && scope?.userId ? ` AND ${alias}.opened_by = :userId` : "";
+}
+function withUserId(rep, scope) {
+  return scope?.isCajero && scope?.userId
+    ? { ...rep, userId: scope.userId }
+    : rep;
+}
+
 // ─── GET /analytics/cash ─────────────────────────────────────────────────────
 async function cashAnalytics(req, res, next) {
   try {
@@ -100,11 +121,16 @@ async function cashAnalytics(req, res, next) {
     const todayTo = endOfDay(now);
     const range = computeRange(req.query.period, todayFrom, todayTo);
 
-    const branchCond = scope.branchId ? "AND cr.branch_id = :branchId" : "";
+    // branch + cajero scope sobre cash_registers (alias `cr`)
+    const branchCond = (scope.branchId ? "AND cr.branch_id = :branchId" : "")
+                    + cashUserCond(scope, "cr");
     const dateCondRegister = range.from
       ? "AND cr.opened_at BETWEEN :from AND :to"
       : "AND cr.opened_at <= :to";
-    const replacements = { from: range.from, to: range.to, branchId: scope.branchId || null };
+    const replacements = withUserId(
+      { from: range.from, to: range.to, branchId: scope.branchId || null },
+      scope
+    );
 
     // Resumen sesiones de caja
     const [sessionsSummary] = await q(
@@ -254,7 +280,7 @@ async function cashAnalytics(req, res, next) {
       WHERE 1=1 ${branchCond}
       ORDER BY cr.id DESC
       LIMIT 20`,
-      { branchId: scope.branchId || null }
+      withUserId({ branchId: scope.branchId || null }, scope)
     );
 
     return res.json({
@@ -351,9 +377,14 @@ async function salesDeep(req, res, next) {
     const todayTo = endOfDay(now);
     const range = computeRange(req.query.period, todayFrom, todayTo);
 
-    const branchCond = scope.branchId ? "AND s.branch_id = :branchId" : "";
+    // branch + cajero scope sobre sales (alias `s`)
+    const branchCond = (scope.branchId ? "AND s.branch_id = :branchId" : "")
+                    + saleUserCond(scope, "s");
     const dateCond = range.from ? "AND s.sold_at BETWEEN :from AND :to" : "AND s.sold_at <= :to";
-    const rep = { from: range.from, to: range.to, branchId: scope.branchId || null };
+    const rep = withUserId(
+      { from: range.from, to: range.to, branchId: scope.branchId || null },
+      scope
+    );
 
     // Por condición fiscal del cliente
     const byTaxCondition = await q(
@@ -462,9 +493,10 @@ async function salesDeep(req, res, next) {
       WHERE s.status='PAID'
         AND s.sold_at BETWEEN :tFrom AND :tTo
         ${scope.branchId ? "AND s.branch_id = :branchId" : ""}
+        ${saleUserCond(scope, "s")}
       GROUP BY DATE_FORMAT(s.sold_at,'%Y-%m'), p.method
       ORDER BY ym ASC`,
-      { tFrom: twelveMonthsAgo, tTo: todayTo, branchId: scope.branchId || null }
+      withUserId({ tFrom: twelveMonthsAgo, tTo: todayTo, branchId: scope.branchId || null }, scope)
     );
 
     // Ventas canceladas (CANCELLED)

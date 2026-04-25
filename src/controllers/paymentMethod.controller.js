@@ -10,6 +10,7 @@ const {
   toPublicDto,
   getActivePaymentMethods,
 } = require("../services/paymentMethod.service");
+const access = require("../utils/accessScope");
 
 function toInt(v, def = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -60,6 +61,30 @@ function rid(req) {
   );
 }
 
+// Bloquea operaciones cross-branch: super_admin pasa siempre; resto requiere que
+// el row pertenezca a su sucursal activa. Devuelve true si autorizado.
+function authorizeBranchAccess(req, res, row) {
+  if (access.isSuperAdmin(req)) return true;
+  const ctxBranchId = access.getBranchId(req);
+  if (!ctxBranchId) {
+    res.status(400).json({
+      ok: false,
+      code: "BRANCH_REQUIRED",
+      message: "No se pudo determinar la sucursal del usuario.",
+    });
+    return false;
+  }
+  if (parseInt(row?.branch_id, 10) !== parseInt(ctxBranchId, 10)) {
+    res.status(403).json({
+      ok: false,
+      code: "FORBIDDEN_BRANCH",
+      message: "No podés operar sobre medios de pago de otra sucursal.",
+    });
+    return false;
+  }
+  return true;
+}
+
 function logPm(req, level, msg, extra = {}) {
   console[level](`[PAYMENT_METHODS] ${msg}`, {
     rid: req._rid,
@@ -83,13 +108,26 @@ async function adminList(req, res) {
       });
     }
 
-    const branchId = toInt(req.query.branch_id || req.query.branchId, 0) || null;
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId, 0) || null;
     const activeOnly = parseBool(req.query.active_only, false);
     const q = String(req.query.q || "").trim();
 
     const where = {};
 
-    if (branchId) where.branch_id = branchId;
+    // Scope: super_admin libre; branch admin acotado a su sucursal.
+    if (access.isSuperAdmin(req)) {
+      if (branchIdQuery) where.branch_id = branchIdQuery;
+    } else {
+      const ctxBranchId = access.getBranchId(req);
+      if (!ctxBranchId) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario.",
+        });
+      }
+      where.branch_id = ctxBranchId;
+    }
     if (activeOnly) where.is_active = true;
     if (q) {
       where[Op.or] = [
@@ -153,6 +191,8 @@ async function adminGetOne(req, res) {
       });
     }
 
+    if (!authorizeBranchAccess(req, res, row)) return;
+
     return res.json({
       ok: true,
       data: toPublicDto(row),
@@ -181,6 +221,26 @@ async function adminCreate(req, res) {
 
     const payload = buildPayload(req.body || {});
     validatePayload(payload, { isCreate: true });
+
+    // Branch admin no puede crear métodos para otra sucursal.
+    if (!access.isSuperAdmin(req)) {
+      const ctxBranchId = access.getBranchId(req);
+      if (!ctxBranchId) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario.",
+        });
+      }
+      if (payload.branch_id && parseInt(payload.branch_id, 10) !== parseInt(ctxBranchId, 10)) {
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "Solo podés crear métodos para tu propia sucursal.",
+        });
+      }
+      payload.branch_id = ctxBranchId;
+    }
 
     await ensureUniqueCode({
       branch_id: payload.branch_id,
@@ -235,10 +295,17 @@ async function adminUpdate(req, res) {
       });
     }
 
+    if (!authorizeBranchAccess(req, res, row)) return;
+
     const payload = buildPayload({
       ...row.toJSON(),
       ...(req.body || {}),
     });
+
+    // No permitir mover un método a otra sucursal si no es super_admin.
+    if (!access.isSuperAdmin(req)) {
+      payload.branch_id = row.branch_id;
+    }
 
     validatePayload(payload, { isCreate: false });
 
@@ -296,6 +363,8 @@ async function adminDelete(req, res) {
       });
     }
 
+    if (!authorizeBranchAccess(req, res, row)) return;
+
     if (row.is_system) {
       return res.status(400).json({
         ok: false,
@@ -349,6 +418,8 @@ async function adminToggleActive(req, res) {
         message: "Medio de pago no encontrado",
       });
     }
+
+    if (!authorizeBranchAccess(req, res, row)) return;
 
     await row.update({ is_active: !row.is_active });
 

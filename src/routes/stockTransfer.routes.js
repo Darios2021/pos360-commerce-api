@@ -8,6 +8,10 @@ const ctrl   = require("../controllers/stockTransfer.controller");
 router.get("/",    ctrl.list);
 router.post("/",   ctrl.create);
 
+// Operaciones bulk (deben ir antes de /:id para no chocar con la ruta dinámica)
+router.post("/bulk/receive", ctrl.bulkReceive);
+router.post("/bulk/delete",  ctrl.bulkDelete);
+
 // Detalle y edición de draft
 router.get("/:id",    ctrl.getById);
 router.put("/:id",    ctrl.update);

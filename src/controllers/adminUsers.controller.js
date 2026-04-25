@@ -178,18 +178,21 @@ async function listUsers(req, res) {
       ];
     }
 
-    // ✅ include branches con filtro SOLO si no es super_admin/admin
-    const branchesInclude =
-      is_super_admin || isAdmin
-        ? { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false }
-        : {
-            model: Branch,
-            as: "branches",
-            attributes: ["id", "name"],
-            through: { attributes: [] },
-            required: true, // solo usuarios que matcheen
-            where: branch_ids.length ? { id: { [Op.in]: branch_ids } } : { id: -1 },
-          };
+    // ✅ Scope:
+    //   - super_admin: ve TODOS los usuarios del sistema.
+    //   - admin / cualquier otro: solo ve usuarios cuyo user_branches incluya
+    //     alguna de SUS sucursales habilitadas. Antes "admin" caía en el caso
+    //     super_admin y veía usuarios de cualquier sucursal — eso fue el bug.
+    const branchesInclude = is_super_admin
+      ? { model: Branch, as: "branches", attributes: ["id", "name"], through: { attributes: [] }, required: false }
+      : {
+          model: Branch,
+          as: "branches",
+          attributes: ["id", "name"],
+          through: { attributes: [] },
+          required: true, // solo usuarios cuya intersección caiga en mis branches
+          where: branch_ids.length ? { id: { [Op.in]: branch_ids } } : { id: -1 },
+        };
 
     const { rows, count } = await User.findAndCountAll({
       where,

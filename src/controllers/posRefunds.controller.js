@@ -12,6 +12,7 @@
 // - restock=true ahora actualiza stock_balances y registra stock_movement
 
 const { sequelize } = require("../models");
+const access = require("../utils/accessScope");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -43,10 +44,34 @@ function normalizeMethod(m) {
 
 async function saleExists(saleId, t) {
   const [rows] = await sequelize.query(
-    "SELECT id, branch_id, total, paid_total, status FROM sales WHERE id = ? LIMIT 1",
+    "SELECT id, branch_id, user_id, total, paid_total, status FROM sales WHERE id = ? LIMIT 1",
     { replacements: [saleId], transaction: t }
   );
   return Array.isArray(rows) ? rows[0] : null;
+}
+
+// Valida que el usuario pueda operar sobre esta venta (cross-branch / cross-user).
+// Devuelve { ok: true } o { ok: false, status, code, message }.
+function authorizeSaleAccess(req, sale) {
+  if (!sale) return { ok: false, status: 404, code: "SALE_NOT_FOUND", message: "Venta no encontrada." };
+  if (access.isSuperAdmin(req)) return { ok: true };
+
+  const ctxBranchId = access.getBranchId(req);
+  if (!ctxBranchId) {
+    return { ok: false, status: 400, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." };
+  }
+  if (parseInt(sale.branch_id, 10) !== parseInt(ctxBranchId, 10)) {
+    return { ok: false, status: 403, code: "CROSS_BRANCH_SALE", message: "No podés operar sobre una venta de otra sucursal." };
+  }
+
+  if (!access.isBranchAdmin(req)) {
+    // cajero: solo puede operar sobre SUS ventas
+    const ctxUserId = access.getUserId(req);
+    if (parseInt(sale.user_id, 10) !== parseInt(ctxUserId, 10)) {
+      return { ok: false, status: 403, code: "FORBIDDEN_USER", message: "Solo podés operar sobre tus propias ventas." };
+    }
+  }
+  return { ok: true };
 }
 
 async function insertSaleReturn({
@@ -256,7 +281,7 @@ async function createRefund(req, res) {
 
   const t = await sequelize.transaction();
   try {
-    // 1) validar venta existe
+    // 1) validar venta existe + ámbito (branch / dueño)
     const sale = await saleExists(saleId, t);
     if (!sale) {
       await t.rollback();
@@ -265,6 +290,11 @@ async function createRefund(req, res) {
         code: "SALE_NOT_FOUND",
         message: `No existe la venta id=${saleId} en esta base`,
       });
+    }
+    const auth = authorizeSaleAccess(req, sale);
+    if (!auth.ok) {
+      await t.rollback();
+      return res.status(auth.status).json({ ok: false, code: auth.code, message: auth.message });
     }
 
     // 2) insertar sale_returns (robusto)
@@ -362,6 +392,16 @@ async function listRefundsBySale(req, res) {
   }
 
   try {
+    // Sellado de scope antes de exponer los refunds.
+    const sale = await saleExists(saleId, null);
+    if (!sale) {
+      return res.status(404).json({ ok: false, code: "SALE_NOT_FOUND", message: "Venta no encontrada." });
+    }
+    const auth = authorizeSaleAccess(req, sale);
+    if (!auth.ok) {
+      return res.status(auth.status).json({ ok: false, code: auth.code, message: auth.message });
+    }
+
     const [rows] = await sequelize.query(
       `
       SELECT
