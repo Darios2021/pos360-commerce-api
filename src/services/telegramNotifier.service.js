@@ -752,7 +752,7 @@ async function notifyTransferDispatched({ transfer_id }) {
       for (const it of itemsToShow) {
         const pname = it.product?.name || `Producto #${it.product_id}`;
         const psku = it.product?.sku || it.product?.code || "";
-        const qty = Number(it.qty || it.quantity || 0);
+        const qty = Number(it.qty_sent ?? it.qty ?? it.quantity ?? 0);
         const skuTag = psku ? ` <code>${escapeHtml(psku)}</code>` : "";
         lines.push(`• ${escapeHtml(pname)}${skuTag} ×${qty}`);
       }
@@ -836,7 +836,7 @@ async function scanPendingTransfers() {
         for (const it of itemsToShow) {
           const pname = it.product?.name || `Producto #${it.product_id}`;
           const psku = it.product?.sku || it.product?.code || "";
-          const qty = Number(it.qty || it.quantity || 0);
+          const qty = Number(it.qty_sent ?? it.qty ?? it.quantity ?? 0);
           const skuTag = psku ? ` <code>${escapeHtml(psku)}</code>` : "";
           lines.push(`• ${escapeHtml(pname)}${skuTag} ×${qty}`);
         }
