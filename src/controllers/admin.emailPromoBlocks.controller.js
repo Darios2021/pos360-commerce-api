@@ -119,22 +119,42 @@ async function loadProductForPromo(productId) {
     imageUrl = rows?.[0]?.url || null;
   } catch (_) {}
 
-  // Precios:
-  //  - price_final = lo que paga el cliente (price o price_discount si existe)
-  //  - price_original = price_list si > price_final (precio de lista superior)
-  const priceFinal = Number(p.price) || 0;
-  const priceList = Number(p.price_list) || 0;
+  // Precios — el sistema usa varios campos según el modo del shop. Tomamos
+  // el primero disponible con valor > 0:
+  //   price_final = price > price_discount > price_list
+  //   price_original = price_list (si es mayor al price_final, sino null)
+  const numOr0 = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const candPrice    = numOr0(p.price);
+  const candDiscount = numOr0(p.price_discount);
+  const candList     = numOr0(p.price_list);
 
-  let priceFinalFmt = fmtPrice(priceFinal);
-  let priceOriginalFmt = null;
-  if (priceList > priceFinal && priceFinal > 0) {
-    priceOriginalFmt = fmtPrice(priceList);
+  // priceFinal = el más bajo entre los candidatos visibles, o el primero > 0.
+  // En la práctica:
+  //   - Si hay price_discount: ese es el final, price_list es el tachado.
+  //   - Si no hay discount, price es el final.
+  //   - Si solo hay price_list (productos solo de catálogo), ese es el final.
+  let priceFinal = 0;
+  let priceOriginal = 0;
+  if (candDiscount > 0) {
+    priceFinal = candDiscount;
+    priceOriginal = candList || candPrice;
+  } else if (candPrice > 0) {
+    priceFinal = candPrice;
+    priceOriginal = candList > candPrice ? candList : 0;
+  } else if (candList > 0) {
+    priceFinal = candList;
   }
+
+  const priceFinalFmt = fmtPrice(priceFinal);
+  const priceOriginalFmt = priceOriginal > priceFinal ? fmtPrice(priceOriginal) : null;
 
   // % de descuento si aplica
   let discountPct = null;
-  if (priceList > 0 && priceFinal > 0 && priceList > priceFinal) {
-    discountPct = Math.round(((priceList - priceFinal) / priceList) * 100);
+  if (priceOriginal > 0 && priceFinal > 0 && priceOriginal > priceFinal) {
+    discountPct = Math.round(((priceOriginal - priceFinal) / priceOriginal) * 100);
   }
 
   return {
