@@ -16,6 +16,8 @@ module.exports = (sequelize, DataTypes) => {
       enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
 
       // Toggles por tipo de alerta (arrancan apagados).
+      alert_cash_opened: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+      alert_cash_closed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_cash_shortage: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_cash_surplus: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_cash_long_open: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },

@@ -137,6 +137,8 @@ async function ensureTables() {
       chat_id VARCHAR(64) NULL,
       parse_mode VARCHAR(16) NOT NULL DEFAULT 'HTML',
       enabled TINYINT(1) NOT NULL DEFAULT 0,
+      alert_cash_opened TINYINT(1) NOT NULL DEFAULT 1,
+      alert_cash_closed TINYINT(1) NOT NULL DEFAULT 1,
       alert_cash_shortage TINYINT(1) NOT NULL DEFAULT 1,
       alert_cash_surplus TINYINT(1) NOT NULL DEFAULT 1,
       alert_cash_long_open TINYINT(1) NOT NULL DEFAULT 1,
@@ -187,6 +189,8 @@ async function ensureTables() {
     { name: "alert_transfer_dispatched", ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_transfer_pending",    ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_transfer_received",   ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_cash_opened",         ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_cash_closed",         ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
   ];
   for (const c of newCols) {
     try {
@@ -223,6 +227,7 @@ async function saveConfig(patch = {}) {
 
   const allowed = [
     "bot_token", "chat_id", "parse_mode", "enabled",
+    "alert_cash_opened", "alert_cash_closed",
     "alert_cash_shortage", "alert_cash_surplus", "alert_cash_long_open",
     "alert_cash_overtime", "alert_cash_big_out",
     "alert_stock_zero", "alert_stock_low", "alert_stock_negative",
@@ -596,6 +601,70 @@ async function notifyStockChange({ product_id, warehouse_id, prev, next, delta, 
   }
 }
 
+async function notifyCashRegisterOpen({ cash_register_id }) {
+  try {
+    if (!cash_register_id) return;
+    const cfg = await getConfig();
+    if (!cfg?.enabled) return;
+    if (!cfg.alert_cash_opened) return;
+
+    const { CashRegister, User, Branch } = require("../models");
+    if (!CashRegister) return;
+
+    const cr = await CashRegister.findByPk(cash_register_id);
+    if (!cr) return;
+
+    const opening = Number(cr.opening_cash || 0);
+
+    let cashierName = "—";
+    try {
+      if (User && cr.opened_by) {
+        const u = await User.findByPk(cr.opened_by, {
+          attributes: ["id", "first_name", "last_name", "email", "username"],
+        });
+        if (u) {
+          const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+          cashierName = full || u.username || u.email || `Usuario #${u.id}`;
+        }
+      }
+    } catch (_) {}
+
+    let branchName = "—";
+    try {
+      if (Branch && cr.branch_id) {
+        const b = await Branch.findByPk(cr.branch_id, { attributes: ["id", "name"] });
+        if (b?.name) branchName = b.name;
+      }
+    } catch (_) {}
+
+    const lines = [
+      `🧾 Caja <b>#${cr.id}</b> · ${escapeHtml(branchName)}`,
+      `👤 ${escapeHtml(cashierName)}`,
+      { k: "Apertura", v: `<b>$${fmtMoney(opening)}</b>` },
+    ];
+    if (cr.opened_at) {
+      lines.push({ k: "Hora", v: new Date(cr.opened_at).toLocaleString("es-AR") });
+    }
+    if (cr.opening_note) {
+      lines.push(`📝 ${escapeHtml(String(cr.opening_note).slice(0, 200))}`);
+    }
+
+    await sendAlert({
+      code: "CASH_OPENED",
+      title: "Caja abierta",
+      severity: "low",
+      toggleKey: "alert_cash_opened",
+      reference_type: "cash_register",
+      reference_id: cr.id,
+      // Dedupe por id+open: la apertura es un evento único, igualmente blindamos.
+      dedupe_key_extra: cr.opened_at ? new Date(cr.opened_at).toISOString() : "",
+      lines,
+    });
+  } catch (e) {
+    console.warn("[telegram.notifyCashRegisterOpen] error:", e?.message);
+  }
+}
+
 async function notifyCashRegisterClose({ cash_register_id }) {
   try {
     if (!cash_register_id) return;
@@ -641,6 +710,37 @@ async function notifyCashRegisterClose({ cash_register_id }) {
       `👤 ${escapeHtml(cashierName)}`,
       { k: "Duración", v: `${durationHours.toFixed(1)}h` },
     ];
+
+    // CASH_CLOSED: notificación genérica de cierre (siempre que el toggle esté activo).
+    // Se manda *además* de las alertas específicas de shortage/surplus/overtime.
+    if (cfg.alert_cash_closed) {
+      const closedLines = [
+        `🧾 Caja <b>#${cr.id}</b> · ${escapeHtml(branchName)}`,
+        `👤 ${escapeHtml(cashierName)}`,
+        { k: "Apertura", v: `$${fmtMoney(opening)}` },
+        { k: "Cierre", v: `$${fmtMoney(cr.closing_cash || 0)}` },
+        { k: "Esperado", v: `$${fmtMoney(cr.expected_cash || 0)}` },
+        { k: "Duración", v: `${durationHours.toFixed(1)}h` },
+      ];
+      if (diff != null) {
+        const sign = diff < 0 ? "-" : diff > 0 ? "+" : "";
+        const color = diff < 0 ? "red" : diff > 0 ? "green" : "";
+        const colorTag = color
+          ? `<b style="color:${color}">${sign}$${fmtMoney(Math.abs(diff))}</b>`
+          : `<b>$${fmtMoney(0)}</b>`;
+        closedLines.push({ k: "Diferencia", v: colorTag });
+      }
+      await sendAlert({
+        code: "CASH_CLOSED",
+        title: "Caja cerrada",
+        severity: "low",
+        toggleKey: "alert_cash_closed",
+        reference_type: "cash_register",
+        reference_id: cr.id,
+        dedupe_key_extra: cr.closed_at ? new Date(cr.closed_at).toISOString() : "",
+        lines: closedLines,
+      });
+    }
 
     // SHORTAGE: faltante.
     if (cfg.alert_cash_shortage && diff != null && diff < 0) {
@@ -1192,6 +1292,7 @@ module.exports = {
   formatAlert,
   DEFAULT_THRESHOLDS,
   notifyStockChange,
+  notifyCashRegisterOpen,
   notifyCashRegisterClose,
   notifyTransferDispatched,
   notifyTransferReceived,

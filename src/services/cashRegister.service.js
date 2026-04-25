@@ -337,6 +337,17 @@ async function openCashRegister({
     transaction,
   });
 
+  // Hook de notificaciones (Telegram). Post-commit para no notificar si la txn falla.
+  try {
+    const tg = require("./telegramNotifier.service");
+    const fire = () => tg.notifyCashRegisterOpen({ cash_register_id: cashRegister.id }).catch(() => {});
+    if (transaction && typeof transaction.afterCommit === "function") {
+      transaction.afterCommit(fire);
+    } else {
+      fire();
+    }
+  } catch (_) {}
+
   return cashRegister;
 }
 
