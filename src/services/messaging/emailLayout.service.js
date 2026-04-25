@@ -54,10 +54,13 @@ async function loadBrandingFromDb() {
     }
   } catch (_) {}
 
-  // shop_links activos. Filtramos kinds tipo "*_post" / "*_video" / "*_reel"
-  // porque esos son referencias a posts individuales del shop, no perfiles
-  // de redes sociales. Para el footer del email queremos solo los perfiles
-  // (instagram, facebook, whatsapp, etc.).
+  // shop_links activos. Lógica:
+  //   1) Si el kind es exacto (ej: "instagram"), gana siempre.
+  //   2) Si el kind tiene sufijo (_post, _video, _reel, _story, _short, _link),
+  //      lo tratamos como variante del kind base ("instagram_post" → "instagram").
+  //      Solo se usa la PRIMERA variante de cada base como representante del
+  //      perfil — así no se llena el footer de N copias de Instagram.
+  //   3) El kind exacto siempre tiene precedencia sobre las variantes.
   let links = [];
   try {
     const [rows] = await sequelize.query(
@@ -65,15 +68,37 @@ async function loadBrandingFromDb() {
        WHERE is_active = 1
        ORDER BY sort_order ASC, id ASC`
     );
-    const seenKinds = new Set();
+    const SUFFIX_RE = /(_post|_video|_reel|_story|_short|_link)$/i;
+    const exactByKind = new Map();    // kind base exacto presente en DB
+    const variantByBase = new Map();  // primer registro variante por base
+
     for (const r of rows || []) {
       const k = String(r.kind || "").toLowerCase().trim();
-      // Ignorar kinds que apuntan a contenido individual (no a perfiles).
-      if (/(_post|_video|_reel|_story|_short)$/i.test(k)) continue;
-      // Deduplicar: solo el primer link por kind aparece en el footer.
-      if (seenKinds.has(k)) continue;
-      seenKinds.add(k);
-      links.push(r);
+      if (!k) continue;
+
+      if (SUFFIX_RE.test(k)) {
+        const base = k.replace(SUFFIX_RE, "");
+        if (!variantByBase.has(base)) {
+          // Guardamos como del kind base (no _post) para que el resolver de
+          // íconos lo trate como red social estándar.
+          variantByBase.set(base, { ...r, kind: base });
+        }
+      } else {
+        if (!exactByKind.has(k)) exactByKind.set(k, r);
+      }
+    }
+
+    // Combinamos: el kind exacto pisa la variante (si existe el "instagram"
+    // exacto, ignoramos los "instagram_post").
+    const seen = new Set();
+    for (const [kind, row] of exactByKind) {
+      links.push(row);
+      seen.add(kind);
+    }
+    for (const [base, row] of variantByBase) {
+      if (seen.has(base)) continue;
+      links.push(row);
+      seen.add(base);
     }
   } catch (_) {}
 
