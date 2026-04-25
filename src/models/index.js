@@ -66,6 +66,20 @@ try {
   Customer = null;
 }
 
+// ===== CRM: plantillas + log de mensajes =====
+let MessageTemplate = null;
+try {
+  MessageTemplate = require("./MessageTemplate")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ MessageTemplate no cargado:", e?.message);
+}
+let MessageLog = null;
+try {
+  MessageLog = require("./MessageLog")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ MessageLog no cargado:", e?.message);
+}
+
 // ===== PAYMENT METHOD =====
 let PaymentMethod = null;
 try {
@@ -565,6 +579,10 @@ const models = {
   ShopLink,
   EcomCustomer,
   Customer,
+
+  // CRM
+  MessageTemplate,
+  MessageLog,
 
   // Fiscal admin
   FiscalConfig,
