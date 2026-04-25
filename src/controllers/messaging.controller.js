@@ -31,6 +31,16 @@ function toInt(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 function s(v) { return String(v ?? "").trim(); }
+function sleep(ms) { return new Promise((r) => setTimeout(r, Math.max(0, ms))); }
+
+// Throttle entre envíos de un bulk para mantener buena reputación con
+// Gmail/Outlook: enviar de a 10 con ~800ms de gap simula el patrón de un
+// humano con cliente de email común y reduce el riesgo de filtros anti-SPAM.
+// Configurable vía env CRM_BULK_THROTTLE_MS (default 800ms).
+const SEND_THROTTLE_MS = (() => {
+  const v = parseInt(process.env.CRM_BULK_THROTTLE_MS || "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : 800;
+})();
 function gateAdmin(req, res) {
   if (!access.isBranchAdmin(req)) {
     res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo administradores." });
@@ -430,6 +440,8 @@ async function sendBulk(req, res, next) {
     );
     if (!tpl) return res.status(404).json({ ok: false, code: "TEMPLATE_NOT_FOUND" });
 
+    const startedAt = Date.now();
+
     // Firma + promos resueltas UNA vez (no por cliente).
     const includeSignatureBulk = req.body?.include_signature;
     const bulkSignature = channel === "email"
@@ -449,7 +461,18 @@ async function sendBulk(req, res, next) {
     const links = []; // wa.me links si aplica
 
     // Procesamos secuencialmente para no saturar SMTP / Meta API.
+    // Para email se introduce un throttle entre destinatarios (ver
+    // SEND_THROTTLE_MS) — evita ráfagas que disparan filtros anti-SPAM.
+    let processedCount = 0;
     for (const id of ids) {
+      // Throttle: esperar antes de procesar el siguiente (excepto el primero).
+      // Sólo aplica a email — para WhatsApp con link manual no tiene sentido,
+      // y para Cloud API la latencia natural ya espacia los envíos.
+      if (processedCount > 0 && channel === "email" && SEND_THROTTLE_MS > 0) {
+        await sleep(SEND_THROTTLE_MS);
+      }
+      processedCount++;
+
       try {
         const ctxData = await loadCustomerWithStats(id);
         if (!ctxData) { skippedCount++; results.push({ id, ok: false, skipped: "not_found" }); continue; }
@@ -529,6 +552,8 @@ async function sendBulk(req, res, next) {
         failed: failCount,
         skipped: skippedCount,
         manual_links: links.length,
+        duration_ms: Date.now() - startedAt,
+        throttle_ms: channel === "email" ? SEND_THROTTLE_MS : 0,
       },
       results,
       manual_links: links,
