@@ -485,6 +485,93 @@ async function listLogs(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ============================================================
+// TEST EMAIL — manda un email de prueba a una dirección suelta
+// para verificar que el SMTP esté correctamente configurado.
+// No requiere customer ni plantilla: el admin escribe a quién, asunto y body.
+// ============================================================
+async function testEmail(req, res, next) {
+  try {
+    if (!gateAdmin(req, res)) return;
+    await ensureTables();
+
+    const to = s(req.body?.to);
+    const subject = s(req.body?.subject) || "Prueba de envío POS360";
+    const body = s(req.body?.body) || "Este es un email de prueba para verificar la configuración SMTP.";
+
+    if (!to) {
+      return res.status(400).json({
+        ok: false,
+        code: "TO_REQUIRED",
+        message: "Falta el destinatario.",
+      });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      return res.status(400).json({
+        ok: false,
+        code: "INVALID_EMAIL",
+        message: "El email no parece válido.",
+      });
+    }
+
+    // Verificar SMTP antes de intentar enviar (mejor mensaje de error).
+    const ping = await emailSvc.ping();
+    if (!ping.ok) {
+      return res.status(503).json({
+        ok: false,
+        code: ping.code || "SMTP_UNAVAILABLE",
+        message: ping.error || "SMTP no responde. Revisá las variables SMTP_* en CapRover.",
+      });
+    }
+
+    // Logueamos el envío de prueba (sin customer_id porque es libre).
+    const log = await MessageLog.create({
+      customer_id: null,
+      channel: "email",
+      template_id: null,
+      to_address: to,
+      to_name: null,
+      subject,
+      body,
+      status: "queued",
+      sent_by: toInt(req.user?.id, 0) || null,
+    });
+
+    const result = await emailSvc.sendEmail({ to, subject, body });
+
+    await log.update({
+      status: result.ok ? "sent" : "failed",
+      provider: result.provider || null,
+      provider_msg_id: result.message_id || null,
+      error_message: result.error_message || null,
+      sent_at: result.ok ? new Date() : null,
+    });
+
+    if (!result.ok) {
+      return res.status(502).json({
+        ok: false,
+        code: result.code || "SMTP_SEND_FAILED",
+        message: result.error_message || "No se pudo enviar el email.",
+        log_id: log.id,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      data: {
+        log_id: log.id,
+        provider: result.provider,
+        message_id: result.message_id,
+        to,
+        subject,
+      },
+      message: `Email enviado a ${to}. Revisá la bandeja del destinatario (y spam).`,
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
 async function listLogsByCustomer(req, res, next) {
   try {
     if (!gateAdmin(req, res)) return;
@@ -512,4 +599,5 @@ module.exports = {
   sendBulk,
   listLogs,
   listLogsByCustomer,
+  testEmail,
 };

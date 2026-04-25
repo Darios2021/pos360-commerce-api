@@ -14,6 +14,7 @@ router.delete("/templates/:id", ctrl.deleteTemplate);
 router.get("/variables", ctrl.listVariables);
 router.get("/status",    ctrl.status);
 router.post("/preview",  ctrl.preview);
+router.post("/test-email", ctrl.testEmail);
 
 // Envíos
 router.post("/send",       ctrl.sendOne);
