@@ -52,7 +52,7 @@ function keyFromPublicUrl(url) {
   }
 }
 
-function safeUser(u, roles = []) {
+function safeUser(u, roles = [], extras = {}) {
   return {
     id: u.id,
     email: u.email,
@@ -60,8 +60,39 @@ function safeUser(u, roles = []) {
     first_name: u.first_name ?? null,
     last_name: u.last_name ?? null,
     avatar_url: u.avatar_url ?? null,
+    branch_id: u.branch_id ?? null,
     roles: Array.isArray(roles) ? roles : [],
+    branches: Array.isArray(extras.branches) ? extras.branches : [],
   };
+}
+
+// Resuelve los roles autoritativos del request:
+//   1) `req.access.roles` (refresco de DB vía rbac middleware) — preferente.
+//   2) Fallback al JWT (`req.user.roles`) — solo si rbac no corrió.
+// Esto evita que un token cacheado mantenga roles que ya fueron revocados en DB.
+function freshRolesFromReq(req) {
+  if (Array.isArray(req?.access?.roles)) return req.access.roles;
+  if (Array.isArray(req?.user?.roles)) return req.user.roles;
+  return [];
+}
+
+// Branches habilitadas según rbac (si lo trae). Lo usamos para hidratar el
+// frontend con el ámbito real, no el token viejo. Hacemos una query corta
+// para devolver `{ id, name }` y que la UI muestre los nombres correctos.
+async function freshBranchesFromReq(req) {
+  const ids = Array.isArray(req?.access?.branch_ids) ? req.access.branch_ids : [];
+  if (!ids.length) return [];
+  try {
+    const { Branch } = require("../models");
+    const rows = await Branch.findAll({
+      where: { id: ids },
+      attributes: ["id", "name"],
+    });
+    const byId = new Map(rows.map((b) => [b.id, b.name]));
+    return ids.map((id) => ({ id, name: byId.get(id) || null }));
+  } catch {
+    return ids.map((id) => ({ id, name: null }));
+  }
 }
 
 function getUserIdFromReq(req) {
@@ -71,14 +102,24 @@ function getUserIdFromReq(req) {
 }
 
 function safeAccessFromReq(req) {
-  // ✅ No rompe nada: es un extra opcional
-  // Se llena si en rutas agregamos attachAccessContext (o si algún mw lo setea).
+  // Preferimos siempre los datos frescos de DB (req.access). Si no hay
+  // (rbac no corrió), recién ahí caemos al token. Esto evita que un token
+  // viejo siga reportando privilegios revocados.
   const a = req.access || {};
+  const roles = Array.isArray(a.roles)
+    ? a.roles
+    : Array.isArray(req.user?.roles)
+      ? req.user.roles
+      : [];
+  const isSuper =
+    typeof a.is_super_admin === "boolean"
+      ? a.is_super_admin
+      : roles.includes("super_admin") || roles.includes("superadmin");
   return {
-    roles: Array.isArray(a.roles) ? a.roles : Array.isArray(req.user?.roles) ? req.user.roles : [],
+    roles,
     permissions: Array.isArray(a.permissions) ? a.permissions : [],
     branch_ids: Array.isArray(a.branch_ids) ? a.branch_ids : [],
-    is_super_admin: Boolean(a.is_super_admin) || (Array.isArray(a.roles) ? a.roles.includes("super_admin") : false),
+    is_super_admin: Boolean(isSuper),
   };
 }
 
@@ -94,7 +135,7 @@ async function getMe(req, res) {
   // ✅ agregamos "access" como extra (no obligatorio)
   return res.json({
     ok: true,
-    data: safeUser(u, req.user?.roles || []),
+    data: safeUser(u, freshRolesFromReq(req), { branches: await freshBranchesFromReq(req) }),
     access: safeAccessFromReq(req),
   });
 }
@@ -116,7 +157,7 @@ async function updateMe(req, res) {
 
   return res.json({
     ok: true,
-    data: safeUser(u, req.user?.roles || []),
+    data: safeUser(u, freshRolesFromReq(req), { branches: await freshBranchesFromReq(req) }),
     access: safeAccessFromReq(req),
   });
 }
@@ -179,7 +220,7 @@ async function uploadAvatar(req, res) {
 
   return res.json({
     ok: true,
-    data: safeUser(u, req.user?.roles || []),
+    data: safeUser(u, freshRolesFromReq(req), { branches: await freshBranchesFromReq(req) }),
     access: safeAccessFromReq(req),
   });
 }

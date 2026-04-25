@@ -29,6 +29,11 @@ function toInt(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
+// IMPORTANTE: la fuente de verdad de roles es `req.access.roles`, que viene del
+// middleware `attachAccessContext` y se lee FRESCO de la DB en cada request.
+// El JWT (req.user.roles) puede estar stale (ej: al admin le sacaron super_admin
+// pero no expiró el token), por lo que NO se debe mezclar — solo se usa como
+// fallback cuando rbac no corrió.
 function rolesOf(req) {
   const out = new Set();
   const push = (s) => {
@@ -36,10 +41,14 @@ function rolesOf(req) {
     if (x) out.add(x);
   };
 
-  // Roles vienen del rbac middleware (req.access.roles), del token (req.user.roles), o de campos legacy.
+  // 1) Si rbac middleware corrió, sus roles son los autoritativos.
   const accessRoles = req?.access?.roles;
-  if (Array.isArray(accessRoles)) accessRoles.forEach(push);
+  if (Array.isArray(accessRoles)) {
+    accessRoles.forEach(push);
+    return out;
+  }
 
+  // 2) Fallback: token / payload legacy. Solo si rbac no atachó access.
   const u = req?.user || req?.auth || {};
   if (typeof u.role === "string") push(u.role);
   if (typeof u.rol === "string") push(u.rol);

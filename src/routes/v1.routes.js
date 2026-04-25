@@ -339,7 +339,10 @@ safeUse("/dashboard",  requireAuth, attachAccessContext, branchContext, dashboar
 if (analyticsRoutes) safeUse("/analytics", requireAuth, attachAccessContext, branchContext, analyticsRoutes);
 
 safeUse("/pos", requireAuth, attachAccessContext, branchContext, posRoutes);
-safeUse("/me", requireAuth, meRoutes);
+// `/me` ahora pasa por `attachAccessContext` para que devuelva los roles
+// FRESCOS de la DB (no los del JWT viejo). Sin esto el frontend mostraba
+// privilegios cacheados después de revocarlos.
+safeUse("/me", requireAuth, attachAccessContext, meRoutes);
 
 // ✅ payment methods POS
 if (paymentMethodRoutes) {
