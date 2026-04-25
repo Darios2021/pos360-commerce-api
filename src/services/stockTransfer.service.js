@@ -109,7 +109,7 @@ async function dispatchTransfer(transfer_id, { dispatched_by }) {
   if (transfer.status !== "draft")
     throw Object.assign(new Error("Solo se puede despachar una derivación en borrador"), { status: 422 });
 
-  return sequelize.transaction(async (t) => {
+  const result = await sequelize.transaction(async (t) => {
     // ── Validar stock disponible ANTES de descontar ──────────────────────────
     for (const item of transfer.items) {
       const qty = toDecimal(item.qty_sent);
