@@ -871,6 +871,258 @@ async function adminList(req, res, next) {
   }
 }
 
+// ──────────────────────────────────────────────────────────────
+// ADMIN FORCE CLOSE
+// Cierra una caja OPEN sin importar el dueño (solo admin/super_admin).
+// Ofrece dos modos:
+//   - body.mode === "neutral" (default): declared = expected → diferencia 0
+//   - body.mode === "expected_real": calcula expected_cash desde ventas/movs
+//     y cierra con declared = expected_real → también diferencia 0 pero
+//     reflejando el cash real esperado (más correcto si tuvo ventas).
+// ──────────────────────────────────────────────────────────────
+async function adminForceClose(req, res) {
+  const t = await sequelize.transaction();
+  try {
+    if (!access.isBranchAdmin(req)) {
+      await t.rollback();
+      return res.status(403).json({
+        ok: false,
+        code: "FORBIDDEN",
+        message: "Solo administradores pueden cerrar cajas de otros usuarios.",
+      });
+    }
+
+    const id = parseInt(req.params.id, 10);
+    if (!id) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, code: "BAD_ID", message: "id inválido" });
+    }
+
+    const { CashRegister, Sale, Payment, CashMovement } = require("../models");
+
+    const cr = await CashRegister.findByPk(id, { transaction: t });
+    if (!cr) {
+      await t.rollback();
+      return res.status(404).json({ ok: false, code: "CASH_REGISTER_NOT_FOUND", message: "Caja no encontrada." });
+    }
+
+    // Branch admin: solo puede cerrar cajas de sus sucursales habilitadas.
+    if (!access.isSuperAdmin(req)) {
+      const allowed = access.getAllowedBranchIds(req);
+      if (!allowed.includes(parseInt(cr.branch_id, 10))) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "No podés cerrar cajas de otra sucursal.",
+        });
+      }
+    }
+
+    if (String(cr.status) !== "OPEN") {
+      await t.rollback();
+      return res.status(409).json({
+        ok: false,
+        code: "ALREADY_CLOSED",
+        message: "La caja ya está cerrada.",
+      });
+    }
+
+    const mode = String(req.body?.mode || "neutral").toLowerCase();
+    const reason = String(req.body?.reason || "").trim();
+    const closed_by = parseInt(req.user?.id || req.user?.sub || 0, 10) || cr.opened_by;
+    const opening = Number(cr.opening_cash || 0);
+
+    let expectedCash = opening;
+    if (mode === "expected_real") {
+      // Recalcular expected = opening + cash_sales + manual_in − manual_out
+      const { Op } = require("sequelize");
+      const [cashRow] = await sequelize.query(
+        `SELECT COALESCE(SUM(p.amount),0) AS cash_total
+         FROM payments p
+         INNER JOIN sales s ON s.id = p.sale_id
+         WHERE s.cash_register_id = :id
+           AND s.status IN ('PAID','REFUNDED')
+           AND UPPER(p.method) IN ('CASH','EFECTIVO')`,
+        { type: sequelize.QueryTypes.SELECT, replacements: { id }, transaction: t }
+      );
+      const [movsRow] = await sequelize.query(
+        `SELECT
+           COALESCE(SUM(CASE WHEN type='IN' AND reason <> 'APERTURA_CAJA' THEN amount ELSE 0 END),0) AS manual_in,
+           COALESCE(SUM(CASE WHEN type='OUT' THEN amount ELSE 0 END),0) AS manual_out
+         FROM cash_movements
+         WHERE cash_register_id = :id`,
+        { type: sequelize.QueryTypes.SELECT, replacements: { id }, transaction: t }
+      );
+      expectedCash = Number(opening) + Number(cashRow?.cash_total || 0)
+        + Number(movsRow?.manual_in || 0) - Number(movsRow?.manual_out || 0);
+    }
+
+    const closingNote = [
+      cr.closing_note,
+      `Cierre administrativo forzado (${mode}) por user #${closed_by} el ${new Date().toISOString()}`,
+      reason ? `Motivo: ${reason}` : null,
+    ].filter(Boolean).join(" | ");
+
+    await cr.update(
+      {
+        status: "CLOSED",
+        closed_by,
+        closed_at: new Date(),
+        closing_cash: expectedCash,
+        expected_cash: expectedCash,
+        difference_cash: 0,
+        closing_note: closingNote,
+      },
+      {
+        transaction: t,
+        fields: ["status", "closed_by", "closed_at", "closing_cash", "expected_cash", "difference_cash", "closing_note"],
+      }
+    );
+
+    await t.commit();
+
+    // Hook de Telegram (post-commit, fire-and-forget).
+    try {
+      const tg = require("../services/telegramNotifier.service");
+      tg.notifyCashRegisterClose({ cash_register_id: id }).catch(() => {});
+    } catch (_) {}
+
+    return res.json({
+      ok: true,
+      message: "Caja cerrada por administrador.",
+      data: { id, expected_cash: expectedCash, mode },
+    });
+  } catch (e) {
+    try { await t.rollback(); } catch {}
+    console.error("[cashRegisters.adminForceClose] error:", e);
+    return res.status(500).json({
+      ok: false,
+      code: "ADMIN_CLOSE_ERROR",
+      message: e?.message || "No se pudo cerrar la caja.",
+    });
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// ADMIN DELETE
+// Hard-delete de una sesión de caja (solo admin/super_admin).
+// Por defecto la caja debe estar CERRADA (no permite borrar OPEN).
+// Borra: cash_movements asociados, payments y sale_items de las ventas
+// asociadas, y las propias ventas. Esta operación es irreversible.
+//
+// Si la caja tiene ventas, requiere ?force=1 para confirmar el borrado
+// completo (similar al patrón de deleteSale).
+// ──────────────────────────────────────────────────────────────
+async function adminDelete(req, res) {
+  const t = await sequelize.transaction();
+  try {
+    if (!access.isBranchAdmin(req)) {
+      await t.rollback();
+      return res.status(403).json({
+        ok: false,
+        code: "FORBIDDEN",
+        message: "Solo administradores pueden eliminar cajas.",
+      });
+    }
+
+    const id = parseInt(req.params.id, 10);
+    if (!id) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, code: "BAD_ID", message: "id inválido" });
+    }
+
+    const { CashRegister } = require("../models");
+    const cr = await CashRegister.findByPk(id, { transaction: t });
+    if (!cr) {
+      await t.rollback();
+      return res.status(404).json({ ok: false, code: "CASH_REGISTER_NOT_FOUND", message: "Caja no encontrada." });
+    }
+
+    if (!access.isSuperAdmin(req)) {
+      const allowed = access.getAllowedBranchIds(req);
+      if (!allowed.includes(parseInt(cr.branch_id, 10))) {
+        await t.rollback();
+        return res.status(403).json({
+          ok: false,
+          code: "FORBIDDEN_BRANCH",
+          message: "No podés eliminar cajas de otra sucursal.",
+        });
+      }
+    }
+
+    if (String(cr.status) === "OPEN") {
+      await t.rollback();
+      return res.status(409).json({
+        ok: false,
+        code: "CANNOT_DELETE_OPEN",
+        message: "Cerrá la caja antes de eliminarla. Podés usar el cierre administrativo.",
+      });
+    }
+
+    const force = String(req.query.force || "0") === "1";
+
+    // Contar ventas y movimientos para advertir / requerir force.
+    const [salesCount] = await sequelize.query(
+      `SELECT COUNT(*) AS n FROM sales WHERE cash_register_id = :id`,
+      { type: sequelize.QueryTypes.SELECT, replacements: { id }, transaction: t }
+    );
+    const totalSales = Number(salesCount?.n || 0);
+
+    if (totalSales > 0 && !force) {
+      await t.rollback();
+      return res.status(409).json({
+        ok: false,
+        code: "CASH_REGISTER_HAS_SALES",
+        message: `Esta caja tiene ${totalSales} venta(s) asociada(s). Si eliminás la caja se borran también las ventas, pagos e items. Usá ?force=1 para confirmar.`,
+        data: { total_sales: totalSales },
+      });
+    }
+
+    // Borrado en cascada (orden importante para FKs).
+    if (totalSales > 0) {
+      await sequelize.query(
+        `DELETE p FROM payments p
+         INNER JOIN sales s ON s.id = p.sale_id
+         WHERE s.cash_register_id = :id`,
+        { replacements: { id }, transaction: t }
+      );
+      await sequelize.query(
+        `DELETE si FROM sale_items si
+         INNER JOIN sales s ON s.id = si.sale_id
+         WHERE s.cash_register_id = :id`,
+        { replacements: { id }, transaction: t }
+      );
+      await sequelize.query(
+        `DELETE FROM sales WHERE cash_register_id = :id`,
+        { replacements: { id }, transaction: t }
+      );
+    }
+
+    await sequelize.query(
+      `DELETE FROM cash_movements WHERE cash_register_id = :id`,
+      { replacements: { id }, transaction: t }
+    );
+
+    await cr.destroy({ transaction: t });
+
+    await t.commit();
+    return res.json({
+      ok: true,
+      message: `Caja #${id} eliminada${totalSales > 0 ? ` junto con ${totalSales} venta(s)` : ""}.`,
+      data: { id, deleted_sales: totalSales },
+    });
+  } catch (e) {
+    try { await t.rollback(); } catch {}
+    console.error("[cashRegisters.adminDelete] error:", e);
+    return res.status(500).json({
+      ok: false,
+      code: "ADMIN_DELETE_ERROR",
+      message: e?.message || "No se pudo eliminar la caja.",
+    });
+  }
+}
+
 module.exports = {
   getCurrent,
   open,
@@ -878,4 +1130,6 @@ module.exports = {
   getSummary,
   close,
   adminList,
+  adminForceClose,
+  adminDelete,
 };
