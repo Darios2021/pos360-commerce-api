@@ -229,6 +229,8 @@ async function assertUserHasNoOtherCashRegisterOpen({ user_id, transaction = nul
       branch_name: branchName,
       opened_at: current.opened_at,
       opening_cash: current.opening_cash != null ? Number(current.opening_cash) : null,
+      // Es la propia caja del user actual: puede cerrarla con el cierre neutro.
+      is_own: true,
     };
     throw err;
   }
@@ -237,10 +239,51 @@ async function assertUserHasNoOtherCashRegisterOpen({ user_id, transaction = nul
 async function assertNoOtherCashRegisterOpen({ branch_id, transaction = null }) {
   const current = await getCurrentOpenCashRegister({ branch_id, transaction });
   if (current) {
-    const err = new Error("Ya existe una caja abierta para esta sucursal.");
+    // Resolver dueño + nombre de sucursal para que el dialog explique:
+    // "la caja #N la tiene Jenny en Rivadavia". Sin esto el frontend
+    // muestra "Sucursal #?" y no entendés por qué te bloquea.
+    let branchName = null;
+    let openedByName = null;
+    let openedByEmail = null;
+    try {
+      if (Branch && current.branch_id) {
+        const b = await Branch.findByPk(current.branch_id, { attributes: ["id", "name"], transaction });
+        branchName = b?.name || null;
+      }
+    } catch (_) {}
+    try {
+      if (User && current.opened_by) {
+        const u = await User.findByPk(current.opened_by, {
+          attributes: ["id", "first_name", "last_name", "email", "username"],
+          transaction,
+        });
+        if (u) {
+          const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+          openedByName = full || u.username || u.email || `Usuario #${u.id}`;
+          openedByEmail = u.email || null;
+        }
+      }
+    } catch (_) {}
+
+    const err = new Error(
+      openedByName
+        ? `Ya existe una caja abierta en esta sucursal (#${current.id}, abierta por ${openedByName}).`
+        : "Ya existe una caja abierta en esta sucursal."
+    );
     err.status = 409;
     err.code = "CAJA_YA_ABIERTA";
-    err.data = { cash_register_id: current.id };
+    err.data = {
+      cash_register_id: current.id,
+      branch_id: current.branch_id,
+      branch_name: branchName,
+      opened_at: current.opened_at,
+      opening_cash: current.opening_cash != null ? Number(current.opening_cash) : null,
+      opened_by: current.opened_by,
+      opened_by_name: openedByName,
+      opened_by_email: openedByEmail,
+      // Marca explícita: NO es del user actual, no podés cerrarla solo.
+      is_own: false,
+    };
     throw err;
   }
   return true;
