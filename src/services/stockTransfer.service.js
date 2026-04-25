@@ -171,9 +171,14 @@ async function dispatchTransfer(transfer_id, { dispatched_by }) {
 
   // Telegram: alerta inmediata al despachar (post-commit ya no es necesario, transaction cerrada).
   try {
+    console.log(`[stockTransfer.dispatchTransfer] disparando notifyTransferDispatched para transfer=${result.id}`);
     const tg = require("./telegramNotifier.service");
-    tg.notifyTransferDispatched({ transfer_id: result.id }).catch(() => {});
-  } catch (_) {}
+    tg.notifyTransferDispatched({ transfer_id: result.id }).catch((e) =>
+      console.warn("[stockTransfer.dispatchTransfer] notifyTransferDispatched error:", e?.message)
+    );
+  } catch (e) {
+    console.warn("[stockTransfer.dispatchTransfer] no se pudo cargar notifier:", e?.message);
+  }
 
   // Notificar a la sucursal DESTINO que hay un nuevo paquete en camino
   try {

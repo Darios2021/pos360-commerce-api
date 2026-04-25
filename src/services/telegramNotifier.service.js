@@ -829,12 +829,26 @@ async function scanZeroStockProducts({ limit = 30 } = {}) {
 
 async function notifyTransferDispatched({ transfer_id }) {
   try {
-    if (!transfer_id) return;
+    if (!transfer_id) {
+      console.log("[notifyTransferDispatched] sin transfer_id, skip");
+      return;
+    }
     const cfg = await getConfig();
-    if (!cfg?.enabled || !cfg.alert_transfer_dispatched) return;
+    console.log(`[notifyTransferDispatched] transfer=${transfer_id} enabled=${cfg?.enabled} toggle=${cfg?.alert_transfer_dispatched}`);
+    if (!cfg?.enabled) {
+      console.log("[notifyTransferDispatched] bot deshabilitado, skip");
+      return;
+    }
+    if (!cfg.alert_transfer_dispatched) {
+      console.log("[notifyTransferDispatched] toggle alert_transfer_dispatched=false, skip");
+      return;
+    }
 
     const { StockTransfer, StockTransferItem, Warehouse, Branch, User, Product } = require("../models");
-    if (!StockTransfer) return;
+    if (!StockTransfer) {
+      console.log("[notifyTransferDispatched] modelo StockTransfer no disponible, skip");
+      return;
+    }
 
     const tr = await StockTransfer.findByPk(transfer_id, {
       include: [
