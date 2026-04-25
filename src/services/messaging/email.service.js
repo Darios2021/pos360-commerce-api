@@ -23,6 +23,8 @@ try {
   console.warn("[email.service] nodemailer no está instalado. Corré `npm install` en el backend.");
 }
 
+const layoutSvc = require("./emailLayout.service");
+
 let _transporter = null;
 let _verifiedAt = 0;
 
@@ -85,13 +87,18 @@ async function ping() {
  * Envía un email. Resuelve { ok, message_id, error_message } sin tirar.
  *
  * @param {Object} params
- * @param {string} params.to        destinatario
- * @param {string} params.subject   asunto
- * @param {string} params.body      cuerpo (HTML o texto plano — se detecta)
- * @param {string} [params.toName]  nombre del destinatario
- * @param {string} [params.replyTo] email de respuesta
+ * @param {string} params.to             destinatario
+ * @param {string} params.subject        asunto
+ * @param {string} params.body           cuerpo (HTML o texto plano — se detecta)
+ * @param {string} [params.toName]       nombre del destinatario
+ * @param {string} [params.replyTo]      email de respuesta
+ * @param {boolean} [params.useLayout]   default true. Si false, manda body crudo
+ *                                        sin envolver en el layout HTML del negocio.
+ *                                        Útil para mensajes técnicos / debug.
+ * @param {string} [params.previewText]  texto que muestran los clientes de email
+ *                                        en la lista, al lado del asunto.
  */
-async function sendEmail({ to, subject, body, toName, replyTo }) {
+async function sendEmail({ to, subject, body, toName, replyTo, useLayout = true, previewText }) {
   if (!isConfigured()) {
     return {
       ok: false,
@@ -115,15 +122,36 @@ async function sendEmail({ to, subject, body, toName, replyTo }) {
     return { ok: false, code: "TRANSPORT_FAILED", error_message: "No se pudo crear el transporter SMTP." };
   }
 
-  // Heurística simple para detectar si el body es HTML.
-  const isHtml = /<\/?[a-z][\s\S]*>/i.test(String(body || ""));
+  // Construcción del payload:
+  // - Si useLayout=true (default), envolvemos el body en el layout HTML
+  //   responsive del negocio (logo, colores, footer con datos de contacto).
+  //   El layout funciona con body en HTML parcial o texto plano.
+  // - Si useLayout=false, enviamos el body tal cual (texto plano o HTML crudo).
+  // Siempre mandamos también una versión `text` derivada del HTML para los
+  // clientes que no muestran HTML (mejora deliverability y accessibility).
+  let html = null;
+  let text = null;
+
+  if (useLayout) {
+    html = await layoutSvc.wrap({ body, subject, previewText });
+    text = htmlToPlainText(body); // versión texto del body sin layout
+  } else {
+    const isHtml = /<\/?[a-z][\s\S]*>/i.test(String(body || ""));
+    if (isHtml) {
+      html = body;
+      text = htmlToPlainText(body);
+    } else {
+      text = String(body || "");
+    }
+  }
 
   try {
     const info = await transport.sendMail({
       from: getFrom(),
       to: toName ? `"${toName}" <${to}>` : to,
       subject: subject || "(sin asunto)",
-      [isHtml ? "html" : "text"]: body || "",
+      ...(html ? { html } : {}),
+      ...(text ? { text } : {}),
       replyTo: replyTo || process.env.SMTP_REPLY_TO || undefined,
     });
 
@@ -140,6 +168,26 @@ async function sendEmail({ to, subject, body, toName, replyTo }) {
       error_message: e?.message || "Error desconocido",
     };
   }
+}
+
+// Convierte HTML simple a texto plano legible (alternativa para clientes
+// de email que muestran solo texto). No es perfecto pero suficiente.
+function htmlToPlainText(html) {
+  if (!html) return "";
+  return String(html)
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/(div|h[1-6]|li)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 module.exports = { sendEmail, ping, isConfigured };

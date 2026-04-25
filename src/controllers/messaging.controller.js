@@ -24,6 +24,7 @@ const { sequelize, Customer, Sale, MessageTemplate, MessageLog } = require("../m
 const tplSvc = require("../services/messaging/templates.service");
 const emailSvc = require("../services/messaging/email.service");
 const waSvc = require("../services/messaging/whatsapp.service");
+const layoutSvc = require("../services/messaging/emailLayout.service");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -572,6 +573,21 @@ async function testEmail(req, res, next) {
   }
 }
 
+// ============================================================
+// PREVIEW HTML DEL LAYOUT (sin enviar nada)
+// Devuelve el HTML completo wrappeado para que el frontend lo muestre en un
+// iframe / nueva pestaña. Útil para diseñar plantillas viendo cómo van a
+// llegar realmente.
+// ============================================================
+async function previewLayout(req, res) {
+  if (!gateAdmin(req, res)) return;
+  const subject = s(req.body?.subject) || "Vista previa";
+  const body = s(req.body?.body) || "<p>Contenido de ejemplo. Acá va el cuerpo de tu mensaje.</p>";
+  const html = await layoutSvc.wrap({ body, subject, previewText: req.body?.preview_text });
+  const branding = await layoutSvc.getBranding();
+  res.json({ ok: true, data: { html, branding } });
+}
+
 async function listLogsByCustomer(req, res, next) {
   try {
     if (!gateAdmin(req, res)) return;
@@ -600,4 +616,5 @@ module.exports = {
   listLogs,
   listLogsByCustomer,
   testEmail,
+  previewLayout,
 };

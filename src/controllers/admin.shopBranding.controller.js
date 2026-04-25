@@ -6,6 +6,14 @@
 const { sequelize } = require("../models");
 const { uploadShopAsset } = require("../services/admin.shopBranding.service");
 
+// Invalidar cache de branding usado por el layout de emails (best-effort).
+function invalidateEmailBrandingCache() {
+  try {
+    const layoutSvc = require("../services/messaging/emailLayout.service");
+    layoutSvc.invalidateBrandingCache?.();
+  } catch (_) { /* opcional: si el módulo no está cargado, ignorar */ }
+}
+
 async function ensureRow() {
   // Mantener 1 sola fila (id=1)
   try {
