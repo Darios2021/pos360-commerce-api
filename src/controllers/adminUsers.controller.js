@@ -37,6 +37,18 @@ const USER_ATTRS = modelHasAttr(User, "avatar_url")
   : USER_BASE_ATTRS;
 
 function safeUserRow(u) {
+  // IMPORTANTE: el editor del frontend (UserUpsertDialog) espera `role_ids` y
+  // `branch_ids` como arrays de IDs para preseleccionar las cards. Antes
+  // devolvíamos solo `roles: [string]` y el form fallaba al hidratar — el
+  // admin abría el editor, veía "0 roles" aunque en DB SÍ tuviera, y al guardar
+  // sin tocar nada terminaba borrando los roles. Ahora devolvemos:
+  //   - roles:    [string]            (compat con consumidores existentes)
+  //   - role_ids: [number]            (para el editor)
+  //   - branches: [{ id, name }]      (compat)
+  //   - branch_ids: [number]          (para el editor)
+  const rolesArr = Array.isArray(u.roles) ? u.roles : [];
+  const branchesArr = Array.isArray(u.branches) ? u.branches : [];
+
   return {
     id: u.id,
     email: u.email,
@@ -45,10 +57,10 @@ function safeUserRow(u) {
     last_name: u.last_name ?? null,
     is_active: typeof u.is_active === "boolean" ? u.is_active : Boolean(u.is_active),
     avatar_url: modelHasAttr(User, "avatar_url") ? (u.avatar_url ?? null) : null,
-    roles: Array.isArray(u.roles) ? u.roles.map((r) => r.name) : [],
-    branches: Array.isArray(u.branches)
-      ? u.branches.map((b) => ({ id: b.id, name: b.name }))
-      : [],
+    roles: rolesArr.map((r) => r.name),
+    role_ids: rolesArr.map((r) => r.id).filter((id) => Number.isFinite(Number(id))),
+    branches: branchesArr.map((b) => ({ id: b.id, name: b.name })),
+    branch_ids: branchesArr.map((b) => b.id).filter((id) => Number.isFinite(Number(id))),
   };
 }
 
@@ -360,11 +372,35 @@ async function updateUser(req, res) {
 
     const { roleIds, branchIds } = await normalizeRoleAndBranchIds(body);
 
+    // Cinturón de seguridad: si el body manda `role_ids: []` Y el usuario tenía
+    // roles antes Y el caller no marcó intención explícita con `_clear_roles=true`,
+    // tratamos el `[]` como "no enviado" para evitar wipeos accidentales (era
+    // exactamente lo que pasaba con el form de admin cuando no podía hidratar
+    // los roles previos).
+    const rolesIntended = Array.isArray(body.role_ids) || Array.isArray(body.roles);
+    const branchesIntended = Array.isArray(body.branch_ids) || Array.isArray(body.branches);
+    const explicitClearRoles = body._clear_roles === true || body.clear_roles === true;
+    const explicitClearBranches = body._clear_branches === true || body.clear_branches === true;
+
+    const existingRolesCount = await UserRole.count({ where: { user_id: id } });
+    const existingBranchesCount = await UserBranch.count({ where: { user_id: id } });
+
+    const shouldUpdateRoles = rolesIntended && (
+      roleIds.length > 0 ||
+      explicitClearRoles ||
+      existingRolesCount === 0
+    );
+    const shouldUpdateBranches = branchesIntended && (
+      branchIds.length > 0 ||
+      explicitClearBranches ||
+      existingBranchesCount === 0
+    );
+
     try {
       await sequelize.transaction(async (t) => {
         await u.save({ transaction: t });
 
-        if (Array.isArray(body.role_ids) || Array.isArray(body.roles)) {
+        if (shouldUpdateRoles) {
           await UserRole.destroy({ where: { user_id: id }, transaction: t });
           if (roleIds.length) {
             await UserRole.bulkCreate(
@@ -372,9 +408,14 @@ async function updateUser(req, res) {
               { transaction: t, ignoreDuplicates: true }
             );
           }
+        } else if (rolesIntended && roleIds.length === 0 && existingRolesCount > 0) {
+          console.warn(
+            `[adminUsers.updateUser] role_ids vacío con roles existentes (n=${existingRolesCount}) — IGNORADO. ` +
+            `Pasá _clear_roles=true para limpiar explícitamente. user_id=${id}`
+          );
         }
 
-        if (Array.isArray(body.branch_ids) || Array.isArray(body.branches)) {
+        if (shouldUpdateBranches) {
           await UserBranch.destroy({ where: { user_id: id }, transaction: t });
 
           const branchSet = new Set([u.branch_id, ...(branchIds || [])]);
@@ -386,6 +427,11 @@ async function updateUser(req, res) {
               { transaction: t, ignoreDuplicates: true }
             );
           }
+        } else if (branchesIntended && branchIds.length === 0 && existingBranchesCount > 0) {
+          console.warn(
+            `[adminUsers.updateUser] branch_ids vacío con branches existentes (n=${existingBranchesCount}) — IGNORADO. ` +
+            `Pasá _clear_branches=true para limpiar explícitamente. user_id=${id}`
+          );
         }
       });
 
