@@ -643,7 +643,7 @@ async function notifyCashRegisterOpen({ cash_register_id }) {
       { k: "Apertura", v: `<b>$${fmtMoney(opening)}</b>` },
     ];
     if (cr.opened_at) {
-      lines.push({ k: "Hora", v: new Date(cr.opened_at).toLocaleString("es-AR") });
+      lines.push({ k: "Hora", v: fmtDateTimeAR(cr.opened_at) });
     }
     if (cr.opening_note) {
       lines.push(`📝 ${escapeHtml(String(cr.opening_note).slice(0, 200))}`);
@@ -898,7 +898,7 @@ async function scanZeroStockProducts({ limit = 30 } = {}) {
     }
 
     lines.push("");
-    lines.push(`<i>Generado: ${new Date().toLocaleString("es-AR")}</i>`);
+    lines.push(`<i>Generado: ${fmtDateTimeAR(new Date())}</i>`);
 
     const text = lines.join("\n");
     const result = await sendMessage(text);
@@ -1279,6 +1279,30 @@ function fmtMoney(n) {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   }).format(Number(n || 0));
+}
+
+// Zona horaria preferida para mostrar fechas/horas en notificaciones.
+// El servidor corre en UTC; sin forzar `timeZone`, `toLocaleString` devolvía
+// horas raras (Telegram mostraba 01:43 cuando la real era 10:43 AR). También
+// forzamos formato 24h para evitar "1:43 p. m." truncado a "01:43".
+const TG_TIMEZONE = process.env.TZ_DISPLAY || "America/Argentina/Buenos_Aires";
+function fmtDateTimeAR(d) {
+  const v = d instanceof Date ? d : new Date(d);
+  if (!v || Number.isNaN(v.getTime())) return "—";
+  try {
+    return v.toLocaleString("es-AR", {
+      timeZone: TG_TIMEZONE,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return v.toISOString();
+  }
 }
 
 module.exports = {
