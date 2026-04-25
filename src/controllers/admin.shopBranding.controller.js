@@ -14,7 +14,40 @@ function invalidateEmailBrandingCache() {
   } catch (_) { /* opcional: si el módulo no está cargado, ignorar */ }
 }
 
+// Columnas extendidas (location, contact, signature defaults, accent).
+// Se agregan idempotentemente. Si la columna ya existe MySQL devuelve
+// "Duplicate column name" — lo ignoramos.
+const EXTENDED_COLUMNS = [
+  ["address",          "VARCHAR(255) NULL"],
+  ["maps_url",         "VARCHAR(512) NULL"],
+  ["phone_display",    "VARCHAR(60) NULL"],
+  ["whatsapp_display", "VARCHAR(60) NULL"],
+  ["business_hours",   "VARCHAR(255) NULL"],
+  ["tagline",          "VARCHAR(255) NULL"],
+  ["accent_color",     "VARCHAR(20) NULL"],
+  ["bg_color",         "VARCHAR(20) NULL"],
+  ["footer_note",      "VARCHAR(512) NULL"],
+];
+
+let _extendedColumnsEnsured = false;
+async function ensureExtendedColumns() {
+  if (_extendedColumnsEnsured) return;
+  for (const [col, def] of EXTENDED_COLUMNS) {
+    try {
+      await sequelize.query(`ALTER TABLE shop_branding ADD COLUMN ${col} ${def}`);
+    } catch (e) {
+      const msg = String(e?.message || "");
+      // 1060 = Duplicate column name (ya existe → OK)
+      if (!/Duplicate column|errno: 1060/i.test(msg)) {
+        console.warn(`[shopBranding] ensureExtendedColumns ${col}:`, msg);
+      }
+    }
+  }
+  _extendedColumnsEnsured = true;
+}
+
 async function ensureRow() {
+  await ensureExtendedColumns();
   // Mantener 1 sola fila (id=1)
   try {
     // Si existe og_image_url (nuevo)
@@ -55,9 +88,36 @@ async function updateBranding(req, res, next) {
         .json({ ok: false, code: "VALIDATION", message: "El nombre es obligatorio." });
     }
 
-    await sequelize.query(`UPDATE shop_branding SET name=?, updated_at=NOW() WHERE id=1`, {
-      replacements: [name],
+    // Construimos UPDATE dinámico con sólo los campos que el cliente envió
+    // explícitamente. Los strings se trim'ean; los vacíos se guardan como NULL
+    // para que el render de email omita esa sección.
+    const SETTABLE = [
+      "name", "address", "maps_url", "phone_display", "whatsapp_display",
+      "business_hours", "tagline", "accent_color", "bg_color", "footer_note",
+    ];
+
+    const sets = [];
+    const repl = [];
+    for (const f of SETTABLE) {
+      if (!Object.prototype.hasOwnProperty.call(req.body || {}, f)) continue;
+      const raw = req.body[f];
+      const val = raw === null || raw === undefined ? null : String(raw).trim();
+      sets.push(`${f}=?`);
+      repl.push(val === "" ? null : val);
+    }
+
+    if (sets.length === 0) {
+      // No vino nada actualizable → respondemos el row actual.
+      const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
+      return res.json({ ok: true, item: rows?.[0] || null });
+    }
+
+    sets.push("updated_at=NOW()");
+    await sequelize.query(`UPDATE shop_branding SET ${sets.join(", ")} WHERE id=1`, {
+      replacements: repl,
     });
+
+    invalidateEmailBrandingCache();
 
     const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
     return res.json({ ok: true, item: rows?.[0] || null });

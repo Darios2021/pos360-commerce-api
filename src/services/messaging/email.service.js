@@ -97,8 +97,20 @@ async function ping() {
  *                                        Útil para mensajes técnicos / debug.
  * @param {string} [params.previewText]  texto que muestran los clientes de email
  *                                        en la lista, al lado del asunto.
+ * @param {Object} [params.signature]    firma del comercial (display_name,
+ *                                        role_title, email, phone, whatsapp,
+ *                                        photo_url, tagline). Si se pasa, el
+ *                                        layout la inserta antes del footer.
+ * @param {Array}  [params.promoBlocks]  bloques promocionales (productos
+ *                                        destacados estilo Oncity). El layout
+ *                                        los renderiza en grid 2-col.
+ * @param {boolean}[params.includeLocation=true] mostrar bloque ubicación.
  */
-async function sendEmail({ to, subject, body, toName, replyTo, useLayout = true, previewText }) {
+async function sendEmail({
+  to, subject, body, toName, replyTo,
+  useLayout = true, previewText,
+  signature = null, promoBlocks = null, includeLocation = true,
+}) {
   if (!isConfigured()) {
     return {
       ok: false,
@@ -133,7 +145,7 @@ async function sendEmail({ to, subject, body, toName, replyTo, useLayout = true,
   let text = null;
 
   if (useLayout) {
-    html = await layoutSvc.wrap({ body, subject, previewText });
+    html = await layoutSvc.wrap({ body, subject, previewText, signature, promoBlocks, includeLocation });
     text = htmlToPlainText(body); // versión texto del body sin layout
   } else {
     const isHtml = /<\/?[a-z][\s\S]*>/i.test(String(body || ""));

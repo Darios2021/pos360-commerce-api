@@ -3,6 +3,7 @@ const router = require("express").Router();
 const multer = require("multer");
 
 const me = require("../controllers/me.controller");
+const sig = require("../controllers/me.signature.controller");
 
 // ✅ Validación dura (si falla, te imprime qué exportó realmente)
 function mustFn(name) {
@@ -26,5 +27,11 @@ router.get("/", mustFn("getMe"));
 router.patch("/", mustFn("updateMe"));
 router.post("/avatar", upload.single("file"), mustFn("uploadAvatar"));
 router.post("/password", mustFn("changePassword"));
+
+// ✅ Firma personal CRM
+router.get("/signature", sig.getSignature);
+router.put("/signature", sig.upsertSignature);
+router.post("/signature/photo", upload.single("file"), sig.uploadPhoto);
+router.delete("/signature/photo", sig.deletePhoto);
 
 module.exports = router;

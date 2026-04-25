@@ -88,6 +88,21 @@ try {
   console.log("⚠️ BrandingAsset no cargado:", e?.message);
 }
 
+// ===== CRM: firma del usuario y bloques promocionales =====
+let UserSignature = null;
+try {
+  UserSignature = require("./UserSignature")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ UserSignature no cargado:", e?.message);
+}
+
+let EmailPromoBlock = null;
+try {
+  EmailPromoBlock = require("./EmailPromoBlock")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ EmailPromoBlock no cargado:", e?.message);
+}
+
 // ===== PAYMENT METHOD =====
 let PaymentMethod = null;
 try {
@@ -538,6 +553,17 @@ if (FiscalConfig && FiscalCertificate) {
   });
 }
 
+// CRM: firma del usuario (1-1)
+if (UserSignature) {
+  safeBelongsTo(UserSignature, User, { foreignKey: "user_id", as: "user" });
+  safeHasMany(User, UserSignature, { foreignKey: "user_id", as: "signatures" });
+}
+
+// CRM: bloque promocional puede referenciar producto interno
+if (EmailPromoBlock) {
+  safeBelongsTo(EmailPromoBlock, Product, { foreignKey: "product_id", as: "product" });
+}
+
 const models = {
   sequelize,
 
@@ -594,6 +620,8 @@ const models = {
 
   // Branding
   BrandingAsset,
+  UserSignature,
+  EmailPromoBlock,
 
   // Fiscal admin
   FiscalConfig,

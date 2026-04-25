@@ -193,6 +193,38 @@ async function loadCustomerWithStats(customerId) {
   };
 }
 
+// Devuelve la firma del usuario `user_id` (o null si no tiene). Soporta el
+// flag `force=false` que usan los toggles "incluir firma" del frontend para
+// no devolver firma aunque exista.
+async function loadUserSignature(user_id, { force = null } = {}) {
+  if (!user_id) return null;
+  if (force === false) return null;
+  try {
+    const { UserSignature } = require("../models");
+    if (!UserSignature) return null;
+    const row = await UserSignature.findOne({ where: { user_id } });
+    if (!row) return null;
+    if (force === null && row.include_by_default === false) return null;
+    return row.toJSON();
+  } catch (_) { return null; }
+}
+
+// Carga los promo blocks por IDs (en el orden recibido). Filtra inactivos y
+// devuelve los campos planos que el layout consume.
+async function loadPromoBlocksByIds(ids) {
+  const arr = Array.isArray(ids) ? ids.map((x) => toInt(x, 0)).filter(Boolean) : [];
+  if (!arr.length) return null;
+  try {
+    const { EmailPromoBlock } = require("../models");
+    if (!EmailPromoBlock) return null;
+    const rows = await EmailPromoBlock.findAll({ where: { id: arr, active: true } });
+    if (!rows.length) return null;
+    // Preservar orden recibido.
+    const byId = new Map(rows.map((r) => [r.id, r.toJSON()]));
+    return arr.map((id) => byId.get(id)).filter(Boolean);
+  } catch (_) { return null; }
+}
+
 async function resolveTemplate(template_id, channel, body, subject) {
   if (template_id) {
     const t = await MessageTemplate.findByPk(template_id);
@@ -309,6 +341,22 @@ async function sendOne(req, res, next) {
       sent_by: toInt(req.user?.id, 0) || null,
     });
 
+    // Firma del comercial: si include_signature viene explícitamente en true/false,
+    // respeta el toggle; si no viene, usa include_by_default del UserSignature.
+    const includeSignature = req.body?.include_signature;
+    const signature = channel === "email"
+      ? await loadUserSignature(toInt(req.user?.id, 0), {
+          force: typeof includeSignature === "boolean" ? includeSignature : null,
+        })
+      : null;
+
+    // Bloques promocionales (opcional, sólo email).
+    const promoBlocks = channel === "email"
+      ? await loadPromoBlocksByIds(req.body?.promo_block_ids)
+      : null;
+
+    const includeLocation = req.body?.include_location !== false;
+
     let result;
     if (channel === "email") {
       result = await emailSvc.sendEmail({
@@ -316,6 +364,9 @@ async function sendOne(req, res, next) {
         toName: ctxData.customer.display_name,
         subject: rendered.subject || "(sin asunto)",
         body: rendered.body,
+        signature,
+        promoBlocks,
+        includeLocation,
       });
     } else {
       result = await waSvc.sendWhatsApp({
@@ -370,6 +421,18 @@ async function sendBulk(req, res, next) {
     );
     if (!tpl) return res.status(404).json({ ok: false, code: "TEMPLATE_NOT_FOUND" });
 
+    // Firma + promos resueltas UNA vez (no por cliente).
+    const includeSignatureBulk = req.body?.include_signature;
+    const bulkSignature = channel === "email"
+      ? await loadUserSignature(toInt(req.user?.id, 0), {
+          force: typeof includeSignatureBulk === "boolean" ? includeSignatureBulk : null,
+        })
+      : null;
+    const bulkPromos = channel === "email"
+      ? await loadPromoBlocksByIds(req.body?.promo_block_ids)
+      : null;
+    const bulkIncludeLocation = req.body?.include_location !== false;
+
     const results = [];
     let okCount = 0;
     let failCount = 0;
@@ -414,6 +477,9 @@ async function sendBulk(req, res, next) {
             toName: ctxData.customer.display_name,
             subject: rendered.subject || "(sin asunto)",
             body: rendered.body,
+            signature: bulkSignature,
+            promoBlocks: bulkPromos,
+            includeLocation: bulkIncludeLocation,
           });
         } else {
           result = await waSvc.sendWhatsApp({ to, body: rendered.body, preferLink });
@@ -583,7 +649,19 @@ async function previewLayout(req, res) {
   if (!gateAdmin(req, res)) return;
   const subject = s(req.body?.subject) || "Vista previa";
   const body = s(req.body?.body) || "<p>Contenido de ejemplo. Acá va el cuerpo de tu mensaje.</p>";
-  const html = await layoutSvc.wrap({ body, subject, previewText: req.body?.preview_text });
+
+  const includeSignature = req.body?.include_signature;
+  const signature = await loadUserSignature(toInt(req.user?.id, 0), {
+    force: typeof includeSignature === "boolean" ? includeSignature : null,
+  });
+  const promoBlocks = await loadPromoBlocksByIds(req.body?.promo_block_ids);
+  const includeLocation = req.body?.include_location !== false;
+
+  const html = await layoutSvc.wrap({
+    body, subject,
+    previewText: req.body?.preview_text,
+    signature, promoBlocks, includeLocation,
+  });
   const branding = await layoutSvc.getBranding();
   res.json({ ok: true, data: { html, branding } });
 }

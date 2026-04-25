@@ -289,6 +289,9 @@ const adminFiscalRoutes = loadRoute("./admin.fiscal.routes", { optional: true })
 // ✅ NUEVO: telegram admin (notificaciones)
 const adminTelegramRoutes = loadRoute("./admin.telegram.routes", { optional: true });
 
+// ✅ NUEVO: bloques promocionales del CRM email
+const adminEmailPromoBlocksRoutes = loadRoute("./admin.emailPromoBlocks.routes", { optional: true });
+
 // =========================
 // Mount: Public
 // =========================
@@ -395,6 +398,11 @@ if (adminShopLinksRoutes) {
 // ✅ NUEVO: telegram admin
 if (adminTelegramRoutes) {
   safeUse("/admin/telegram", requireAuth, attachAccessContext, adminTelegramRoutes);
+}
+
+// ✅ NUEVO: bloques promocionales CRM
+if (adminEmailPromoBlocksRoutes) {
+  safeUse("/admin/email-promo-blocks", requireAuth, attachAccessContext, adminEmailPromoBlocksRoutes);
 }
 
 // ✅ NUEVO: fiscal admin
