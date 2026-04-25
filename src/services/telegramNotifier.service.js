@@ -697,7 +697,7 @@ async function notifyTransferDispatched({ transfer_id }) {
     const cfg = await getConfig();
     if (!cfg?.enabled || !cfg.alert_transfer_dispatched) return;
 
-    const { StockTransfer, StockTransferItem, Warehouse, Branch, User } = require("../models");
+    const { StockTransfer, StockTransferItem, Warehouse, Branch, User, Product } = require("../models");
     if (!StockTransfer) return;
 
     const tr = await StockTransfer.findByPk(transfer_id, {
@@ -705,7 +705,11 @@ async function notifyTransferDispatched({ transfer_id }) {
         { model: Warehouse, as: "fromWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
         { model: Warehouse, as: "toWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
         { model: Branch, as: "toBranch", required: false },
-        { model: StockTransferItem, as: "items", required: false },
+        {
+          model: StockTransferItem, as: "items", required: false,
+          include: Product ? [{ model: Product, as: "product", required: false, attributes: ["id", "name", "sku", "code"] }] : [],
+        },
+        { model: User, as: "creator", required: false, attributes: ["id", "first_name", "last_name", "username", "email"] },
         { model: User, as: "dispatcher", required: false, attributes: ["id", "first_name", "last_name", "username", "email"] },
       ],
     });
@@ -713,12 +717,41 @@ async function notifyTransferDispatched({ transfer_id }) {
 
     const fromName = tr.fromWarehouse?.branch?.name || tr.fromWarehouse?.name || "—";
     const toName = tr.toBranch?.name || tr.toWarehouse?.branch?.name || tr.toWarehouse?.name || "—";
-    const itemCount = Array.isArray(tr.items) ? tr.items.length : 0;
+    const itemsArr = Array.isArray(tr.items) ? tr.items : [];
 
-    let dispatcherName = "—";
-    if (tr.dispatcher) {
-      const full = [tr.dispatcher.first_name, tr.dispatcher.last_name].filter(Boolean).join(" ").trim();
-      dispatcherName = full || tr.dispatcher.username || tr.dispatcher.email || `Usuario #${tr.dispatcher.id}`;
+    const userName = (u) => {
+      if (!u) return "—";
+      const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+      return full || u.username || u.email || `Usuario #${u.id}`;
+    };
+
+    const lines = [
+      `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
+      `📤 De: ${escapeHtml(fromName)}`,
+      `📥 A: ${escapeHtml(toName)}`,
+      { k: "Items", v: `${itemsArr.length}` },
+      { k: "Creada por", v: escapeHtml(userName(tr.creator)) },
+      { k: "Despachada por", v: escapeHtml(userName(tr.dispatcher)) },
+    ];
+
+    // Lista de productos (máx 8 para no spamear).
+    const itemsToShow = itemsArr.slice(0, 8);
+    if (itemsToShow.length) {
+      lines.push("\n<b>Productos:</b>");
+      for (const it of itemsToShow) {
+        const pname = it.product?.name || `Producto #${it.product_id}`;
+        const psku = it.product?.sku || it.product?.code || "";
+        const qty = Number(it.qty || it.quantity || 0);
+        const skuTag = psku ? ` <code>${escapeHtml(psku)}</code>` : "";
+        lines.push(`• ${escapeHtml(pname)}${skuTag} ×${qty}`);
+      }
+      if (itemsArr.length > itemsToShow.length) {
+        lines.push(`<i>… +${itemsArr.length - itemsToShow.length} producto(s) más</i>`);
+      }
+    }
+
+    if (tr.note) {
+      lines.push(`📝 ${escapeHtml(String(tr.note).slice(0, 200))}`);
     }
 
     await sendAlert({
@@ -728,14 +761,7 @@ async function notifyTransferDispatched({ transfer_id }) {
       toggleKey: "alert_transfer_dispatched",
       reference_type: "stock_transfer",
       reference_id: tr.id,
-      lines: [
-        `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
-        `📤 De: ${escapeHtml(fromName)}`,
-        `📥 A: ${escapeHtml(toName)}`,
-        { k: "Items", v: `${itemCount}` },
-        { k: "Despachada por", v: escapeHtml(dispatcherName) },
-        tr.note ? `📝 ${escapeHtml(String(tr.note).slice(0, 200))}` : null,
-      ],
+      lines,
     });
   } catch (e) {
     console.warn("[telegram.notifyTransferDispatched] error:", e?.message);
@@ -748,7 +774,7 @@ async function scanPendingTransfers() {
     const cfg = await getConfig();
     if (!cfg?.enabled || !cfg.alert_transfer_pending) return;
 
-    const { StockTransfer, StockTransferItem, Warehouse, Branch } = require("../models");
+    const { StockTransfer, StockTransferItem, Warehouse, Branch, User, Product } = require("../models");
     if (!StockTransfer) return;
 
     const cutoff = new Date(Date.now() - 24 * 3600 * 1000); // > 24h
@@ -761,16 +787,52 @@ async function scanPendingTransfers() {
       include: [
         { model: Warehouse, as: "fromWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
         { model: Branch, as: "toBranch", required: false },
-        { model: StockTransferItem, as: "items", required: false },
+        {
+          model: StockTransferItem, as: "items", required: false,
+          include: Product ? [{ model: Product, as: "product", required: false, attributes: ["id", "name", "sku", "code"] }] : [],
+        },
+        { model: User, as: "creator", required: false, attributes: ["id", "first_name", "last_name", "username", "email"] },
+        { model: User, as: "dispatcher", required: false, attributes: ["id", "first_name", "last_name", "username", "email"] },
       ],
-      attributes: ["id", "number", "from_warehouse_id", "to_branch_id", "dispatched_at", "note"],
+      attributes: ["id", "number", "from_warehouse_id", "to_branch_id", "dispatched_at", "note", "created_by", "dispatched_by"],
     });
+
+    const userName = (u) => {
+      if (!u) return "—";
+      const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+      return full || u.username || u.email || `Usuario #${u.id}`;
+    };
 
     for (const tr of rows) {
       const hours = (Date.now() - new Date(tr.dispatched_at).getTime()) / 3600000;
       const fromName = tr.fromWarehouse?.branch?.name || tr.fromWarehouse?.name || "—";
       const toName = tr.toBranch?.name || "—";
-      const itemCount = Array.isArray(tr.items) ? tr.items.length : 0;
+      const itemsArr = Array.isArray(tr.items) ? tr.items : [];
+
+      const lines = [
+        `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
+        `📤 De: ${escapeHtml(fromName)}`,
+        `📥 A: ${escapeHtml(toName)}`,
+        { k: "Pendiente hace", v: `<b>${hours.toFixed(1)}h</b>` },
+        { k: "Items", v: `${itemsArr.length}` },
+        { k: "Creada por", v: escapeHtml(userName(tr.creator)) },
+        { k: "Despachada por", v: escapeHtml(userName(tr.dispatcher)) },
+      ];
+
+      const itemsToShow = itemsArr.slice(0, 8);
+      if (itemsToShow.length) {
+        lines.push("\n<b>Productos:</b>");
+        for (const it of itemsToShow) {
+          const pname = it.product?.name || `Producto #${it.product_id}`;
+          const psku = it.product?.sku || it.product?.code || "";
+          const qty = Number(it.qty || it.quantity || 0);
+          const skuTag = psku ? ` <code>${escapeHtml(psku)}</code>` : "";
+          lines.push(`• ${escapeHtml(pname)}${skuTag} ×${qty}`);
+        }
+        if (itemsArr.length > itemsToShow.length) {
+          lines.push(`<i>… +${itemsArr.length - itemsToShow.length} producto(s) más</i>`);
+        }
+      }
 
       await sendAlert({
         code: "TRANSFER_PENDING",
@@ -781,13 +843,7 @@ async function scanPendingTransfers() {
         reference_id: tr.id,
         // Dedupe por día → la misma derivación pendiente solo una vez por día.
         dedupe_key_extra: new Date().toISOString().slice(0, 10),
-        lines: [
-          `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
-          `📤 De: ${escapeHtml(fromName)}`,
-          `📥 A: ${escapeHtml(toName)}`,
-          { k: "Pendiente hace", v: `<b>${hours.toFixed(1)}h</b>` },
-          { k: "Items", v: `${itemCount}` },
-        ],
+        lines,
       });
     }
   } catch (e) {

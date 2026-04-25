@@ -17,6 +17,7 @@ const {
 const { getCurrentOpenCashRegister } = require("../services/cashRegister.service");
 const { resolveFiscalSnapshot } = require("../services/fiscalSnapshot.service");
 const { maybeCreateFiscalDocument } = require("../services/fiscalDocument.service");
+const { trackStockChange } = require("../services/stockNotifyHelper");
 
 let searchService = null;
 try {
@@ -1829,7 +1830,9 @@ async function createSale(req, res) {
         );
       }
 
+      const __prevQty = Number(sb.qty || 0);
       await sb.update({ qty: literal(`qty - ${it.quantity}`) }, { transaction: t });
+      await trackStockChange({ sb, prev: __prevQty, qty: -it.quantity, t, source: "sale" });
 
       const lineTotal = it.quantity * it.unit_price;
 
@@ -2270,7 +2273,9 @@ async function createSaleReturn(req, res) {
         });
 
         if (sb) {
+          const __prev = Number(sb.qty || 0);
           await sb.update({ qty: literal(`qty + ${it.qty}`) }, { transaction: t });
+          await trackStockChange({ sb, prev: __prev, qty: it.qty, t, source: "return" });
         } else {
           await StockBalance.create(
             { warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty },
@@ -2517,7 +2522,9 @@ async function createSaleExchange(req, res) {
         });
 
         if (sb) {
+          const __prev = Number(sb.qty || 0);
           await sb.update({ qty: literal(`qty + ${it.qty}`) }, { transaction: t });
+          await trackStockChange({ sb, prev: __prev, qty: it.qty, t, source: "return" });
         } else {
           await StockBalance.create(
             { warehouse_id: it.warehouse_id, product_id: it.product_id, qty: it.qty },
@@ -2690,7 +2697,9 @@ async function createSaleExchange(req, res) {
         throw e;
       }
 
+      const __prev2 = Number(sb.qty || 0);
       await sb.update({ qty: literal(`qty - ${it.quantity}`) }, { transaction: t });
+      await trackStockChange({ sb, prev: __prev2, qty: -it.quantity, t, source: "exchange" });
 
       const lineTotal = it.quantity * it.unit_price;
 
