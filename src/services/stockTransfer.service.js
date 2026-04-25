@@ -329,44 +329,62 @@ async function cancelTransfer(transfer_id, { cancelled_by }) {
 
 // ─── DELETE (hard) ────────────────────────────────────────────────────────────
 /**
- * Hard-delete de una derivación.
- * Estados permitidos:
- *   - draft     → solo borra (no hubo movimiento de stock)
- *   - cancelled → solo borra
- *   - dispatched → restaura stock al depósito origen y borra
- * Estados bloqueados:
- *   - received / partial → tirar 422 (la mercadería ya está en destino)
+ * Hard-delete de una derivación. Reversión total de stock según el estado:
+ *   - draft / cancelled → solo borra (no hubo movimiento de stock).
+ *   - dispatched        → restaura qty_sent al depósito origen.
+ *   - received          → restaura qty_sent al origen y descuenta qty_received del destino.
+ *   - partial           → ídem received (qty_received puede diferir de qty_sent).
+ *
+ * La autorización (admin / super_admin) la valida el controller.
+ * Esta función asume que el llamador tiene permiso para revertir el stock.
+ *
+ * Limitación: si se descuenta del destino productos ya vendidos, el balance
+ * puede quedar negativo. Es responsabilidad del admin saber lo que hace.
  */
-async function deleteTransfer(transfer_id, { deleted_by }) {
+async function deleteTransfer(transfer_id, { deleted_by } = {}) {
   const transfer = await getTransferById(transfer_id);
   if (!transfer) throw Object.assign(new Error("Derivación no encontrada"), { status: 404 });
 
   const status = String(transfer.status || "").toLowerCase();
-
-  if (["received", "partial"].includes(status)) {
-    throw Object.assign(
-      new Error("No se puede eliminar una derivación ya recibida. Ajustá el stock manualmente."),
-      { status: 422 }
-    );
-  }
+  const restoreOrigin = ["dispatched", "received", "partial"].includes(status);
+  const removeDest    = ["received", "partial"].includes(status);
 
   return sequelize.transaction(async (t) => {
-    // 1) Si está dispatched, revertir el OUT de origen.
-    if (status === "dispatched") {
+    if (restoreOrigin || removeDest) {
       for (const item of transfer.items || []) {
-        const qty = toDecimal(item.qty_sent);
-        if (qty <= 0) continue;
-        await sequelize.query(`
-          INSERT INTO stock_balances (warehouse_id, product_id, qty)
-          VALUES (:wh, :prod, :qty)
-          ON DUPLICATE KEY UPDATE qty = qty + :qty
-        `, {
-          replacements: { wh: transfer.from_warehouse_id, prod: item.product_id, qty },
-          transaction: t,
-        });
+        const qtySent     = toDecimal(item.qty_sent);
+        const qtyReceived = toDecimal(item.qty_received);
+
+        // Sumar al origen lo que se había descontado en el dispatch.
+        if (restoreOrigin && qtySent > 0) {
+          await sequelize.query(`
+            INSERT INTO stock_balances (warehouse_id, product_id, qty)
+            VALUES (:wh, :prod, :qty)
+            ON DUPLICATE KEY UPDATE qty = qty + :qty
+          `, {
+            replacements: { wh: transfer.from_warehouse_id, prod: item.product_id, qty: qtySent },
+            transaction: t,
+          });
+        }
+
+        // Quitar del destino lo que se había recibido (puede dejar balance negativo).
+        if (removeDest && qtyReceived > 0) {
+          await sequelize.query(`
+            INSERT INTO stock_balances (warehouse_id, product_id, qty)
+            VALUES (:wh, :prod, :neg_qty)
+            ON DUPLICATE KEY UPDATE qty = qty + :neg_qty
+          `, {
+            replacements: {
+              wh: transfer.to_warehouse_id,
+              prod: item.product_id,
+              neg_qty: -qtyReceived,
+            },
+            transaction: t,
+          });
+        }
       }
 
-      // 2) Borrar movements + items relacionados a esta transfer.
+      // Borrar movements (dispatch + receive) y sus items relacionados.
       const movements = await StockMovement.findAll({
         where: {
           ref_type: { [Op.in]: ["transfer_dispatch", "transfer_receive"] },
@@ -388,11 +406,16 @@ async function deleteTransfer(transfer_id, { deleted_by }) {
       }
     }
 
-    // 3) Borrar items y la transfer.
+    // Borrar items y la transfer.
     await StockTransferItem.destroy({ where: { transfer_id }, transaction: t });
     await StockTransfer.destroy({ where: { id: transfer_id }, transaction: t });
 
-    return { id: transfer_id, deleted: true, restored_stock: status === "dispatched" };
+    return {
+      id: transfer_id,
+      deleted: true,
+      restored_origin: restoreOrigin,
+      removed_from_destination: removeDest,
+    };
   });
 }
 
