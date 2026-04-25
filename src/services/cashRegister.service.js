@@ -778,6 +778,17 @@ async function closeCashRegister({
 
     const updatedCashRegister = await CashRegister.findByPk(id, { transaction });
 
+    // Hook de notificaciones (Telegram). Post-commit para no notificar si la txn falla.
+    try {
+      const tg = require("./telegramNotifier.service");
+      const fire = () => tg.notifyCashRegisterClose({ cash_register_id: id }).catch(() => {});
+      if (transaction && typeof transaction.afterCommit === "function") {
+        transaction.afterCommit(fire);
+      } else {
+        fire();
+      }
+    } catch (_) {}
+
     return {
       cash_register: toPlain(updatedCashRegister),
       summary,

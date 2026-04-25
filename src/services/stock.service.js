@@ -22,12 +22,35 @@ async function getBalance(warehouse_id, product_id, t) {
   return row;
 }
 
-async function addQty(warehouse_id, product_id, delta, t) {
+async function addQty(warehouse_id, product_id, delta, t, opts = {}) {
   const bal = await getBalance(warehouse_id, product_id, t);
   const current = toNumber(bal.qty);
   const next = current + toNumber(delta);
   bal.qty = next;
   await bal.save({ transaction: t });
+
+  // Hook para alertas de Telegram. Solo se ejecuta tras commit exitoso.
+  // Si falla la transacción, no se envía nada (no hay falsos positivos).
+  try {
+    const tg = require("./telegramNotifier.service");
+    const fire = () =>
+      tg.notifyStockChange({
+        product_id,
+        warehouse_id,
+        prev: current,
+        next,
+        delta: toNumber(delta),
+        source: opts.source || "movement",
+      }).catch(() => {});
+    if (t && typeof t.afterCommit === "function") {
+      t.afterCommit(fire);
+    } else {
+      fire();
+    }
+  } catch (_) {
+    // El notifier es opcional: si falla la carga, el stock sigue funcionando.
+  }
+
   return bal;
 }
 

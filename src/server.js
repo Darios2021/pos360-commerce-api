@@ -29,4 +29,14 @@ httpServer.listen(PORT, () => {
   } else {
     console.log("ℹ️  [Meilisearch] No configurado — búsqueda usa MySQL.");
   }
+
+  // Cron de alertas de Telegram (escanea cajas abiertas +8h cada 10 min).
+  try {
+    const tg = require("./services/telegramNotifier.service");
+    if (tg && typeof tg.startCronJobs === "function") {
+      tg.startCronJobs(10);
+    }
+  } catch (e) {
+    console.warn("⚠️  [Telegram] no se pudo iniciar el cron:", e?.message);
+  }
 });
