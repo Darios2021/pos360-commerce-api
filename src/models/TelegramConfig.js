@@ -26,6 +26,8 @@ module.exports = (sequelize, DataTypes) => {
       alert_stock_negative: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_stock_big_adjust: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       alert_shop_new_order: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      alert_transfer_dispatched: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+      alert_transfer_pending: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
       // JSON con umbrales por alerta (override de los defaults del service).
       thresholds: {

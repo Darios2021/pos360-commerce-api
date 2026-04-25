@@ -169,6 +169,12 @@ async function dispatchTransfer(transfer_id, { dispatched_by }) {
     return getTransferById(transfer_id, t);
   });
 
+  // Telegram: alerta inmediata al despachar (post-commit ya no es necesario, transaction cerrada).
+  try {
+    const tg = require("./telegramNotifier.service");
+    tg.notifyTransferDispatched({ transfer_id: result.id }).catch(() => {});
+  } catch (_) {}
+
   // Notificar a la sucursal DESTINO que hay un nuevo paquete en camino
   try {
     socketService.emitToBranch(result.to_branch_id, "transfer:dispatched", {

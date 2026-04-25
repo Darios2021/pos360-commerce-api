@@ -147,6 +147,8 @@ async function ensureTables() {
       alert_stock_negative TINYINT(1) NOT NULL DEFAULT 1,
       alert_stock_big_adjust TINYINT(1) NOT NULL DEFAULT 0,
       alert_shop_new_order TINYINT(1) NOT NULL DEFAULT 0,
+      alert_transfer_dispatched TINYINT(1) NOT NULL DEFAULT 1,
+      alert_transfer_pending TINYINT(1) NOT NULL DEFAULT 1,
       thresholds TEXT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -178,6 +180,28 @@ async function ensureTables() {
     `INSERT IGNORE INTO telegram_config (id) VALUES (1)`
   );
 
+  // Migración de columnas nuevas (idempotente).
+  // Si la tabla ya existía sin estas columnas las agregamos.
+  const newCols = [
+    { name: "alert_transfer_dispatched", ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_transfer_pending",    ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+  ];
+  for (const c of newCols) {
+    try {
+      const [rows] = await sequelize.query(
+        `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'telegram_config' AND COLUMN_NAME = :name`,
+        { replacements: { name: c.name } }
+      );
+      const exists = Number(rows?.[0]?.n || 0) > 0;
+      if (!exists) {
+        await sequelize.query(`ALTER TABLE telegram_config ADD COLUMN ${c.name} ${c.ddl}`);
+      }
+    } catch (e) {
+      console.warn(`[telegram] migración de columna ${c.name} falló:`, e?.message);
+    }
+  }
+
   tablesReady = true;
 }
 
@@ -201,6 +225,7 @@ async function saveConfig(patch = {}) {
     "alert_cash_overtime", "alert_cash_big_out",
     "alert_stock_zero", "alert_stock_low", "alert_stock_negative",
     "alert_stock_big_adjust", "alert_shop_new_order",
+    "alert_transfer_dispatched", "alert_transfer_pending",
     "thresholds",
   ];
 
@@ -666,6 +691,110 @@ async function notifyCashRegisterClose({ cash_register_id }) {
   }
 }
 
+async function notifyTransferDispatched({ transfer_id }) {
+  try {
+    if (!transfer_id) return;
+    const cfg = await getConfig();
+    if (!cfg?.enabled || !cfg.alert_transfer_dispatched) return;
+
+    const { StockTransfer, StockTransferItem, Warehouse, Branch, User } = require("../models");
+    if (!StockTransfer) return;
+
+    const tr = await StockTransfer.findByPk(transfer_id, {
+      include: [
+        { model: Warehouse, as: "fromWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
+        { model: Warehouse, as: "toWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
+        { model: Branch, as: "toBranch", required: false },
+        { model: StockTransferItem, as: "items", required: false },
+        { model: User, as: "dispatcher", required: false, attributes: ["id", "first_name", "last_name", "username", "email"] },
+      ],
+    });
+    if (!tr) return;
+
+    const fromName = tr.fromWarehouse?.branch?.name || tr.fromWarehouse?.name || "—";
+    const toName = tr.toBranch?.name || tr.toWarehouse?.branch?.name || tr.toWarehouse?.name || "—";
+    const itemCount = Array.isArray(tr.items) ? tr.items.length : 0;
+
+    let dispatcherName = "—";
+    if (tr.dispatcher) {
+      const full = [tr.dispatcher.first_name, tr.dispatcher.last_name].filter(Boolean).join(" ").trim();
+      dispatcherName = full || tr.dispatcher.username || tr.dispatcher.email || `Usuario #${tr.dispatcher.id}`;
+    }
+
+    await sendAlert({
+      code: "TRANSFER_DISPATCHED",
+      title: "Nueva derivación enviada",
+      severity: "low",
+      toggleKey: "alert_transfer_dispatched",
+      reference_type: "stock_transfer",
+      reference_id: tr.id,
+      lines: [
+        `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
+        `📤 De: ${escapeHtml(fromName)}`,
+        `📥 A: ${escapeHtml(toName)}`,
+        { k: "Items", v: `${itemCount}` },
+        { k: "Despachada por", v: escapeHtml(dispatcherName) },
+        tr.note ? `📝 ${escapeHtml(String(tr.note).slice(0, 200))}` : null,
+      ],
+    });
+  } catch (e) {
+    console.warn("[telegram.notifyTransferDispatched] error:", e?.message);
+  }
+}
+
+// Cron: derivaciones despachadas hace +24h sin recibir.
+async function scanPendingTransfers() {
+  try {
+    const cfg = await getConfig();
+    if (!cfg?.enabled || !cfg.alert_transfer_pending) return;
+
+    const { StockTransfer, StockTransferItem, Warehouse, Branch } = require("../models");
+    if (!StockTransfer) return;
+
+    const cutoff = new Date(Date.now() - 24 * 3600 * 1000); // > 24h
+
+    const rows = await StockTransfer.findAll({
+      where: {
+        status: "dispatched",
+        dispatched_at: { [Op.lte]: cutoff },
+      },
+      include: [
+        { model: Warehouse, as: "fromWarehouse", required: false, include: [{ model: Branch, as: "branch", required: false }] },
+        { model: Branch, as: "toBranch", required: false },
+        { model: StockTransferItem, as: "items", required: false },
+      ],
+      attributes: ["id", "number", "from_warehouse_id", "to_branch_id", "dispatched_at", "note"],
+    });
+
+    for (const tr of rows) {
+      const hours = (Date.now() - new Date(tr.dispatched_at).getTime()) / 3600000;
+      const fromName = tr.fromWarehouse?.branch?.name || tr.fromWarehouse?.name || "—";
+      const toName = tr.toBranch?.name || "—";
+      const itemCount = Array.isArray(tr.items) ? tr.items.length : 0;
+
+      await sendAlert({
+        code: "TRANSFER_PENDING",
+        title: "Derivación pendiente de recibir",
+        severity: "medium",
+        toggleKey: "alert_transfer_pending",
+        reference_type: "stock_transfer",
+        reference_id: tr.id,
+        // Dedupe por día → la misma derivación pendiente solo una vez por día.
+        dedupe_key_extra: new Date().toISOString().slice(0, 10),
+        lines: [
+          `📦 <b>${escapeHtml(tr.number || `#${tr.id}`)}</b>`,
+          `📤 De: ${escapeHtml(fromName)}`,
+          `📥 A: ${escapeHtml(toName)}`,
+          { k: "Pendiente hace", v: `<b>${hours.toFixed(1)}h</b>` },
+          { k: "Items", v: `${itemCount}` },
+        ],
+      });
+    }
+  } catch (e) {
+    console.warn("[telegram.scanPendingTransfers] error:", e?.message);
+  }
+}
+
 // Cron: escanea cajas abiertas hace +8h y notifica.
 // Se llama desde un setInterval en el bootstrap del server.
 async function scanLongOpenCashRegisters() {
@@ -737,16 +866,14 @@ let scanInterval = null;
 function startCronJobs(intervalMinutes = 10) {
   if (scanInterval) return;
   const ms = Math.max(1, Number(intervalMinutes) || 10) * 60 * 1000;
-  scanInterval = setInterval(() => {
-    scanLongOpenCashRegisters().catch((e) => {
-      console.warn("[telegram.cron] error:", e?.message);
-    });
-  }, ms);
+  const runAllScans = async () => {
+    try { await scanLongOpenCashRegisters(); } catch (e) { console.warn("[telegram.cron.cash]", e?.message); }
+    try { await scanPendingTransfers(); }     catch (e) { console.warn("[telegram.cron.transfer]", e?.message); }
+  };
+  scanInterval = setInterval(runAllScans, ms);
   // Primera corrida a los 30s del arranque, para no esperar el primer ciclo.
-  setTimeout(() => {
-    scanLongOpenCashRegisters().catch(() => {});
-  }, 30 * 1000);
-  console.log(`[telegram] cron de cajas largas activo (cada ${intervalMinutes} min)`);
+  setTimeout(runAllScans, 30 * 1000);
+  console.log(`[telegram] cron activo (cada ${intervalMinutes} min): cajas largas + derivaciones pendientes`);
 }
 function stopCronJobs() {
   if (scanInterval) {
@@ -774,7 +901,9 @@ module.exports = {
   DEFAULT_THRESHOLDS,
   notifyStockChange,
   notifyCashRegisterClose,
+  notifyTransferDispatched,
   scanLongOpenCashRegisters,
+  scanPendingTransfers,
   startCronJobs,
   stopCronJobs,
 };
