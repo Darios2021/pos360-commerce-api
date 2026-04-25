@@ -439,10 +439,18 @@ async function pingBot() {
 
 async function notifyStockChange({ product_id, warehouse_id, prev, next, delta, source = "movement" }) {
   try {
-    if (!product_id) return;
+    if (!product_id) {
+      console.log("[notifyStockChange] sin product_id, skip");
+      return;
+    }
 
     const cfg = await getConfig();
-    if (!cfg?.enabled) return;
+    console.log(`[notifyStockChange] product=${product_id} prev=${prev} next=${next} delta=${delta} source=${source} enabled=${cfg?.enabled} flags=zero:${cfg?.alert_stock_zero} low:${cfg?.alert_stock_low} neg:${cfg?.alert_stock_negative}`);
+
+    if (!cfg?.enabled) {
+      console.log("[notifyStockChange] cfg.enabled=false, skip");
+      return;
+    }
 
     const flagsToCheck = [
       cfg.alert_stock_zero,
@@ -450,7 +458,10 @@ async function notifyStockChange({ product_id, warehouse_id, prev, next, delta, 
       cfg.alert_stock_negative,
       cfg.alert_stock_big_adjust,
     ];
-    if (!flagsToCheck.some(Boolean)) return;
+    if (!flagsToCheck.some(Boolean)) {
+      console.log("[notifyStockChange] todos los toggles de stock están off, skip");
+      return;
+    }
 
     const prevN = Number(prev || 0);
     const nextN = Number(next || 0);

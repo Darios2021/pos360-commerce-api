@@ -116,6 +116,32 @@ async function ping(req, res, next) {
   }
 }
 
+// Dispara una alerta de stock fake (testing aislado del POS).
+async function testStockAlert(req, res, next) {
+  try {
+    const product_id = Number(req.body?.product_id || 0);
+    if (!product_id) {
+      return res.status(400).json({ ok: false, message: "Mandá product_id en el body" });
+    }
+    const prev = Number(req.body?.prev != null ? req.body.prev : 5);
+    const next = Number(req.body?.next != null ? req.body.next : 0);
+    const warehouse_id = Number(req.body?.warehouse_id || 0) || null;
+
+    await svc.notifyStockChange({
+      product_id,
+      warehouse_id,
+      prev,
+      next,
+      delta: next - prev,
+      source: "test_manual",
+    });
+
+    return res.json({ ok: true, note: "Alerta disparada (revisá grupo de Telegram + log)." });
+  } catch (e) {
+    next(e);
+  }
+}
+
 // Dispara los scans del cron a demanda. Útil para testear sin esperar 10min.
 async function runScansNow(req, res, next) {
   try {
@@ -154,4 +180,5 @@ module.exports = {
   ping,
   listLogs,
   runScansNow,
+  testStockAlert,
 };

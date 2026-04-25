@@ -8,5 +8,6 @@ router.post("/test-send", ctrl.testSend);
 router.get("/ping", ctrl.ping);
 router.get("/logs", ctrl.listLogs);
 router.post("/run-scans-now", ctrl.runScansNow);
+router.post("/test-stock-alert", ctrl.testStockAlert);
 
 module.exports = router;

@@ -11,35 +11,42 @@
 // con un objeto literal — necesitamos reloadear para obtener el valor real.
 async function trackStockChange({ sb, prev, qty, t, source = "movement" }) {
   try {
-    if (!sb) return;
+    if (!sb) {
+      console.log("[trackStockChange] sb null, skip");
+      return;
+    }
     // Refrescar la instancia post-UPDATE para obtener el valor real.
     let next = null;
     try {
       await sb.reload({ transaction: t });
       next = Number(sb.qty || 0);
-    } catch (_) {
-      // Si reload falla, calculamos next manualmente con prev + qty.
+    } catch (e) {
+      console.log("[trackStockChange] reload falló, uso prev+qty:", e?.message);
       next = Number(prev || 0) + Number(qty || 0);
     }
 
     const delta = Number(qty != null ? qty : (next - prev));
+    console.log(`[trackStockChange] product=${sb.product_id} wh=${sb.warehouse_id} prev=${prev} next=${next} delta=${delta} source=${source}`);
+
     const tg = require("./telegramNotifier.service");
-    const fire = () =>
-      tg.notifyStockChange({
+    const fire = () => {
+      console.log(`[trackStockChange] firing notifyStockChange post-commit product=${sb.product_id} prev=${prev} next=${next}`);
+      return tg.notifyStockChange({
         product_id: sb.product_id,
         warehouse_id: sb.warehouse_id,
         prev: Number(prev || 0),
         next,
         delta,
         source,
-      }).catch(() => {});
+      }).catch((e) => console.warn("[trackStockChange.fire] error:", e?.message));
+    };
     if (t && typeof t.afterCommit === "function") {
       t.afterCommit(fire);
     } else {
       fire();
     }
-  } catch (_) {
-    // Notifier es opcional. Cualquier error no debe romper el flujo de stock.
+  } catch (e) {
+    console.warn("[trackStockChange] error:", e?.message);
   }
 }
 
