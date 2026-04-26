@@ -91,12 +91,51 @@ function fmtPrice(n) {
   }
 }
 
+// Resuelve el dominio público del shop con fallbacks inteligentes para que
+// los links del email/WhatsApp sean SIEMPRE absolutos (Gmail no acepta
+// relativos: "/p/123" → te tira a "http:///p/123" y rompe).
+//
+// Orden de prioridad:
+//   1) SHOP_PUBLIC_URL del entorno (preferido)
+//   2) SHOP_BASE_URL (alias común)
+//   3) PUBLIC_URL (alias genérico)
+//   4) Dominio derivado del SMTP_FROM_EMAIL o SMTP_USER ("comercial@dominio.com" → "https://dominio.com")
+//   5) Como último recurso, usamos APP_URL si está
+function getShopPublicUrl() {
+  const candidates = [
+    process.env.SHOP_PUBLIC_URL,
+    process.env.SHOP_BASE_URL,
+    process.env.PUBLIC_URL,
+    process.env.APP_URL,
+  ];
+  for (const v of candidates) {
+    const u = String(v || "").trim();
+    if (u && /^https?:\/\//i.test(u)) {
+      return u.replace(/\/+$/, "");
+    }
+  }
+
+  // Último fallback: derivar del email SMTP. Si la casilla es comercial@sanjuantecnologia.com,
+  // asumimos que el shop público vive en https://sanjuantecnologia.com.
+  const email = String(process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "").trim().toLowerCase();
+  const domain = email.split("@")[1];
+  if (domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) {
+    return `https://${domain}`;
+  }
+
+  // Si llegamos acá, el deploy está mal configurado. Devolvemos null y el
+  // caller decide si saltar el link o usar fallback.
+  return null;
+}
+
 function buildProductUrl(product) {
   const slug = product.slug || product.id;
-  const baseShopUrl = process.env.SHOP_PUBLIC_URL || "";
-  return baseShopUrl
-    ? `${String(baseShopUrl).replace(/\/+$/, "")}/p/${slug}`
-    : `/p/${slug}`;
+  const base = getShopPublicUrl();
+  if (base) return `${base}/p/${slug}`;
+  // Si no podemos resolver dominio, usamos un placeholder visible que al
+  // menos no rompa Gmail (un anchor que avisa el problema).
+  console.warn("[promo] buildProductUrl: no se pudo resolver dominio del shop. Configurá SHOP_PUBLIC_URL.");
+  return `https://example.com/p/${slug}`;
 }
 
 // Toma un row de `products` + su primera imagen y devuelve los campos
@@ -169,6 +208,16 @@ async function loadProductForPromo(productId) {
   };
 }
 
+// Acepta sólo URLs absolutas (http/https). Si viene relativa o vacía,
+// devuelve null para que el caller use el fallback. Importante para email
+// porque Gmail rompe con "/p/123" → "http:///p/123".
+function asAbsoluteUrl(v) {
+  const s = String(v || "").trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
 // Hidrata un bloque promo combinando los datos del producto + los overrides
 // guardados en el bloque. Lo usan tanto este controller (al listar) como
 // messaging.controller (al enviar).
@@ -181,8 +230,10 @@ async function hydrateBlock(block) {
     if (prod) {
       out.title = json.override_title || prod.title;
       out.subtitle = json.override_subtitle || prod.subtitle;
-      out.image_url = json.override_image_url || prod.image_url;
-      out.product_url = json.override_product_url || prod.product_url;
+      out.image_url = asAbsoluteUrl(json.override_image_url) || prod.image_url;
+      // El override_product_url solo se respeta si es absoluto; si no,
+      // forzamos el armado desde el producto (siempre absoluto via buildProductUrl).
+      out.product_url = asAbsoluteUrl(json.override_product_url) || prod.product_url;
       out.price_original = json.override_price_original || prod.price_original;
       out.price_final = json.override_price_final || prod.price_final;
       // Badge automático con % de descuento si el producto tiene oferta y el
@@ -190,13 +241,13 @@ async function hydrateBlock(block) {
       if (!json.badge_text && prod.discount_pct) {
         out.badge_text = `-${prod.discount_pct}%`;
       }
-      out.product_snapshot = prod; // útil para debug / preview
+      out.product_snapshot = prod;
     }
   } else {
     // Bloque manual sin producto (legado).
     out.title = json.override_title || json.title;
-    out.image_url = json.override_image_url || json.image_url;
-    out.product_url = json.override_product_url || json.product_url;
+    out.image_url = asAbsoluteUrl(json.override_image_url) || asAbsoluteUrl(json.image_url) || null;
+    out.product_url = asAbsoluteUrl(json.override_product_url) || asAbsoluteUrl(json.product_url) || null;
     out.price_original = json.override_price_original || json.price_original;
     out.price_final = json.override_price_final || json.price_final;
   }
