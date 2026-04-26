@@ -268,14 +268,13 @@ function readProductFilter(req) {
 }
 
 function buildWhereFromQuery(req) {
-  // SCOPE EFECTIVO
+  // SCOPE EFECTIVO (LECTURA)
   //  - super_admin: ve ventas de todas las sucursales (puede acotar con ?branch_id=)
   //  - branch admin: ve ventas de su sucursal activa (no puede salirse)
-  //  - cajero: solo SUS ventas (user_id = ctxUserId), forzado a su sucursal
+  //  - cajero/vendedor: ve TODAS las ventas de su sucursal (propias y de compañeros).
+  //    Las acciones (anular, refund, exchange) siguen restringidas a venta propia
+  //    en sus handlers correspondientes.
   const superAdmin  = access.isSuperAdmin(req);
-  const branchAdmin = access.isBranchAdmin(req); // incluye super_admin
-  const isCajero    = !branchAdmin;
-  const ctxUserId   = access.getUserId(req);
 
   const q = String(req.query.q || "").trim();
   const status = String(req.query.status || "").trim().toUpperCase();
@@ -306,22 +305,10 @@ function buildWhereFromQuery(req) {
   else if (from) where.sold_at = { [Op.gte]: from };
   else if (to) where.sold_at = { [Op.lte]: to };
 
-  // Filtro de vendedor:
-  //  - cajero: forzado a sus ventas (ignora ?seller_id=).
-  //  - admin / super_admin: opcional via query.
-  if (isCajero) {
-    if (!ctxUserId) {
-      return {
-        ok: false,
-        code: "AUTH_REQUIRED",
-        message: "No se pudo determinar el usuario autenticado.",
-      };
-    }
-    where.user_id = ctxUserId;
-  } else {
-    const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
-    if (seller_id > 0) where.user_id = seller_id;
-  }
+  // Filtro de vendedor opcional (válido para cualquier rol):
+  // permite acotar el listado a un cajero/vendedor específico de la sucursal.
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+  if (seller_id > 0) where.user_id = seller_id;
 
   const customer = req.query.customer;
   if (customer != null && String(customer).trim()) {
@@ -715,13 +702,10 @@ async function statsSales(req, res, next) {
 // ============================
 async function getSaleById(req, res, next) {
   try {
-    // Para acceso al detalle:
+    // Para acceso al detalle (LECTURA):
     //  - super_admin: cualquier venta.
-    //  - branch admin: solo ventas de su sucursal.
-    //  - cajero: solo SUS ventas.
+    //  - resto: solo ventas de su sucursal (propias o de compañeros).
     const superAdmin  = access.isSuperAdmin(req);
-    const branchAdmin = access.isBranchAdmin(req);
-    const isCajero    = !branchAdmin;
     // `admin` legado se usa más abajo solo para gating de la verificación cross-branch.
     const admin = superAdmin;
 
@@ -771,18 +755,8 @@ async function getSaleById(req, res, next) {
           message: "No podés ver una venta de otra sucursal.",
         });
       }
-
-      // Cajero: además, debe ser DUEÑO de la venta.
-      if (isCajero) {
-        const ctxUserId = access.getUserId(req);
-        if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
-          return res.status(403).json({
-            ok: false,
-            code: "FORBIDDEN_USER",
-            message: "Solo podés ver tus propias ventas.",
-          });
-        }
-      }
+      // El cajero ve cualquier venta de su sucursal (propias y de compañeros).
+      // Las acciones (refund/exchange/anular) tienen sus propios chequeos de dueño.
     }
 
     let refunds = [];
@@ -821,17 +795,7 @@ async function listRefundsBySale(req, res, next) {
           .status(403)
           .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver devoluciones de otra sucursal." });
       }
-      // Cajero: solo sobre sus propias ventas.
-      if (!access.isBranchAdmin(req)) {
-        const ctxUserId = access.getUserId(req);
-        if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
-          return res.status(403).json({
-            ok: false,
-            code: "FORBIDDEN_USER",
-            message: "Solo podés ver devoluciones de tus propias ventas.",
-          });
-        }
-      }
+      // El cajero puede LEER las devoluciones de cualquier venta de su sucursal.
     }
 
     const data = SaleRefund ? await SaleRefund.findAll({ where: { sale_id }, order: [["created_at", "DESC"]] }) : [];
@@ -858,17 +822,7 @@ async function listExchangesBySale(req, res, next) {
           .status(403)
           .json({ ok: false, code: "CROSS_BRANCH_SALE", message: "No podés ver cambios de otra sucursal." });
       }
-      // Cajero: solo sobre sus propias ventas.
-      if (!access.isBranchAdmin(req)) {
-        const ctxUserId = access.getUserId(req);
-        if (toInt(sale.user_id, 0) !== toInt(ctxUserId, 0)) {
-          return res.status(403).json({
-            ok: false,
-            code: "FORBIDDEN_USER",
-            message: "Solo podés ver cambios de tus propias ventas.",
-          });
-        }
-      }
+      // El cajero puede LEER los cambios de cualquier venta de su sucursal.
     }
 
     const data = SaleExchange
