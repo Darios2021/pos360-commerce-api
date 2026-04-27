@@ -1266,6 +1266,32 @@ async function create(req, res, next) {
 
     asyncSync(createdId);
 
+    // Si el producto se crea YA con is_promo=1, notificamos activación
+    try {
+      const f = fresh ? (fresh.toJSON ? fresh.toJSON() : fresh) : {};
+      if (Number(f?.is_promo)) {
+        const telegramNotifier = require("../services/telegramNotifier.service");
+        if (telegramNotifier?.notifyPromoChange) {
+          telegramNotifier.notifyPromoChange({
+            product_id: createdId,
+            before: { is_promo: 0 },
+            after: {
+              is_promo: 1,
+              promo_price: f.promo_price ?? null,
+              promo_starts_at: f.promo_starts_at ?? null,
+              promo_ends_at: f.promo_ends_at ?? null,
+              promo_qty_threshold: f.promo_qty_threshold ?? null,
+              promo_qty_discount: f.promo_qty_discount ?? null,
+              promo_qty_mode: f.promo_qty_mode ?? null,
+            },
+            source: "create",
+          }).catch((err) => console.warn("[telegram.notifyPromoChange]", err?.message));
+        }
+      }
+    } catch (e) {
+      console.warn("[telegram] error preparando notificación de promo (create):", e?.message);
+    }
+
     return res.status(201).json({
       ok: true,
       message: "Producto creado",
@@ -1307,6 +1333,17 @@ async function update(req, res, next) {
 
     const p = await Product.findByPk(id);
     if (!p) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Producto no encontrado" });
+
+    // Snapshot ANTES del update — para detectar cambios de promo y notificar Telegram
+    const promoBefore = {
+      is_promo: p.is_promo ? 1 : 0,
+      promo_price: p.promo_price ?? null,
+      promo_starts_at: p.promo_starts_at ?? null,
+      promo_ends_at: p.promo_ends_at ?? null,
+      promo_qty_threshold: p.promo_qty_threshold ?? null,
+      promo_qty_discount: p.promo_qty_discount ?? null,
+      promo_qty_mode: p.promo_qty_mode ?? null,
+    };
 
     if (!admin) {
       const bid = ctxBranchId;
@@ -1393,6 +1430,31 @@ async function update(req, res, next) {
     const u = x?.createdByUser || null;
 
     asyncSync(id);
+
+    // Notificación a Telegram si cambió la promoción (fire-and-forget)
+    try {
+      const promoAfter = {
+        is_promo: x.is_promo ? 1 : 0,
+        promo_price: x.promo_price ?? null,
+        promo_starts_at: x.promo_starts_at ?? null,
+        promo_ends_at: x.promo_ends_at ?? null,
+        promo_qty_threshold: x.promo_qty_threshold ?? null,
+        promo_qty_discount: x.promo_qty_discount ?? null,
+        promo_qty_mode: x.promo_qty_mode ?? null,
+      };
+      const telegramNotifier = require("../services/telegramNotifier.service");
+      if (telegramNotifier?.notifyPromoChange) {
+        // Sin await: que no bloquee la respuesta al cliente
+        telegramNotifier.notifyPromoChange({
+          product_id: id,
+          before: promoBefore,
+          after: promoAfter,
+          source: "edit",
+        }).catch((err) => console.warn("[telegram.notifyPromoChange]", err?.message));
+      }
+    } catch (e) {
+      console.warn("[telegram] error preparando notificación de promo:", e?.message);
+    }
 
     return res.json({
       ok: true,

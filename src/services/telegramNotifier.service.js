@@ -152,6 +152,7 @@ async function ensureTables() {
       alert_transfer_dispatched TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_pending TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_received TINYINT(1) NOT NULL DEFAULT 1,
+      alert_promo_change TINYINT(1) NOT NULL DEFAULT 1,
       thresholds TEXT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -191,6 +192,7 @@ async function ensureTables() {
     { name: "alert_transfer_received",   ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_cash_opened",         ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_cash_closed",         ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_promo_change",        ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
   ];
   for (const c of newCols) {
     try {
@@ -233,6 +235,7 @@ async function saveConfig(patch = {}) {
     "alert_stock_zero", "alert_stock_low", "alert_stock_negative",
     "alert_stock_big_adjust", "alert_shop_new_order",
     "alert_transfer_dispatched", "alert_transfer_pending", "alert_transfer_received",
+    "alert_promo_change",
     "thresholds",
   ];
 
@@ -929,6 +932,208 @@ async function scanZeroStockProducts({ limit = 30 } = {}) {
   }
 }
 
+// ──────────────────────────────────────────────────────────────
+// PROMOCIONES DE PRODUCTOS
+// Detecta:
+//   - Activación: is_promo pasó de 0/false → 1/true
+//   - Desactivación: is_promo pasó de 1 → 0
+//   - Modificación: is_promo seguía en 1 pero cambió promo_price / fechas / qty rules
+// El payload `before` y `after` debe contener los campos relevantes del producto.
+// ──────────────────────────────────────────────────────────────
+async function notifyPromoChange({ product_id, before = {}, after = {}, source = "edit" }) {
+  try {
+    if (!product_id) return;
+
+    const cfg = await getConfig();
+    if (!cfg?.enabled) return;
+    if (!cfg.alert_promo_change) return;
+
+    const wasPromo = !!Number(before?.is_promo ?? 0);
+    const isPromo  = !!Number(after?.is_promo  ?? 0);
+
+    // Comparación de cambios relevantes (precio + ventana + qty rules)
+    const fieldsChanged = (a, b, keys) =>
+      keys.filter((k) => String(a?.[k] ?? "") !== String(b?.[k] ?? ""));
+
+    const promoFields = [
+      "promo_price",
+      "promo_starts_at",
+      "promo_ends_at",
+      "promo_qty_threshold",
+      "promo_qty_discount",
+      "promo_qty_mode",
+    ];
+
+    const changedFields = fieldsChanged(before, after, promoFields);
+    const promoFieldsChanged = changedFields.length > 0;
+
+    // Si no cambió el flag ni los campos promo, no notificamos.
+    if (wasPromo === isPromo && !promoFieldsChanged) return;
+
+    // Datos del producto para el mensaje
+    let productInfo = { name: `Producto #${product_id}`, sku: "" };
+    try {
+      const { Product } = require("../models");
+      if (Product) {
+        const p = await Product.findByPk(product_id, {
+          attributes: ["id", "name", "sku", "code", "price_list", "price_discount"],
+        });
+        if (p) {
+          productInfo = {
+            name: p.name || `Producto #${product_id}`,
+            sku: p.sku || p.code || "",
+            price_list: Number(p.price_list || 0),
+            price_discount: Number(p.price_discount || 0),
+          };
+        }
+      }
+    } catch (_) {}
+
+    const productLine = productInfo.sku
+      ? `🏷️ <b>${escapeHtml(productInfo.name)}</b> <code>${escapeHtml(productInfo.sku)}</code>`
+      : `🏷️ <b>${escapeHtml(productInfo.name)}</b>`;
+
+    // Helpers para precios
+    const refList = Number(productInfo.price_list || 0);
+    const refDisc = Number(productInfo.price_discount || 0);
+    const baseRef = refDisc > 0 ? refDisc : refList;
+
+    const fmtDate = (v) => {
+      if (!v) return null;
+      const d = new Date(v);
+      if (!Number.isFinite(d.getTime())) return null;
+      return fmtDateTimeAR(d);
+    };
+    const dateRangeText = (a) => {
+      const s = fmtDate(a?.promo_starts_at);
+      const e = fmtDate(a?.promo_ends_at);
+      if (s && e) return `${s} → ${e}`;
+      if (s)      return `Desde ${s}`;
+      if (e)      return `Hasta ${e}`;
+      return "Sin ventana temporal";
+    };
+
+    const promoLine = (a) => {
+      const pp = Number(a?.promo_price || 0);
+      if (pp > 0 && refList > 0 && pp < refList) {
+        const off = Math.round(((refList - pp) / refList) * 100);
+        return `<b>$${fmtMoney(pp)}</b> (era $${fmtMoney(refList)}, <b>-${off}%</b>)`;
+      }
+      if (pp > 0) return `<b>$${fmtMoney(pp)}</b>`;
+      return "—";
+    };
+
+    const qtyRuleLine = (a) => {
+      const thr = Number(a?.promo_qty_threshold || 0);
+      const disc = Number(a?.promo_qty_discount || 0);
+      const mode = String(a?.promo_qty_mode || "").toLowerCase();
+      if (thr < 2 || disc <= 0) return null;
+      if (mode === "percent") {
+        return `Desde ${thr} u → <b>${disc}% OFF</b> c/u`;
+      }
+      return `Desde ${thr} u → <b>-$${fmtMoney(disc)}</b> c/u`;
+    };
+
+    // ─── ACTIVACIÓN ─────────────────────────────────────────────
+    if (!wasPromo && isPromo) {
+      const lines = [productLine];
+      const pl = promoLine(after);
+      if (pl !== "—") {
+        lines.push({ k: "🎯 Precio promo", v: pl });
+      } else if (refList > 0) {
+        lines.push({ k: "Precio lista", v: `$${fmtMoney(refList)}` });
+      }
+      const qr = qtyRuleLine(after);
+      if (qr) lines.push({ k: "📦 Por cantidad", v: qr });
+      lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
+
+      await sendAlert({
+        code: "PROMO_ACTIVATED",
+        title: "🎉 Promoción ACTIVADA",
+        severity: "low",
+        toggleKey: "alert_promo_change",
+        reference_type: "product",
+        reference_id: product_id,
+        // Dedupe corto: si se reactiva en pocas horas, igual avisa al cambiar campos
+        dedupe_key_extra: `act:${after?.promo_price ?? ""}:${after?.promo_ends_at ?? ""}`,
+        lines,
+      });
+      return;
+    }
+
+    // ─── DESACTIVACIÓN ──────────────────────────────────────────
+    if (wasPromo && !isPromo) {
+      const lines = [productLine];
+      const pl = promoLine(before);
+      if (pl !== "—") lines.push({ k: "🎯 Precio promo previo", v: pl });
+      const qr = qtyRuleLine(before);
+      if (qr) lines.push({ k: "📦 Por cantidad previa", v: qr });
+      if (baseRef > 0) {
+        lines.push({ k: "💰 Precio actual", v: `<b>$${fmtMoney(baseRef)}</b>` });
+      }
+
+      await sendAlert({
+        code: "PROMO_DEACTIVATED",
+        title: "⏹️ Promoción DESACTIVADA",
+        severity: "low",
+        toggleKey: "alert_promo_change",
+        reference_type: "product",
+        reference_id: product_id,
+        dedupe_key_extra: `deact:${product_id}`,
+        lines,
+      });
+      return;
+    }
+
+    // ─── MODIFICACIÓN (estaba en promo y siguió en promo) ───────
+    if (wasPromo && isPromo && promoFieldsChanged) {
+      const lines = [productLine, "✏️ <b>Promo modificada</b>"];
+
+      // Cambios de precio
+      const beforePrice = Number(before?.promo_price || 0);
+      const afterPrice  = Number(after?.promo_price  || 0);
+      if (beforePrice !== afterPrice) {
+        const arrow = beforePrice > 0 && afterPrice > 0
+          ? `$${fmtMoney(beforePrice)} → <b>$${fmtMoney(afterPrice)}</b>`
+          : afterPrice > 0
+            ? `<b>$${fmtMoney(afterPrice)}</b>`
+            : "—";
+        lines.push({ k: "🎯 Precio promo", v: arrow });
+      } else if (afterPrice > 0) {
+        lines.push({ k: "🎯 Precio promo", v: `$${fmtMoney(afterPrice)}` });
+      }
+
+      // Ventana
+      const beforeRange = `${before?.promo_starts_at || ""}|${before?.promo_ends_at || ""}`;
+      const afterRange  = `${after?.promo_starts_at  || ""}|${after?.promo_ends_at  || ""}`;
+      if (beforeRange !== afterRange) {
+        lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
+      }
+
+      // Qty rules
+      const beforeQty = `${before?.promo_qty_threshold || 0}|${before?.promo_qty_discount || 0}|${before?.promo_qty_mode || ""}`;
+      const afterQty  = `${after?.promo_qty_threshold  || 0}|${after?.promo_qty_discount  || 0}|${after?.promo_qty_mode  || ""}`;
+      if (beforeQty !== afterQty) {
+        const qr = qtyRuleLine(after);
+        lines.push({ k: "📦 Por cantidad", v: qr || "Quitada" });
+      }
+
+      await sendAlert({
+        code: "PROMO_UPDATED",
+        title: "🔄 Promoción modificada",
+        severity: "low",
+        toggleKey: "alert_promo_change",
+        reference_type: "product",
+        reference_id: product_id,
+        dedupe_key_extra: `upd:${afterPrice}:${after?.promo_ends_at || ""}:${afterQty}`,
+        lines,
+      });
+    }
+  } catch (e) {
+    console.warn("[telegram.notifyPromoChange] error:", e?.message);
+  }
+}
+
 async function notifyTransferDispatched({ transfer_id }) {
   try {
     if (!transfer_id) {
@@ -1318,6 +1523,7 @@ module.exports = {
   notifyStockChange,
   notifyCashRegisterOpen,
   notifyCashRegisterClose,
+  notifyPromoChange,
   notifyTransferDispatched,
   notifyTransferReceived,
   scanLongOpenCashRegisters,
