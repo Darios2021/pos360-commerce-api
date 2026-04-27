@@ -152,13 +152,14 @@ async function getStockByBranchMap(productIds = []) {
     SELECT
       vs.product_id,
       vs.branch_id,
+      b.name AS branch_name,
       CAST(COALESCE(vs.qty, 0) AS SIGNED) AS qty
     FROM v_stock_by_branch_product vs
     INNER JOIN branches b
       ON b.id = vs.branch_id
      AND b.is_active = 1
     WHERE vs.product_id IN (:ids)
-    ORDER BY vs.product_id ASC, vs.branch_id ASC
+    ORDER BY vs.product_id ASC, b.name ASC
     `,
     { replacements: { ids } }
   );
@@ -170,7 +171,11 @@ async function getStockByBranchMap(productIds = []) {
     const qty = Number(r.qty || 0);
     if (!pid || !bid) continue;
     if (!map[pid]) map[pid] = [];
-    map[pid].push({ branch_id: bid, qty });
+    map[pid].push({
+      branch_id: bid,
+      branch_name: String(r.branch_name || "").trim() || `Sucursal ${bid}`,
+      qty,
+    });
   }
 
   return map;

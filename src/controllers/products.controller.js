@@ -807,6 +807,15 @@ async function list(req, res, next) {
     const hasImages = imagesMode === "with" || String(req.query.has_images || "").toLowerCase() === "true";
     const noImages = imagesMode === "without" || String(req.query.no_images || "").toLowerCase() === "true";
 
+    // Filtro de promoción:
+    //  "all" | ""           → sin filtro
+    //  "active"             → is_promo=1 y ventana vigente (NULL o NOW dentro)
+    //  "any"                → is_promo=1 (sin importar ventana)
+    //  "none"               → is_promo=0
+    //  "expired"            → is_promo=1 y promo_ends_at < NOW
+    //  "scheduled"          → is_promo=1 y promo_starts_at > NOW
+    const promoMode = String(req.query.promo || "").toLowerCase().trim();
+
     // -------------------------
     // 1) SQL base (solo IDs)
     // -------------------------
@@ -916,6 +925,23 @@ async function list(req, res, next) {
     // images exists
     if (hasImages) whereSql.push(`EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id LIMIT 1)`);
     if (noImages) whereSql.push(`NOT EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id LIMIT 1)`);
+
+    // Promociones
+    if (promoMode === "any") {
+      whereSql.push(`p.is_promo = 1`);
+    } else if (promoMode === "active") {
+      whereSql.push(
+        `p.is_promo = 1
+         AND (p.promo_starts_at IS NULL OR p.promo_starts_at <= NOW())
+         AND (p.promo_ends_at   IS NULL OR p.promo_ends_at   >= NOW())`
+      );
+    } else if (promoMode === "none") {
+      whereSql.push(`p.is_promo = 0`);
+    } else if (promoMode === "expired") {
+      whereSql.push(`p.is_promo = 1 AND p.promo_ends_at IS NOT NULL AND p.promo_ends_at < NOW()`);
+    } else if (promoMode === "scheduled") {
+      whereSql.push(`p.is_promo = 1 AND p.promo_starts_at IS NOT NULL AND p.promo_starts_at > NOW()`);
+    }
 
     const whereClause = whereSql.length ? `WHERE ${whereSql.join(" AND ")}` : "";
 
