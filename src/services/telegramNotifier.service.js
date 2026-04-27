@@ -1074,6 +1074,7 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
       return lines;
     };
 
+    // Versión corta: una línea (para mensajes resumidos)
     const qtyRuleLine = (a) => {
       const thr = Number(a?.promo_qty_threshold || 0);
       const disc = Number(a?.promo_qty_discount || 0);
@@ -1083,6 +1084,58 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
         return `Desde ${thr} u → <b>${disc}% OFF</b> c/u`;
       }
       return `Desde ${thr} u → <b>-$${fmtMoney(disc)}</b> c/u`;
+    };
+
+    // Versión detallada: bloque multi-línea con base, precio resultante y ahorro
+    const qtyPromoBlock = (a) => {
+      const thr  = Number(a?.promo_qty_threshold || 0);
+      const disc = Number(a?.promo_qty_discount  || 0);
+      const mode = String(a?.promo_qty_mode || "").toLowerCase();
+      if (thr < 2 || disc <= 0) return [];
+
+      // Base sobre la que se calcula el descuento por cantidad:
+      //  - si hay precio promo activo (promo_price > 0), se aplica sobre ese,
+      //  - sino, sobre price_discount (si existe), sino price_list.
+      const promoPrice = Number(a?.promo_price || 0);
+      let basePrice, baseLabel;
+      if (promoPrice > 0) {
+        basePrice = promoPrice;
+        baseLabel = "precio promo";
+      } else if (refDisc > 0) {
+        basePrice = refDisc;
+        baseLabel = "precio descuento (contado)";
+      } else {
+        basePrice = refList;
+        baseLabel = "precio lista";
+      }
+
+      // Calcular precio resultante y ahorro por unidad
+      let unitFinal;
+      let descTxt;
+      if (mode === "percent") {
+        const pct = Math.min(100, Math.max(0, disc));
+        unitFinal = basePrice * (1 - pct / 100);
+        descTxt = `<b>${pct}% OFF</b>`;
+      } else {
+        unitFinal = Math.max(0, basePrice - disc);
+        descTxt = `<b>-$${fmtMoney(disc)}</b> c/u`;
+      }
+      unitFinal = Math.round(unitFinal * 100) / 100;
+      const saveUnit  = Math.max(0, basePrice - unitFinal);
+      const saveTotal = saveUnit * thr;
+
+      const lines = [];
+      lines.push("📦 <b>Promo por cantidad</b>");
+      lines.push(`   Llevando <b>${thr}</b> o más unidades → ${descTxt} en <b>todas</b> las unidades`);
+      if (basePrice > 0) {
+        lines.push(`   • Aplicado sobre <i>${baseLabel}</i>: $${fmtMoney(basePrice)}`);
+        lines.push(`   • Precio c/u con promo: <b>$${fmtMoney(unitFinal)}</b>`);
+        lines.push(`   • Ahorro: $${fmtMoney(saveUnit)} por unidad`);
+        if (thr > 0) {
+          lines.push(`   • Llevando ${thr}: total <b>$${fmtMoney(unitFinal * thr)}</b> (ahorrás <b>$${fmtMoney(saveTotal)}</b>)`);
+        }
+      }
+      return lines;
     };
 
     // ─── ACTIVACIÓN ─────────────────────────────────────────────
@@ -1096,10 +1149,10 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
         lines.push("");
         lines.push(...promoBlock);
       }
-      const qr = qtyRuleLine(after);
-      if (qr) {
+      const qBlock = qtyPromoBlock(after);
+      if (qBlock.length) {
         lines.push("");
-        lines.push({ k: "📦 Promo por cantidad", v: qr });
+        lines.push(...qBlock);
       }
       lines.push("");
       lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
@@ -1135,8 +1188,8 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
           });
         }
       }
-      const qr = qtyRuleLine(before);
-      if (qr) lines.push({ k: "📦 Promo por cantidad previa", v: qr });
+      const qrPrev = qtyRuleLine(before);
+      if (qrPrev) lines.push({ k: "📦 Promo por cantidad previa", v: qrPrev });
 
       // Bloque de "vuelve a"
       lines.push("");
@@ -1200,12 +1253,18 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
         lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
       }
 
-      // Qty rules
+      // Qty rules: si quedó configurada, mostramos el bloque detallado.
+      // Si la quitaron, una línea simple.
       const beforeQty = `${before?.promo_qty_threshold || 0}|${before?.promo_qty_discount || 0}|${before?.promo_qty_mode || ""}`;
       const afterQty  = `${after?.promo_qty_threshold  || 0}|${after?.promo_qty_discount  || 0}|${after?.promo_qty_mode  || ""}`;
       if (beforeQty !== afterQty) {
-        const qr = qtyRuleLine(after);
-        lines.push({ k: "📦 Por cantidad", v: qr || "Quitada" });
+        const qBlock = qtyPromoBlock(after);
+        if (qBlock.length) {
+          lines.push("");
+          lines.push(...qBlock);
+        } else {
+          lines.push({ k: "📦 Por cantidad", v: "Quitada" });
+        }
       }
 
       await sendAlert({
