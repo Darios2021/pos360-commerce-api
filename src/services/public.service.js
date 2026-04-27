@@ -326,8 +326,16 @@ module.exports = {
     sort,
     price_min,
     price_max,
+    promo,
   }) {
-    const where = ["vc.branch_id = :branch_id", "vc.is_active = 1"];
+    // Cuando se filtra por promociones, queremos mostrar productos en promo
+    // de TODAS las sucursales (un producto por id, sin importar branch).
+    // Sino, filtrar por la branch del shop.
+    const promoModeFilter = String(promo || "").toLowerCase().trim();
+    const isPromoQuery = promoModeFilter === "active" || promoModeFilter === "any";
+
+    const where = ["vc.is_active = 1"];
+    if (!isPromoQuery) where.unshift("vc.branch_id = :branch_id");
 
     const lim = Math.min(100, Math.max(1, toInt(limit, 24)));
     const pg = Math.max(1, toInt(page, 1));
@@ -367,6 +375,18 @@ module.exports = {
     // ✅ stock filter (vc.stock_qty ya viene del view v_stock_by_branch_product)
     if (toBoolLike(in_stock, false)) {
       where.push("(vc.track_stock = 0 OR COALESCE(vc.stock_qty, 0) > 0)");
+    }
+
+    // ✅ Promociones (sólo "active" = is_promo + ventana vigente)
+    const promoMode = String(promo || "").toLowerCase().trim();
+    if (promoMode === "active") {
+      where.push(
+        `vc.is_promo = 1
+         AND (vc.promo_starts_at IS NULL OR vc.promo_starts_at <= NOW())
+         AND (vc.promo_ends_at   IS NULL OR vc.promo_ends_at   >= NOW())`
+      );
+    } else if (promoMode === "any") {
+      where.push("vc.is_promo = 1");
     }
 
     // ✅ FIX: filtro por marcas (case-insensitive)
@@ -451,25 +471,44 @@ module.exports = {
       orderSql = "ORDER BY vc.product_id DESC";
     }
 
-    const [[countRow]] = await sequelize.query(
-      `
-      SELECT COUNT(*) AS total
-      FROM v_public_catalog vc
-      ${whereSql}
-      `,
-      { replacements: repl }
-    );
+    // En modo promo (catálogo cross-branch) deduplicamos por product_id
+    // tomando UNA fila representativa por producto (la de menor branch_id).
+    // Sino dejamos la query estándar filtrada por branch_id.
+    let itemsSql, countSql;
+    if (isPromoQuery) {
+      itemsSql = `
+        SELECT vc.*
+        FROM v_public_catalog vc
+        INNER JOIN (
+          SELECT product_id, MIN(branch_id) AS pick_branch
+          FROM v_public_catalog vc
+          ${whereSql}
+          GROUP BY product_id
+        ) g ON g.product_id = vc.product_id AND g.pick_branch = vc.branch_id
+        ${orderSql}
+        LIMIT :limit OFFSET :offset
+      `;
+      countSql = `
+        SELECT COUNT(*) AS total FROM (
+          SELECT vc.product_id
+          FROM v_public_catalog vc
+          ${whereSql}
+          GROUP BY vc.product_id
+        ) t
+      `;
+    } else {
+      itemsSql = `
+        SELECT vc.*
+        FROM v_public_catalog vc
+        ${whereSql}
+        ${orderSql}
+        LIMIT :limit OFFSET :offset
+      `;
+      countSql = `SELECT COUNT(*) AS total FROM v_public_catalog vc ${whereSql}`;
+    }
 
-    const [itemsRaw] = await sequelize.query(
-      `
-      SELECT vc.*
-      FROM v_public_catalog vc
-      ${whereSql}
-      ${orderSql}
-      LIMIT :limit OFFSET :offset
-      `,
-      { replacements: repl }
-    );
+    const [[countRow]] = await sequelize.query(countSql, { replacements: repl });
+    const [itemsRaw] = await sequelize.query(itemsSql, { replacements: repl });
 
     const items = itemsRaw || [];
     const total = Number(countRow?.total || 0);

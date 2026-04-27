@@ -313,6 +313,7 @@ module.exports = {
         sort:             toStr(req.query.sort),
         price_min:        req.query.price_min != null ? toFloat(req.query.price_min) : null,
         price_max:        req.query.price_max != null ? toFloat(req.query.price_max) : null,
+        promo:            toStr(req.query.promo) || null,
       });
 
       return res.json({ ok: true, branch_id, ...result });
