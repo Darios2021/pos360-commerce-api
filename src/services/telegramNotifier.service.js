@@ -1264,6 +1264,69 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
   }
 }
 
+// ──────────────────────────────────────────────────────────────
+// PROMOCIONES MASIVAS
+// Aviso cuando se pausan / reactivan todas las promos desde el admin.
+// No incluye detalle de productos — solo la cantidad afectada.
+// ──────────────────────────────────────────────────────────────
+async function notifyBulkPromoChange({ action, count, userId }) {
+  try {
+    const cfg = await getConfig();
+    if (!cfg?.enabled) return;
+    if (!cfg.alert_promo_change) return;
+
+    const isPause = String(action || "").toLowerCase() === "pause";
+    const n = Number(count || 0);
+
+    // Si no hubo cambios, no spameamos
+    if (n <= 0) return;
+
+    // Resolver nombre del usuario que disparó la acción
+    let actorName = "—";
+    try {
+      const { User } = require("../models");
+      if (User && userId) {
+        const u = await User.findByPk(userId, {
+          attributes: ["id", "first_name", "last_name", "username", "email"],
+        });
+        if (u) {
+          const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+          actorName = full || u.username || u.email || `Usuario #${u.id}`;
+        }
+      }
+    } catch (_) {}
+
+    const lines = [
+      isPause
+        ? `🏷️ Se desactivaron <b>${n}</b> promoción${n === 1 ? "" : "es"}`
+        : `🏷️ Se reactivaron <b>${n}</b> promoción${n === 1 ? "" : "es"} configurada${n === 1 ? "" : "s"}`,
+      `👤 Por: ${escapeHtml(actorName)}`,
+      `🕒 ${fmtDateTimeAR(new Date())}`,
+    ];
+
+    if (isPause) {
+      lines.push(
+        "",
+        "<i>La configuración de cada producto (precio, fechas, reglas) se mantiene. Se puede reactivar desde el panel de Productos.</i>"
+      );
+    }
+
+    await sendAlert({
+      code: isPause ? "PROMO_BULK_PAUSED" : "PROMO_BULK_RESUMED",
+      title: isPause ? "⏸️ Promociones PAUSADAS masivamente" : "▶️ Promociones REACTIVADAS masivamente",
+      severity: isPause ? "medium" : "low",
+      toggleKey: "alert_promo_change",
+      reference_type: "system",
+      reference_id: null,
+      // Dedupe corto (el momento + count) para evitar dobles clicks accidentales
+      dedupe_key_extra: `${isPause ? "pause" : "resume"}:${n}:${Math.floor(Date.now() / 60000)}`,
+      lines,
+    });
+  } catch (e) {
+    console.warn("[telegram.notifyBulkPromoChange] error:", e?.message);
+  }
+}
+
 async function notifyTransferDispatched({ transfer_id }) {
   try {
     if (!transfer_id) {
@@ -1654,6 +1717,7 @@ module.exports = {
   notifyCashRegisterOpen,
   notifyCashRegisterClose,
   notifyPromoChange,
+  notifyBulkPromoChange,
   notifyTransferDispatched,
   notifyTransferReceived,
   scanLongOpenCashRegisters,

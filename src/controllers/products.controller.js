@@ -1760,6 +1760,22 @@ async function pauseAllPromos(req, res, next) {
     );
     const affected = toInt(meta?.affectedRows ?? meta?.rowCount ?? before, 0);
 
+    // Notificación Telegram (fire-and-forget, no bloquea la respuesta)
+    try {
+      const telegramNotifier = require("../services/telegramNotifier.service");
+      if (telegramNotifier?.notifyBulkPromoChange && affected > 0) {
+        telegramNotifier.notifyBulkPromoChange({
+          action: "pause",
+          count: affected,
+          userId: req?.user?.id || null,
+        }).catch((err) =>
+          console.warn("[telegram.notifyBulkPromoChange/pause]", err?.message)
+        );
+      }
+    } catch (e) {
+      console.warn("[telegram] error preparando notificación bulk pause:", e?.message);
+    }
+
     return res.json({
       ok: true,
       message: `Se apagaron ${affected} promociones`,
@@ -1788,6 +1804,22 @@ async function resumeAllPromos(req, res, next) {
          AND (promo_ends_at IS NULL OR promo_ends_at >= NOW())`
     );
     const affected = toInt(meta?.affectedRows ?? meta?.rowCount ?? 0, 0);
+
+    // Notificación Telegram (fire-and-forget)
+    try {
+      const telegramNotifier = require("../services/telegramNotifier.service");
+      if (telegramNotifier?.notifyBulkPromoChange && affected > 0) {
+        telegramNotifier.notifyBulkPromoChange({
+          action: "resume",
+          count: affected,
+          userId: req?.user?.id || null,
+        }).catch((err) =>
+          console.warn("[telegram.notifyBulkPromoChange/resume]", err?.message)
+        );
+      }
+    } catch (e) {
+      console.warn("[telegram] error preparando notificación bulk resume:", e?.message);
+    }
 
     return res.json({
       ok: true,
