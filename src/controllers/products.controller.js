@@ -1709,7 +1709,12 @@ async function getStats(req, res, next) {
         SUM(CASE WHEN COALESCE(p.price_list,0) > 0 THEN 1 ELSE 0 END) AS with_price,
         SUM(CASE WHEN COALESCE(p.price_list,0) <= 0 THEN 1 ELSE 0 END) AS without_price,
         SUM(CASE WHEN ${imagesExists} THEN 1 ELSE 0 END) AS with_images,
-        SUM(CASE WHEN NOT ${imagesExists} THEN 1 ELSE 0 END) AS without_images
+        SUM(CASE WHEN NOT ${imagesExists} THEN 1 ELSE 0 END) AS without_images,
+        SUM(CASE
+              WHEN p.is_promo = 1
+               AND (p.promo_starts_at IS NULL OR p.promo_starts_at <= NOW())
+               AND (p.promo_ends_at   IS NULL OR p.promo_ends_at   >= NOW())
+              THEN 1 ELSE 0 END) AS promo_active
       FROM products p
       ${joinPb}
       ${whereClause}
@@ -1729,6 +1734,7 @@ async function getStats(req, res, next) {
         without_price: toInt(row?.without_price, 0),
         with_images: toInt(row?.with_images, 0),
         without_images: toInt(row?.without_images, 0),
+        promo_active: toInt(row?.promo_active, 0),
       },
     });
   } catch (e) {
