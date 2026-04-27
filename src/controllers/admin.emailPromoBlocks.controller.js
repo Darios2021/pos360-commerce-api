@@ -128,14 +128,18 @@ function getShopPublicUrl() {
   return null;
 }
 
+// La ruta real del shop frontend es `/shop/product/:id` (Vue Router).
+// Si querés cambiarla a slugs en el futuro, actualizá la ruta en el frontend
+// y este builder en consecuencia.
 function buildProductUrl(product) {
-  const slug = product.slug || product.id;
+  const id = product?.id;
+  if (!id) return null;
   const base = getShopPublicUrl();
-  if (base) return `${base}/p/${slug}`;
-  // Si no podemos resolver dominio, usamos un placeholder visible que al
-  // menos no rompa Gmail (un anchor que avisa el problema).
+  if (base) return `${base}/shop/product/${id}`;
+  // Si no podemos resolver dominio, devolvemos null para que el caller no
+  // pinte un link roto. El layout va a esconder el CTA en ese caso.
   console.warn("[promo] buildProductUrl: no se pudo resolver dominio del shop. Configurá SHOP_PUBLIC_URL.");
-  return `https://example.com/p/${slug}`;
+  return null;
 }
 
 // Toma un row de `products` + su primera imagen y devuelve los campos

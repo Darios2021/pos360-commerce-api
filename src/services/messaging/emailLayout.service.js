@@ -284,71 +284,95 @@ function renderSocialRow(b) {
 }
 
 // ─────────────────────────────────────────────────────────
-// PROMO BLOCKS — estilo "casa grande" (Oncity / Frávega)
+// PROMO BLOCKS — cards compactas con branding del comercio
+// Layout en 2 columnas (50/50) sobre container de 600px →
+// cada card mide ~270px con bordes. Si hay 1 sola promo se
+// renderiza fullwidth para evitar el hueco vacío.
 // ─────────────────────────────────────────────────────────
-function renderPromoBlock(p, b) {
-  const ctaColor = normalizeHex(p.cta_color, b.accent);
+function renderPromoBlock(p, b, opts = {}) {
+  const fullWidth = !!opts.fullWidth;
+  const ctaColor = normalizeHex(p.cta_color, b.primary);
   const badgeColor = normalizeHex(p.badge_color, "#e53935");
-  const ctaLabel = s(p.cta_label, "Comprar ahora");
+  const ctaLabel = s(p.cta_label, "Ver en la tienda");
+  const hasUrl = !!p.product_url;
+
+  // Imagen — más chica y proporcionada. Aspect ratio cuadrado controlado por
+  // height fijo en el wrapper para no depender del aspecto del archivo.
+  const imgWrapper = (inner) => hasUrl
+    ? `<a href="${escHtml(p.product_url)}" target="_blank" rel="noopener"
+          style="text-decoration:none;display:block;">${inner}</a>`
+    : inner;
 
   const imgBlock = p.image_url
-    ? `<div style="position:relative;background:#f5f7fb;">
+    ? `<div style="position:relative;background:#f7f8fa;border-bottom:1px solid #eef0f4;">
          ${p.badge_text
            ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0"
-                     style="position:absolute;top:12px;left:12px;background:${badgeColor};border-radius:6px;">
-                <tr><td style="padding:6px 10px;color:#ffffff;font-family:${FONT_STACK};font-size:12px;font-weight:800;letter-spacing:0.5px;">
+                     style="position:absolute;top:8px;left:8px;background:${badgeColor};border-radius:5px;z-index:2;">
+                <tr><td style="padding:4px 8px;color:#ffffff;font-family:${FONT_STACK};font-size:10.5px;font-weight:800;letter-spacing:0.4px;line-height:1;">
                   ${escHtml(p.badge_text)}
                 </td></tr>
               </table>`
            : ""}
-         <a href="${escHtml(p.product_url)}" target="_blank" rel="noopener" style="text-decoration:none;display:block;">
-           <img src="${escHtml(p.image_url)}" alt="${escHtml(p.title)}" width="260"
-                style="border:0;display:block;width:100%;max-width:260px;height:auto;margin:0 auto;"/>
-         </a>
+         ${imgWrapper(`<img src="${escHtml(p.image_url)}" alt="${escHtml(p.title)}"
+                width="${fullWidth ? 540 : 260}" height="${fullWidth ? 220 : 180}"
+                style="border:0;display:block;width:100%;max-width:100%;height:${fullWidth ? 220 : 180}px;object-fit:contain;margin:0 auto;padding:14px;box-sizing:border-box;"/>`)}
        </div>`
-    : `<div style="background:#f5f7fb;height:160px;display:block;line-height:160px;text-align:center;font-family:${FONT_STACK};color:#9ca3af;font-size:13px;">Sin imagen</div>`;
+    : `<div style="background:#f7f8fa;height:${fullWidth ? 220 : 180}px;line-height:${fullWidth ? 220 : 180}px;text-align:center;font-family:${FONT_STACK};color:#9ca3af;font-size:12px;border-bottom:1px solid #eef0f4;">Sin imagen</div>`;
 
   const priceLine = (() => {
     const orig = p.price_original ? escHtml(p.price_original) : "";
     const fin = p.price_final ? escHtml(p.price_final) : "";
     if (!orig && !fin) return "";
-    return `<div style="margin-top:10px;font-family:${FONT_STACK};">
-      ${orig ? `<span style="color:#9ca3af;text-decoration:line-through;font-size:13px;margin-right:8px;">${orig}</span>` : ""}
-      ${fin ? `<span style="color:#1f2937;font-size:22px;font-weight:800;letter-spacing:-0.3px;">${fin}</span>` : ""}
+    return `<div style="margin-top:8px;font-family:${FONT_STACK};line-height:1.1;">
+      ${orig ? `<span style="color:#9ca3af;text-decoration:line-through;font-size:11.5px;margin-right:6px;">${orig}</span>` : ""}
+      ${fin ? `<span style="color:${b.primary};font-size:${fullWidth ? 20 : 17}px;font-weight:800;letter-spacing:-0.2px;">${fin}</span>` : ""}
     </div>`;
   })();
 
   const installmentsLine = p.installments_text
-    ? `<div style="margin-top:4px;color:${b.accent};font-family:${FONT_STACK};font-size:12.5px;font-weight:700;">
+    ? `<div style="margin-top:3px;color:${b.accent};font-family:${FONT_STACK};font-size:11px;font-weight:700;line-height:1.3;">
          ${escHtml(p.installments_text)}
        </div>`
     : "";
 
   const subtitleLine = p.subtitle
-    ? `<div style="margin-top:4px;color:#6b7280;font-family:${FONT_STACK};font-size:13px;line-height:1.45;">
+    ? `<div style="margin-top:3px;color:#6b7280;font-family:${FONT_STACK};font-size:11.5px;line-height:1.4;">
          ${escHtml(p.subtitle)}
        </div>`
     : "";
 
+  // CTA — sólo se muestra si hay URL real al producto. Si el backend no pudo
+  // resolver el dominio del shop, no pintamos un botón roto.
+  const ctaBlock = hasUrl
+    ? `<div style="margin-top:10px;">
+         <a href="${escHtml(p.product_url)}" target="_blank" rel="noopener"
+            style="display:inline-block;background:${ctaColor};color:#ffffff;text-decoration:none;
+                   font-family:${FONT_STACK};font-size:11.5px;font-weight:800;letter-spacing:0.3px;
+                   padding:8px 14px;border-radius:6px;line-height:1.2;">
+           ${escHtml(ctaLabel)} <span style="font-weight:900;">→</span>
+         </a>
+       </div>`
+    : "";
+
+  // Título — con line-clamp via webkit (la mayoría de clientes modernos lo
+  // respetan; en Outlook el max-height del texto se mantiene dentro de la card).
+  const titleBlock = `<div style="font-family:${FONT_STACK};font-size:13px;font-weight:700;color:#1f2937;line-height:1.35;letter-spacing:-0.1px;
+                                  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+                                  max-height:36px;">
+    ${escHtml(p.title || "")}
+  </div>`;
+
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                 style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+                 style="background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;
+                        box-shadow:0 1px 3px rgba(15,23,42,0.04);">
     <tr><td>${imgBlock}</td></tr>
     <tr>
-      <td style="padding:16px 18px 18px;">
-        <div style="font-family:${FONT_STACK};font-size:15px;font-weight:700;color:#111827;line-height:1.35;min-height:40px;">
-          ${escHtml(p.title || "")}
-        </div>
+      <td style="padding:11px 13px 13px;">
+        ${titleBlock}
         ${subtitleLine}
         ${priceLine}
         ${installmentsLine}
-        <div style="margin-top:14px;">
-          <a href="${escHtml(p.product_url)}" target="_blank" rel="noopener"
-             style="display:inline-block;background:${ctaColor};color:#ffffff;text-decoration:none;
-                    font-family:${FONT_STACK};font-size:13px;font-weight:800;letter-spacing:0.3px;
-                    padding:11px 18px;border-radius:8px;">
-            ${escHtml(ctaLabel)}
-          </a>
-        </div>
+        ${ctaBlock}
       </td>
     </tr>
   </table>`;
@@ -356,29 +380,45 @@ function renderPromoBlock(p, b) {
 
 function renderPromoGrid(promoBlocks, b) {
   if (!Array.isArray(promoBlocks) || promoBlocks.length === 0) return "";
-  // Renderizamos en grid de 2 columnas (responsive: 1 col en mobile vía table-layout fixed).
-  // Outlook no soporta flex/grid, así que usamos tabla con celdas de 50%.
+
+  // Caso single: una sola card a todo el ancho del container.
+  if (promoBlocks.length === 1) {
+    return `<div style="margin-top:24px;">
+      <div style="font-family:${FONT_STACK};font-size:10.5px;font-weight:800;color:${b.accent};letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">
+        ◆ Producto destacado
+      </div>
+      <div style="font-family:${FONT_STACK};font-size:17px;font-weight:800;color:${b.primary};margin-bottom:14px;letter-spacing:-0.3px;">
+        Una oferta seleccionada para vos
+      </div>
+      ${renderPromoBlock(promoBlocks[0], b, { fullWidth: true })}
+    </div>`;
+  }
+
+  // 2+ cards: grid de 2 columnas. Outlook no soporta flex/grid, usamos
+  // tabla con celdas de 50%. En mobile colapsa a 1 col vía clase .promo-cell.
   const rows = [];
   for (let i = 0; i < promoBlocks.length; i += 2) {
     const left = promoBlocks[i];
     const right = promoBlocks[i + 1] || null;
 
     rows.push(`<tr>
-      <td valign="top" style="padding:0 8px 16px 0;width:50%;" class="promo-cell">
+      <td valign="top" style="padding:0 6px 12px 0;width:50%;" class="promo-cell">
         ${renderPromoBlock(left, b)}
       </td>
-      <td valign="top" style="padding:0 0 16px 8px;width:50%;" class="promo-cell">
+      <td valign="top" style="padding:0 0 12px 6px;width:50%;" class="promo-cell">
         ${right ? renderPromoBlock(right, b) : "&nbsp;"}
       </td>
     </tr>`);
   }
 
-  return `<div style="margin-top:28px;">
-    <div style="font-family:${FONT_STACK};font-size:11px;font-weight:800;color:${b.accent};letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">
+  const headerLabel = promoBlocks.length === 2 ? "Ofertas para vos" : "Ofertas seleccionadas";
+
+  return `<div style="margin-top:24px;">
+    <div style="font-family:${FONT_STACK};font-size:10.5px;font-weight:800;color:${b.accent};letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">
       ◆ Productos destacados
     </div>
-    <div style="font-family:${FONT_STACK};font-size:20px;font-weight:800;color:#111827;margin-bottom:18px;letter-spacing:-0.3px;">
-      Ofertas seleccionadas para vos
+    <div style="font-family:${FONT_STACK};font-size:17px;font-weight:800;color:${b.primary};margin-bottom:14px;letter-spacing:-0.3px;">
+      ${escHtml(headerLabel)}
     </div>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
       ${rows.join("")}
