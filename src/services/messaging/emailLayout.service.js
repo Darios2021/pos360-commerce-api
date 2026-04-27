@@ -579,9 +579,9 @@ async function wrap({
   const socialsRow = renderSocialRow(b);
 
   const logoBlock = b.logoUrl
-    ? `<img src="${escHtml(b.logoUrl)}" alt="${escHtml(b.name)}" width="180"
-            style="border:0;display:block;margin:0 auto;max-width:180px;height:auto;"/>`
-    : `<div style="font-family:${FONT_STACK};font-size:24px;font-weight:800;color:#ffffff;letter-spacing:0.3px;">
+    ? `<img src="${escHtml(b.logoUrl)}" alt="${escHtml(b.name)}" width="280"
+            style="border:0;display:block;margin:0 auto;max-width:280px;height:auto;"/>`
+    : `<div style="font-family:${FONT_STACK};font-size:30px;font-weight:800;color:#ffffff;letter-spacing:0.3px;">
          ${escHtml(b.name)}
        </div>`;
 
@@ -665,10 +665,28 @@ async function wrap({
             </td>
           </tr>
 
+          <!-- Aviso de mensaje automático (generado por el sistema) -->
+          <tr>
+            <td class="px-32" style="padding:0 40px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="background:rgba(2,73,139,0.04);border:1px solid rgba(2,73,139,0.16);border-radius:10px;">
+                <tr>
+                  <td style="padding:11px 14px;font-family:${FONT_STACK};font-size:12px;color:#4b5563;line-height:1.5;">
+                    <span style="display:inline-block;background:${b.primary};color:#ffffff;font-size:9.5px;font-weight:800;letter-spacing:1px;text-transform:uppercase;padding:2px 7px;border-radius:4px;margin-right:8px;vertical-align:1px;">
+                      Mensaje automático
+                    </span>
+                    Este correo fue enviado automáticamente por <b style="color:${b.primary};">${escHtml(b.name)}</b>.
+                    ${b.email ? `Si tenés consultas, podés responder directamente a este email o escribirnos a <a href="mailto:${escHtml(b.email)}" style="color:${b.accent};text-decoration:none;font-weight:700;">${escHtml(b.email)}</a>.` : "Si tenés consultas, podés responder directamente a este email."}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
           <!-- Footer -->
           <tr>
             <td align="center" class="px-32"
-                style="padding:24px 40px 28px;font-family:${FONT_STACK};color:#6b7280;font-size:13px;line-height:1.65;letter-spacing:0.1px;">
+                style="padding:22px 40px 28px;font-family:${FONT_STACK};color:#6b7280;font-size:13px;line-height:1.65;letter-spacing:0.1px;">
               <div class="footer-name"
                    style="font-weight:800;color:${b.primary};font-size:17px;margin-bottom:6px;letter-spacing:0.3px;">
                 ${escHtml(b.name)}
@@ -691,8 +709,8 @@ async function wrap({
                style="width:600px;max-width:600px;">
           <tr>
             <td align="center" style="padding:18px 24px 8px;font-size:11px;color:#9ca3af;font-family:${FONT_STACK};letter-spacing:0.1px;">
-              © ${new Date().getFullYear()} ${escHtml(b.name)}.
-              ${b.email ? `Si no esperabas este mensaje, respondé a <a href="mailto:${escHtml(b.email)}" style="color:#9ca3af;text-decoration:underline;">${escHtml(b.email)}</a>.` : ""}
+              © ${new Date().getFullYear()} ${escHtml(b.name)} · Mensaje generado automáticamente.
+              ${b.email ? `Si no esperabas este mensaje, escribinos a <a href="mailto:${escHtml(b.email)}" style="color:#9ca3af;text-decoration:underline;">${escHtml(b.email)}</a>.` : ""}
             </td>
           </tr>
         </table>
