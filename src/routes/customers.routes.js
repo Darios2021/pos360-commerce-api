@@ -5,8 +5,9 @@ const router = require("express").Router();
 const ctrl = require("../controllers/customers.controller");
 
 // Listado y CRUD
-router.get("/",    ctrl.list);
-router.post("/",   ctrl.create);
+router.get("/",      ctrl.list);
+router.get("/stats", ctrl.getStats);
+router.post("/",     ctrl.create);
 
 // Operaciones especiales (van antes de /:id)
 router.post("/merge",    ctrl.merge);

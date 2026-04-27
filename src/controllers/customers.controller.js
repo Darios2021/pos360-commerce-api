@@ -650,4 +650,78 @@ async function backfill(req, res, next) {
   }
 }
 
-module.exports = { list, getById, create, update, remove, merge, backfill };
+// ============================================================
+// STATS
+// Métricas agregadas para dashboard del listado.
+// Lectura abierta (mismos filtros base que list, sin paginar).
+// ============================================================
+async function getStats(req, res, next) {
+  try {
+    await ensureTable();
+    if (!Customer) return res.status(500).json({ ok: false, message: "Modelo Customer no disponible" });
+
+    const q = s(req.query.q);
+    const customer_type = s(req.query.customer_type).toUpperCase();
+
+    const where = {};
+    if (q) {
+      const like = `%${q}%`;
+      where[Op.or] = [
+        { display_name: { [Op.like]: like } },
+        { first_name:   { [Op.like]: like } },
+        { last_name:    { [Op.like]: like } },
+        { email:        { [Op.like]: like } },
+        { phone:        { [Op.like]: like } },
+        { doc_number:   { [Op.like]: like } },
+      ];
+    }
+    if (customer_type && ["CONSUMIDOR_FINAL","RESPONSABLE_INSCRIPTO","MONOTRIBUTO","EXENTO","OTRO"].includes(customer_type)) {
+      where.customer_type = customer_type;
+    }
+
+    const [total, withContact, withPromos] = await Promise.all([
+      Customer.count({ where }),
+      Customer.count({
+        where: {
+          ...where,
+          [Op.or]: [
+            { email: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }] } },
+            { phone: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }] } },
+          ],
+        },
+      }),
+      Customer.count({ where: { ...where, accepts_promos: true } }),
+    ]);
+
+    // with_purchases: clientes que tienen al menos 1 venta PAID
+    let withPurchases = 0;
+    try {
+      const ids = await Customer.findAll({ where, attributes: ["id"], raw: true });
+      const idList = ids.map((r) => r.id);
+      if (idList.length) {
+        const buyers = await Sale.findAll({
+          attributes: [[fn("DISTINCT", col("customer_id")), "customer_id"]],
+          where: { customer_id: { [Op.in]: idList }, status: "PAID" },
+          raw: true,
+        });
+        withPurchases = buyers.length;
+      }
+    } catch {
+      withPurchases = 0;
+    }
+
+    return res.json({
+      ok: true,
+      data: {
+        total,
+        with_contact: withContact,
+        accepts_promos: withPromos,
+        with_purchases: withPurchases,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+module.exports = { list, getById, create, update, remove, merge, backfill, getStats };
