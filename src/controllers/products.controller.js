@@ -415,9 +415,14 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
     }
   }
 
-  // Si se manda descuento por cantidad, exigir umbral y modo
-  const hasQtyDisc = payload.promo_qty_discount != null && payload.promo_qty_discount !== "";
-  const hasQtyThr  = payload.promo_qty_threshold != null && payload.promo_qty_threshold !== "";
+  // Si se manda descuento por cantidad, exigir umbral y modo.
+  // 0 / null / "" significa "no configurado" — sólo > 0 cuenta como configurado.
+  const hasQtyDisc = payload.promo_qty_discount != null
+                     && payload.promo_qty_discount !== ""
+                     && Number(payload.promo_qty_discount) > 0;
+  const hasQtyThr  = payload.promo_qty_threshold != null
+                     && payload.promo_qty_threshold !== ""
+                     && Number(payload.promo_qty_threshold) > 0;
   if (hasQtyDisc && !hasQtyThr) add("promo_qty_threshold", "Requerido si configurás descuento por cantidad.");
   if (hasQtyThr && !hasQtyDisc) add("promo_qty_discount", "Requerido si configurás cantidad mínima.");
 
