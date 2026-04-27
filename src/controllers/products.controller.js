@@ -1285,6 +1285,8 @@ async function create(req, res, next) {
               promo_qty_mode: f.promo_qty_mode ?? null,
             },
             source: "create",
+            userId: req?.user?.id || null,
+            branchId: getBranchId(req) || req?.user?.branch_id || null,
           }).catch((err) => console.warn("[telegram.notifyPromoChange]", err?.message));
         }
       }
@@ -1444,12 +1446,13 @@ async function update(req, res, next) {
       };
       const telegramNotifier = require("../services/telegramNotifier.service");
       if (telegramNotifier?.notifyPromoChange) {
-        // Sin await: que no bloquee la respuesta al cliente
         telegramNotifier.notifyPromoChange({
           product_id: id,
           before: promoBefore,
           after: promoAfter,
           source: "edit",
+          userId: req?.user?.id || null,
+          branchId: ctxBranchId || req?.user?.branch_id || null,
         }).catch((err) => console.warn("[telegram.notifyPromoChange]", err?.message));
       }
     } catch (e) {
@@ -1768,6 +1771,7 @@ async function pauseAllPromos(req, res, next) {
           action: "pause",
           count: affected,
           userId: req?.user?.id || null,
+          branchId: getBranchId(req) || req?.user?.branch_id || null,
         }).catch((err) =>
           console.warn("[telegram.notifyBulkPromoChange/pause]", err?.message)
         );

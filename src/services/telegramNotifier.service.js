@@ -940,7 +940,7 @@ async function scanZeroStockProducts({ limit = 30 } = {}) {
 //   - Modificación: is_promo seguía en 1 pero cambió promo_price / fechas / qty rules
 // El payload `before` y `after` debe contener los campos relevantes del producto.
 // ──────────────────────────────────────────────────────────────
-async function notifyPromoChange({ product_id, before = {}, after = {}, source = "edit" }) {
+async function notifyPromoChange({ product_id, before = {}, after = {}, source = "edit", userId = null, branchId = null }) {
   try {
     if (!product_id) return;
 
@@ -969,6 +969,28 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
 
     // Si no cambió el flag ni los campos promo, no notificamos.
     if (wasPromo === isPromo && !promoFieldsChanged) return;
+
+    // Resolver usuario y sucursal que disparó el cambio
+    let actorName = "—";
+    let branchName = "—";
+    try {
+      const { User, Branch } = require("../models");
+      if (User && userId) {
+        const u = await User.findByPk(userId, {
+          attributes: ["id", "first_name", "last_name", "username", "email"],
+        });
+        if (u) {
+          const full = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+          actorName = full || u.username || u.email || `Usuario #${u.id}`;
+        }
+      }
+      if (Branch && branchId) {
+        const b = await Branch.findByPk(branchId, { attributes: ["id", "name"] });
+        if (b?.name) branchName = b.name;
+      }
+    } catch (_) {}
+
+    const footerLine = `👤 ${escapeHtml(actorName)} · 🏬 ${escapeHtml(branchName)}`;
 
     // Datos del producto para el mensaje (precios actuales)
     let productInfo = { name: `Producto #${product_id}`, sku: "", price_list: 0, price_discount: 0 };
@@ -1119,24 +1141,36 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
       return lines;
     };
 
-    // ─── ACTIVACIÓN ─────────────────────────────────────────────
+    // ─── Helper compacto: línea única con precio efectivo + % OFF ───
+    const buildOneLinePrice = (a) => {
+      const pp = Number(a?.promo_price || 0);
+      const off = pp > 0 ? calcOff(pp, baseRef) : 0;
+      if (pp > 0 && off > 0) {
+        return `🎯 Promo: <b>$${fmtMoney(pp)}</b> (-${off}% vs contado)`;
+      }
+      if (pp > 0) {
+        return `🎯 Promo: <b>$${fmtMoney(pp)}</b>`;
+      }
+      return null;
+    };
+
+    // ─── ACTIVACIÓN (resumido) ───────────────────────────────────
     if (!wasPromo && isPromo) {
       const lines = [productLine];
       if (productUrlLine) lines.push(productUrlLine);
+
+      if (baseRef > 0) lines.push(`💸 Contado: <b>$${fmtMoney(baseRef)}</b>`);
+      const priceLn = buildOneLinePrice(after);
+      if (priceLn) lines.push(priceLn);
+
+      const qr = qtyRuleLine(after);
+      if (qr) lines.push(`📦 Por cantidad: ${qr}`);
+
+      const vig = dateRangeText(after);
+      lines.push(`🕒 Vigencia: ${vig || "Sin ventana"}`);
+
       lines.push("");
-      lines.push(...buildPriceBlock());
-      const promoBlock = buildPromoPriceBlock(after);
-      if (promoBlock.length) {
-        lines.push("");
-        lines.push(...promoBlock);
-      }
-      const qBlock = qtyPromoBlock(after);
-      if (qBlock.length) {
-        lines.push("");
-        lines.push(...qBlock);
-      }
-      lines.push("");
-      lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
+      lines.push(footerLine);
 
       await sendAlert({
         code: "PROMO_ACTIVATED",
@@ -1151,34 +1185,17 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
       return;
     }
 
-    // ─── DESACTIVACIÓN ──────────────────────────────────────────
+    // ─── DESACTIVACIÓN (resumido) ────────────────────────────────
     if (wasPromo && !isPromo) {
       const lines = [productLine];
       if (productUrlLine) lines.push(productUrlLine);
-      lines.push("");
 
-      // Mostrar el precio promo previo y su ahorro (vs precio contado actual)
-      const prevPromo = Number(before?.promo_price || 0);
-      if (prevPromo > 0) {
-        const off = calcOff(prevPromo, baseRef);
-        lines.push({ k: "🎯 Precio promo previo", v: `$${fmtMoney(prevPromo)}` });
-        if (off > 0) {
-          lines.push({
-            k: "📉 Era",
-            v: `<b>-${off}%</b> OFF vs ${baseRefName} · ahorro $${fmtMoney(baseRef - prevPromo)}`,
-          });
-        }
+      if (baseRef > 0) {
+        lines.push(`💸 Vuelve al precio contado: <b>$${fmtMoney(baseRef)}</b>`);
       }
-      const qrPrev = qtyRuleLine(before);
-      if (qrPrev) lines.push({ k: "📦 Promo por cantidad previa", v: qrPrev });
 
-      // Bloque de "vuelve a"
       lines.push("");
-      lines.push("🔁 <b>Vuelve a precio normal:</b>");
-      lines.push(...buildPriceBlock());
-      if (refList === 0 && refDisc === 0) {
-        lines.push({ k: "💰 Precio actual", v: "—" });
-      }
+      lines.push(footerLine);
 
       await sendAlert({
         code: "PROMO_DEACTIVATED",
@@ -1193,60 +1210,57 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
       return;
     }
 
-    // ─── MODIFICACIÓN (estaba en promo y siguió en promo) ───────
+    // ─── MODIFICACIÓN (resumido) ─────────────────────────────────
     if (wasPromo && isPromo && promoFieldsChanged) {
       const lines = [productLine];
       if (productUrlLine) lines.push(productUrlLine);
-      lines.push("");
-      lines.push(...buildPriceBlock());
-      lines.push("");
 
-      // Cambios de precio promo (% OFF SIEMPRE contra el contado)
+      if (baseRef > 0) lines.push(`💸 Contado: <b>$${fmtMoney(baseRef)}</b>`);
+
+      // Precio promo: solo si cambió o si está configurado
       const beforePrice = Number(before?.promo_price || 0);
       const afterPrice  = Number(after?.promo_price  || 0);
       if (beforePrice !== afterPrice) {
-        const offBefore = calcOff(beforePrice, baseRef);
-        const offAfter  = calcOff(afterPrice,  baseRef);
-        const arrow = beforePrice > 0 && afterPrice > 0
-          ? `$${fmtMoney(beforePrice)} → <b>$${fmtMoney(afterPrice)}</b>`
-          : afterPrice > 0
-            ? `<b>$${fmtMoney(afterPrice)}</b>`
-            : "—";
-        lines.push({ k: "🎯 Precio promo", v: arrow });
-        if (offBefore || offAfter) {
-          lines.push({
-            k: `📉 OFF vs ${baseRefName}`,
-            v: `${offBefore ? `-${offBefore}%` : "—"} → <b>${offAfter ? `-${offAfter}%` : "—"}</b>`,
-          });
+        if (beforePrice > 0 && afterPrice > 0) {
+          const offAfter = calcOff(afterPrice, baseRef);
+          lines.push(
+            `🎯 Promo: $${fmtMoney(beforePrice)} → <b>$${fmtMoney(afterPrice)}</b>` +
+            (offAfter > 0 ? ` (-${offAfter}% vs contado)` : "")
+          );
+        } else if (afterPrice > 0) {
+          const offAfter = calcOff(afterPrice, baseRef);
+          lines.push(
+            `🎯 Promo: <b>$${fmtMoney(afterPrice)}</b>` +
+            (offAfter > 0 ? ` (-${offAfter}% vs contado)` : "")
+          );
+        } else {
+          lines.push(`🎯 Promo por tiempo: <i>quitada</i>`);
         }
       } else if (afterPrice > 0) {
         const offAfter = calcOff(afterPrice, baseRef);
-        lines.push({ k: "🎯 Precio promo", v: `$${fmtMoney(afterPrice)}` });
-        if (offAfter > 0) {
-          lines.push({ k: `📉 OFF vs ${baseRefName}`, v: `<b>-${offAfter}%</b>` });
-        }
+        lines.push(
+          `🎯 Promo: <b>$${fmtMoney(afterPrice)}</b>` +
+          (offAfter > 0 ? ` (-${offAfter}% vs contado)` : "")
+        );
       }
 
-      // Ventana
+      // Vigencia: solo si cambió
       const beforeRange = `${before?.promo_starts_at || ""}|${before?.promo_ends_at || ""}`;
       const afterRange  = `${after?.promo_starts_at  || ""}|${after?.promo_ends_at  || ""}`;
       if (beforeRange !== afterRange) {
-        lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
+        lines.push(`🕒 Vigencia: ${dateRangeText(after) || "Sin ventana"}`);
       }
 
-      // Qty rules: si quedó configurada, mostramos el bloque detallado.
-      // Si la quitaron, una línea simple.
+      // Por cantidad: solo si cambió
       const beforeQty = `${before?.promo_qty_threshold || 0}|${before?.promo_qty_discount || 0}|${before?.promo_qty_mode || ""}`;
       const afterQty  = `${after?.promo_qty_threshold  || 0}|${after?.promo_qty_discount  || 0}|${after?.promo_qty_mode  || ""}`;
       if (beforeQty !== afterQty) {
-        const qBlock = qtyPromoBlock(after);
-        if (qBlock.length) {
-          lines.push("");
-          lines.push(...qBlock);
-        } else {
-          lines.push({ k: "📦 Por cantidad", v: "Quitada" });
-        }
+        const qr = qtyRuleLine(after);
+        lines.push(qr ? `📦 Por cantidad: ${qr}` : `📦 Por cantidad: <i>quitada</i>`);
       }
+
+      lines.push("");
+      lines.push(footerLine);
 
       await sendAlert({
         code: "PROMO_UPDATED",
@@ -1269,7 +1283,7 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
 // Aviso cuando se pausan / reactivan todas las promos desde el admin.
 // No incluye detalle de productos — solo la cantidad afectada.
 // ──────────────────────────────────────────────────────────────
-async function notifyBulkPromoChange({ action, count, userId }) {
+async function notifyBulkPromoChange({ action, count, userId, branchId = null }) {
   try {
     const cfg = await getConfig();
     if (!cfg?.enabled) return;
@@ -1281,10 +1295,11 @@ async function notifyBulkPromoChange({ action, count, userId }) {
     // Si no hubo cambios, no spameamos
     if (n <= 0) return;
 
-    // Resolver nombre del usuario que disparó la acción
+    // Resolver nombre del usuario y sucursal
     let actorName = "—";
+    let branchName = "—";
     try {
-      const { User } = require("../models");
+      const { User, Branch } = require("../models");
       if (User && userId) {
         const u = await User.findByPk(userId, {
           attributes: ["id", "first_name", "last_name", "username", "email"],
@@ -1294,20 +1309,25 @@ async function notifyBulkPromoChange({ action, count, userId }) {
           actorName = full || u.username || u.email || `Usuario #${u.id}`;
         }
       }
+      if (Branch && branchId) {
+        const b = await Branch.findByPk(branchId, { attributes: ["id", "name"] });
+        if (b?.name) branchName = b.name;
+      }
     } catch (_) {}
 
     const lines = [
       isPause
         ? `🏷️ Se desactivaron <b>${n}</b> promoción${n === 1 ? "" : "es"}`
         : `🏷️ Se reactivaron <b>${n}</b> promoción${n === 1 ? "" : "es"} configurada${n === 1 ? "" : "s"}`,
-      `👤 Por: ${escapeHtml(actorName)}`,
       `🕒 ${fmtDateTimeAR(new Date())}`,
+      "",
+      `👤 ${escapeHtml(actorName)} · 🏬 ${escapeHtml(branchName)}`,
     ];
 
     if (isPause) {
       lines.push(
         "",
-        "<i>La configuración de cada producto (precio, fechas, reglas) se mantiene. Se puede reactivar desde el panel de Productos.</i>"
+        "<i>La configuración (precio, fechas, reglas) se mantiene. Se puede reactivar desde el panel de Productos.</i>"
       );
     }
 
