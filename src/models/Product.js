@@ -62,6 +62,16 @@ module.exports = (sequelize, DataTypes) => {
       price_discount: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
       price_reseller: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
 
+      // Promo por tiempo (precio fijo dentro de una ventana)
+      promo_price: { type: DataTypes.DECIMAL(12, 2), allowNull: true, defaultValue: null },
+      promo_starts_at: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
+      promo_ends_at: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
+
+      // Promo por cantidad (descuento al alcanzar N unidades)
+      promo_qty_threshold: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true, defaultValue: null },
+      promo_qty_discount: { type: DataTypes.DECIMAL(12, 2), allowNull: true, defaultValue: null },
+      promo_qty_mode: { type: DataTypes.STRING(10), allowNull: true, defaultValue: null },
+
       tax_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: "21.00" },
     },
     {

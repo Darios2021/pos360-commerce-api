@@ -523,12 +523,15 @@ async function checkout(req, res) {
         }
       }
 
-      // ---- (B) Traer productos + precios ----
+      // ---- (B) Traer productos + precios + promo ----
       const productIds = items.map((x) => x.product_id);
 
       const [prows] = await sequelize.query(
         `
         SELECT id, name, track_stock,
+               is_promo,
+               promo_price, promo_starts_at, promo_ends_at,
+               promo_qty_threshold, promo_qty_discount, promo_qty_mode,
                COALESCE(NULLIF(price_discount, 0), NULLIF(price_list, 0), NULLIF(price, 0), 0) AS unit_price
         FROM products
         WHERE id IN (:ids)
@@ -537,6 +540,41 @@ async function checkout(req, res) {
       );
 
       const pmap = new Map((prows || []).map((p) => [toInt(p.id, 0), p]));
+
+      // Helper: aplicar promo a un producto+cantidad y devolver unit_price efectivo
+      const computeEffectivePrice = (p, qty) => {
+        const basePrice = toNum(p.unit_price, 0);
+        const promoOn = Boolean(p.is_promo);
+        if (!promoOn) return basePrice;
+
+        // 1) Promo por tiempo → reemplaza el precio base si está vigente
+        let effective = basePrice;
+        const promoPrice = toNum(p.promo_price, 0);
+        const now = new Date();
+        const starts = p.promo_starts_at ? new Date(p.promo_starts_at) : null;
+        const ends = p.promo_ends_at ? new Date(p.promo_ends_at) : null;
+        const inWindow =
+          (!starts || (Number.isFinite(starts.getTime()) && now >= starts)) &&
+          (!ends   || (Number.isFinite(ends.getTime())   && now <= ends));
+        if (promoPrice > 0 && inWindow) {
+          effective = promoPrice;
+        }
+
+        // 2) Descuento por cantidad → se aplica sobre el precio efectivo
+        const thr = toInt(p.promo_qty_threshold, 0);
+        const disc = toNum(p.promo_qty_discount, 0);
+        const mode = String(p.promo_qty_mode || "").toLowerCase();
+        if (thr > 0 && disc > 0 && qty >= thr) {
+          if (mode === "percent") {
+            const pct = Math.min(100, Math.max(0, disc));
+            effective = effective * (1 - pct / 100);
+          } else {
+            effective = Math.max(0, effective - disc);
+          }
+        }
+
+        return Math.max(0, Math.round(effective * 100) / 100);
+      };
 
       let subtotal = 0;
       const orderItems = [];
@@ -549,8 +587,8 @@ async function checkout(req, res) {
           };
         }
 
-        const unit_price = toNum(p.unit_price, 0);
         const qty = toNum(it.qty, 1);
+        const unit_price = computeEffectivePrice(p, qty);
         const line_total = unit_price * qty;
 
         subtotal += line_total;

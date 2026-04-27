@@ -20,6 +20,40 @@ const columnSteps = [
     column: "opening_ip",
     def:    "VARCHAR(45) NULL COMMENT 'IP del cliente al abrir la caja'",
   },
+
+  // ── Promociones de producto ──────────────────────────────────────────────
+  // Nota: products.promo_price y products.is_promo ya existen.
+  // Estos campos extienden la promo con ventana temporal y descuento por cantidad.
+  {
+    id:     "products__promo_starts_at",
+    table:  "products",
+    column: "promo_starts_at",
+    def:    "DATETIME NULL COMMENT 'Inicio de promo por tiempo'",
+  },
+  {
+    id:     "products__promo_ends_at",
+    table:  "products",
+    column: "promo_ends_at",
+    def:    "DATETIME NULL COMMENT 'Fin de promo por tiempo'",
+  },
+  {
+    id:     "products__promo_qty_threshold",
+    table:  "products",
+    column: "promo_qty_threshold",
+    def:    "INT UNSIGNED NULL COMMENT 'Cantidad mínima para activar descuento por volumen'",
+  },
+  {
+    id:     "products__promo_qty_discount",
+    table:  "products",
+    column: "promo_qty_discount",
+    def:    "DECIMAL(12,2) NULL COMMENT 'Valor del descuento por volumen (monto o %)'",
+  },
+  {
+    id:     "products__promo_qty_mode",
+    table:  "products",
+    column: "promo_qty_mode",
+    def:    "VARCHAR(10) NULL COMMENT 'Modo descuento por volumen: amount | percent'",
+  },
 ];
 
 async function columnExists(sequelize, table, column) {

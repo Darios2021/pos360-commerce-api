@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "lint": "node -e \"console.log('No lint configured yet')\""
+    "lint": "node -e \"console.log('No lint configured yet')\"",
+    "cleanup:promos": "node script/cleanup-expired-promos.js",
+    "cleanup:promos:dry": "node script/cleanup-expired-promos.js --dry-run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.964.0",

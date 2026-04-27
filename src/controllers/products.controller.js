@@ -392,6 +392,43 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
     if (Number.isFinite(pl) && Number.isFinite(pd) && pd > pl) add("price_discount", "No puede ser mayor que price_list.");
   }
 
+  // ── Promociones ──────────────────────────────────────────────────────────
+  checkNumber("promo_price", payload.promo_price, { min: 0, allowNull: true });
+  checkPositiveInt("promo_qty_threshold", payload.promo_qty_threshold, { allowNull: true });
+  checkNumber("promo_qty_discount", payload.promo_qty_discount, { min: 0, allowNull: true });
+
+  if (payload.promo_qty_mode !== undefined && payload.promo_qty_mode !== null) {
+    const m = String(payload.promo_qty_mode).trim().toLowerCase();
+    if (m && m !== "amount" && m !== "percent") {
+      add("promo_qty_mode", "Debe ser 'amount' o 'percent'.");
+    }
+  }
+
+  // Validar coherencia de fechas si vienen las dos
+  const startsRaw = payload.promo_starts_at;
+  const endsRaw = payload.promo_ends_at;
+  if (startsRaw && endsRaw) {
+    const s = new Date(startsRaw);
+    const e = new Date(endsRaw);
+    if (Number.isFinite(s.getTime()) && Number.isFinite(e.getTime()) && e <= s) {
+      add("promo_ends_at", "Debe ser posterior al inicio.");
+    }
+  }
+
+  // Si se manda descuento por cantidad, exigir umbral y modo
+  const hasQtyDisc = payload.promo_qty_discount != null && payload.promo_qty_discount !== "";
+  const hasQtyThr  = payload.promo_qty_threshold != null && payload.promo_qty_threshold !== "";
+  if (hasQtyDisc && !hasQtyThr) add("promo_qty_threshold", "Requerido si configurás descuento por cantidad.");
+  if (hasQtyThr && !hasQtyDisc) add("promo_qty_discount", "Requerido si configurás cantidad mínima.");
+
+  // Si modo es 'percent', el descuento debe estar entre 0 y 100
+  if (hasQtyDisc && String(payload.promo_qty_mode || "").toLowerCase() === "percent") {
+    const v = toFloat(payload.promo_qty_discount, NaN);
+    if (Number.isFinite(v) && (v < 0 || v > 100)) {
+      add("promo_qty_discount", "Para 'percent' debe estar entre 0 y 100.");
+    }
+  }
+
   return errors;
 }
 
@@ -423,6 +460,13 @@ function pickBody(body = {}) {
     "price_reseller",
     "tax_rate",
     "branch_id",
+    // Promo
+    "promo_price",
+    "promo_starts_at",
+    "promo_ends_at",
+    "promo_qty_threshold",
+    "promo_qty_discount",
+    "promo_qty_mode",
   ];
 
   for (const k of fields) if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
@@ -444,6 +488,29 @@ function pickBody(body = {}) {
 
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
+
+  // ── Promo: normalización ────────────────────────────────────────────────
+  // Cadenas vacías → null para que la DB las acepte como NULL
+  const promoNullable = [
+    "promo_price",
+    "promo_starts_at",
+    "promo_ends_at",
+    "promo_qty_threshold",
+    "promo_qty_discount",
+    "promo_qty_mode",
+  ];
+  for (const k of promoNullable) {
+    if (k in out && (out[k] === "" || out[k] === undefined)) out[k] = null;
+  }
+
+  if (out.promo_price != null) out.promo_price = toFloat(out.promo_price, 0);
+  if (out.promo_qty_discount != null) out.promo_qty_discount = toFloat(out.promo_qty_discount, 0);
+  if (out.promo_qty_threshold != null) out.promo_qty_threshold = toInt(out.promo_qty_threshold, 0) || null;
+
+  if (out.promo_qty_mode != null) {
+    const m = String(out.promo_qty_mode).trim().toLowerCase();
+    out.promo_qty_mode = m === "percent" ? "percent" : m === "amount" ? "amount" : null;
+  }
 
   if (Object.prototype.hasOwnProperty.call(out, "code")) delete out.code;
 

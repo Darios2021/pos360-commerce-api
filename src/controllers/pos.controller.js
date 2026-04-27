@@ -1015,6 +1015,8 @@ async function listProductsForPos(req, res) {
           c.name AS category_name, s.name AS subcategory_name,
           p.is_new, p.is_promo, p.is_active,
           p.price, p.price_list, p.price_discount, p.price_reseller,
+          p.promo_price, p.promo_starts_at, p.promo_ends_at,
+          p.promo_qty_threshold, p.promo_qty_discount, p.promo_qty_mode,
           (${priceExpr}) AS effective_price,
           COALESCE(sb.qty, 0) AS qty
         FROM products p
@@ -1100,6 +1102,8 @@ async function listProductsForPos(req, res) {
           c.name AS category_name, s.name AS subcategory_name,
           p.is_new, p.is_promo, p.is_active,
           p.price, p.price_list, p.price_discount, p.price_reseller,
+          p.promo_price, p.promo_starts_at, p.promo_ends_at,
+          p.promo_qty_threshold, p.promo_qty_discount, p.promo_qty_mode,
           (${priceExpr}) AS effective_price,
           ${qtyExpr} AS qty
         FROM products p
@@ -1205,6 +1209,8 @@ async function listProductsForPos(req, res) {
         p.id, p.branch_id, p.code, p.sku, p.barcode, p.name, p.brand, p.model,
         p.category_id, p.subcategory_id, p.is_new, p.is_promo, p.is_active,
         p.price, p.price_list, p.price_discount, p.price_reseller,
+        p.promo_price, p.promo_starts_at, p.promo_ends_at,
+        p.promo_qty_threshold, p.promo_qty_discount, p.promo_qty_mode,
         (${priceExpr}) AS effective_price,
         ${qtyExpr} AS qty
       FROM products p
