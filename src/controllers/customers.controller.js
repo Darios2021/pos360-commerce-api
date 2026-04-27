@@ -94,7 +94,8 @@ function normalizeDoc(v) {
 // ============================================================
 async function list(req, res, next) {
   try {
-    if (!gateAdminOnly(req, res)) return;
+    // Lectura abierta: cualquier usuario autenticado puede ver el listado.
+    // Las acciones de escritura (create/update/remove/merge/backfill) siguen siendo admin-only.
     await ensureTable();
     if (!Customer) return res.status(500).json({ ok: false, message: "Modelo Customer no disponible" });
 
@@ -171,7 +172,7 @@ async function list(req, res, next) {
 // ============================================================
 async function getById(req, res, next) {
   try {
-    if (!gateAdminOnly(req, res)) return;
+    // Lectura abierta: cualquier usuario autenticado puede ver el detalle.
     await ensureTable();
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, code: "BAD_ID" });
