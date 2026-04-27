@@ -131,6 +131,10 @@ router.get("/next-code", allowAdminOrPermission("products.read"), productsCtrl.g
 // ✅ Stats agregadas (mismos filtros base que list)
 router.get("/stats", allowAdminOrPermission("products.read"), productsCtrl.getStats);
 
+// ✅ Bulk promo: pausar / reactivar todas
+router.post("/promos/pause-all",  requireProductsOperate, productsCtrl.pauseAllPromos);
+router.post("/promos/resume-all", requireProductsOperate, productsCtrl.resumeAllPromos);
+
 // ✅ Listado
 router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);
 

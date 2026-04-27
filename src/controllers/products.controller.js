@@ -1736,6 +1736,63 @@ async function getStats(req, res, next) {
   }
 }
 
+// =====================
+// Bulk promo toggle (admin)
+// POST /api/v1/products/promos/pause-all   → is_promo=0 a todos los activos
+// POST /api/v1/products/promos/resume-all  → is_promo=1 a los que tienen
+//   configuración (promo_price>0, o promo_qty_threshold/discount, o ventana).
+// =====================
+async function pauseAllPromos(req, res, next) {
+  try {
+    const [rowsBefore] = await sequelize.query(
+      `SELECT COUNT(*) AS n FROM products WHERE is_promo = 1`
+    );
+    const before = toInt(rowsBefore?.[0]?.n, 0);
+
+    const [, meta] = await sequelize.query(
+      `UPDATE products SET is_promo = 0 WHERE is_promo = 1`
+    );
+    const affected = toInt(meta?.affectedRows ?? meta?.rowCount ?? before, 0);
+
+    return res.json({
+      ok: true,
+      message: `Se apagaron ${affected} promociones`,
+      data: { paused: affected },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+async function resumeAllPromos(req, res, next) {
+  try {
+    // Sólo prendemos productos que tengan ALGUNA configuración de promo.
+    // Si no la tienen, prender el flag no tendría sentido.
+    const [, meta] = await sequelize.query(
+      `UPDATE products
+       SET is_promo = 1
+       WHERE is_promo = 0
+         AND is_active = 1
+         AND (
+           COALESCE(promo_price, 0) > 0
+           OR promo_starts_at IS NOT NULL
+           OR promo_ends_at IS NOT NULL
+           OR (COALESCE(promo_qty_threshold, 0) > 1 AND COALESCE(promo_qty_discount, 0) > 0)
+         )
+         AND (promo_ends_at IS NULL OR promo_ends_at >= NOW())`
+    );
+    const affected = toInt(meta?.affectedRows ?? meta?.rowCount ?? 0, 0);
+
+    return res.json({
+      ok: true,
+      message: `Se reactivaron ${affected} promociones configuradas`,
+      data: { resumed: affected },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
 module.exports = {
   list,
   create,
@@ -1746,4 +1803,6 @@ module.exports = {
   remove,
   getNextCode,
   getStats,
+  pauseAllPromos,
+  resumeAllPromos,
 };
