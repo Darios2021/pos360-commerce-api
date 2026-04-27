@@ -343,8 +343,25 @@ async function listPublicFeed(req, res) {
     const prodMap = new Map();
 
     if (ids.length) {
+      // ✅ Limitamos attributes a lo que buildProductMini realmente usa.
+      // Así este endpoint queda aislado de cambios futuros en el modelo
+      // (p. ej. nuevas columnas que la DB todavía no tenga).
+      const miniAttrs = [
+        "id",
+        "name",
+        ...(prodCols.has("slug") ? ["slug"] : []),
+        ...(prodCols.has("price") ? ["price"] : []),
+        ...(prodCols.has("price_list") ? ["price_list"] : []),
+        ...(prodCols.has("price_discount") ? ["price_discount"] : []),
+        ...(prodCols.has("is_new") ? ["is_new"] : []),
+        ...(prodCols.has("is_promo") ? ["is_promo"] : []),
+      ];
+
       if (Product && typeof Product.findAll === "function") {
-        const prows = await Product.findAll({ where: { id: ids } });
+        const prows = await Product.findAll({
+          where: { id: ids },
+          attributes: miniAttrs,
+        });
         for (const p of prows || []) {
           const obj = p?.toJSON ? p.toJSON() : p;
           const pid = Number(obj?.id || 0);
@@ -353,9 +370,11 @@ async function listPublicFeed(req, res) {
       } else {
         const sequelize = resolveSequelize();
         if (sequelize) {
-          const [prows] = await sequelize.query(`SELECT * FROM products WHERE id IN (:ids)`, {
-            replacements: { ids },
-          });
+          const cols = miniAttrs.map((c) => `\`${c}\``).join(", ");
+          const [prows] = await sequelize.query(
+            `SELECT ${cols} FROM products WHERE id IN (:ids)`,
+            { replacements: { ids } }
+          );
           for (const p of prows || []) {
             const pid = Number(p?.id || 0);
             if (pid) prodMap.set(pid, p);

@@ -22,8 +22,14 @@ const columnSteps = [
   },
 
   // ── Promociones de producto ──────────────────────────────────────────────
-  // Nota: products.promo_price y products.is_promo ya existen.
-  // Estos campos extienden la promo con ventana temporal y descuento por cantidad.
+  // Estos campos extienden la promo con precio especial, ventana temporal
+  // y descuento por cantidad. is_promo ya existía en DB.
+  {
+    id:     "products__promo_price",
+    table:  "products",
+    column: "promo_price",
+    def:    "DECIMAL(12,2) NULL COMMENT 'Precio promocional (reemplaza al de lista cuando la promo está vigente)'",
+  },
   {
     id:     "products__promo_starts_at",
     table:  "products",
