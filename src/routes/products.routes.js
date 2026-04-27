@@ -128,6 +128,9 @@ function allowAdminOrPermission(permissionCode) {
 // ✅ SIEMPRE primero rutas literales
 router.get("/next-code", allowAdminOrPermission("products.read"), productsCtrl.getNextCode);
 
+// ✅ Stats agregadas (mismos filtros base que list)
+router.get("/stats", allowAdminOrPermission("products.read"), productsCtrl.getStats);
+
 // ✅ Listado
 router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);
 

@@ -1436,6 +1436,146 @@ async function remove(req, res, next) {
   }
 }
 
+// =====================
+// GET /api/v1/products/stats
+// Devuelve métricas agregadas respetando los mismos filtros base del listado
+// (q, category, subcategory, branch scope, is_active/include_inactive).
+// IGNORA filtros de dimensión (stock/precio/imágenes) para que las cuentas
+// "Con stock / Sin stock", "Con precio / Sin precio", etc. tengan sentido.
+// =====================
+async function getStats(req, res, next) {
+  try {
+    const superAdmin  = access.isSuperAdmin(req);
+    const branchAdmin = access.isBranchAdmin(req);
+    const admin       = branchAdmin;
+
+    const q = String(req.query.q || "").trim();
+
+    const ctxBranchId = getBranchId(req);
+    if (!superAdmin && !ctxBranchId) {
+      return res.status(400).json({
+        ok: false,
+        code: "BRANCH_REQUIRED",
+        message: "No se pudo determinar la sucursal del usuario (branch_id).",
+      });
+    }
+
+    const branchIdQuery = toInt(req.query.branch_id || req.query.branchId || req.headers["x-branch-id"], 0);
+    const branchIdScope = superAdmin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
+    const ownerBranchId = superAdmin ? toInt(req.query.owner_branch_id || req.query.ownerBranchId || 0, 0) : 0;
+    const stockBranchId = superAdmin ? (branchIdQuery > 0 ? branchIdQuery : 0) : ctxBranchId;
+
+    const categoryId = toInt(req.query.category_id || req.query.categoryId, 0) || 0;
+    const subcategoryId = toInt(req.query.subcategory_id || req.query.subcategoryId, 0) || 0;
+
+    const includeInactive =
+      admin &&
+      (toInt(req.query.include_inactive, 0) === 1 || String(req.query.include_inactive || "").toLowerCase() === "true");
+
+    const isActiveFilterRaw = req.query.is_active;
+    const hasExplicitIsActive = Object.prototype.hasOwnProperty.call(req.query || {}, "is_active");
+
+    const whereSql = [];
+    const repl = {};
+
+    if (!includeInactive && !hasExplicitIsActive) {
+      whereSql.push("p.is_active = 1");
+    } else if (hasExplicitIsActive) {
+      const v = String(isActiveFilterRaw ?? "").toLowerCase().trim();
+      if (v === "1" || v === "true") whereSql.push("p.is_active = 1");
+      else if (v === "0" || v === "false") whereSql.push("p.is_active = 0");
+    }
+
+    if (q) {
+      repl.q = `%${q}%`;
+      const qNum = toFloat(q, NaN);
+      whereSql.push(
+        `(p.name LIKE :q OR p.sku LIKE :q OR p.barcode LIKE :q OR p.code LIKE :q OR p.brand LIKE :q OR p.model LIKE :q${
+          Number.isFinite(qNum) ? " OR p.id = :qid" : ""
+        })`
+      );
+      if (Number.isFinite(qNum)) repl.qid = toInt(qNum, 0);
+    }
+
+    if (superAdmin && ownerBranchId > 0) {
+      repl.ownerBranchId = ownerBranchId;
+      whereSql.push("p.branch_id = :ownerBranchId");
+    }
+
+    if (categoryId > 0) {
+      repl.categoryId = categoryId;
+      whereSql.push("p.category_id = :categoryId");
+    }
+    if (subcategoryId > 0) {
+      repl.subcategoryId = subcategoryId;
+      whereSql.push("p.subcategory_id = :subcategoryId");
+    }
+
+    let joinPb = "";
+    if (!superAdmin || branchIdQuery > 0) {
+      const bid = toInt(branchIdScope, 0);
+      repl.scopeBranchId = bid;
+      joinPb = `JOIN product_branches pb ON pb.product_id = p.id AND pb.branch_id = :scopeBranchId AND pb.is_active = 1`;
+    }
+
+    const whereClause = whereSql.length ? `WHERE ${whereSql.join(" AND ")}` : "";
+
+    // Sub-queries para cada dimensión
+    const stockExists = (() => {
+      if (!superAdmin || branchIdQuery > 0) {
+        repl.stockBranchId = toInt(stockBranchId, 0);
+        return `EXISTS (
+          SELECT 1
+          FROM stock_balances sb
+          JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE sb.product_id = p.id
+            AND w.branch_id = :stockBranchId
+            AND sb.qty > 0
+        )`;
+      }
+      return `EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = p.id AND sb.qty > 0)`;
+    })();
+
+    const imagesExists = `EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id LIMIT 1)`;
+
+    const [[row]] = await sequelize.query(
+      `
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN p.is_active = 1 THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN p.is_active = 0 THEN 1 ELSE 0 END) AS inactive,
+        SUM(CASE WHEN ${stockExists} THEN 1 ELSE 0 END) AS with_stock,
+        SUM(CASE WHEN NOT ${stockExists} THEN 1 ELSE 0 END) AS without_stock,
+        SUM(CASE WHEN COALESCE(p.price_list,0) > 0 THEN 1 ELSE 0 END) AS with_price,
+        SUM(CASE WHEN COALESCE(p.price_list,0) <= 0 THEN 1 ELSE 0 END) AS without_price,
+        SUM(CASE WHEN ${imagesExists} THEN 1 ELSE 0 END) AS with_images,
+        SUM(CASE WHEN NOT ${imagesExists} THEN 1 ELSE 0 END) AS without_images
+      FROM products p
+      ${joinPb}
+      ${whereClause}
+      `,
+      { replacements: repl }
+    );
+
+    return res.json({
+      ok: true,
+      data: {
+        total: toInt(row?.total, 0),
+        active: toInt(row?.active, 0),
+        inactive: toInt(row?.inactive, 0),
+        with_stock: toInt(row?.with_stock, 0),
+        without_stock: toInt(row?.without_stock, 0),
+        with_price: toInt(row?.with_price, 0),
+        without_price: toInt(row?.without_price, 0),
+        with_images: toInt(row?.with_images, 0),
+        without_images: toInt(row?.without_images, 0),
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
 module.exports = {
   list,
   create,
@@ -1445,4 +1585,5 @@ module.exports = {
   update,
   remove,
   getNextCode,
+  getStats,
 };
