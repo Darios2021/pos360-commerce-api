@@ -970,8 +970,8 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
     // Si no cambió el flag ni los campos promo, no notificamos.
     if (wasPromo === isPromo && !promoFieldsChanged) return;
 
-    // Datos del producto para el mensaje
-    let productInfo = { name: `Producto #${product_id}`, sku: "" };
+    // Datos del producto para el mensaje (precios actuales)
+    let productInfo = { name: `Producto #${product_id}`, sku: "", price_list: 0, price_discount: 0 };
     try {
       const { Product } = require("../models");
       if (Product) {
@@ -989,13 +989,26 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
       }
     } catch (_) {}
 
+    // URL pública del producto en el shop. Sin prepend si no hay base.
+    const shopBase = String(
+      process.env.SHOP_PUBLIC_BASE_URL ||
+      process.env.PUBLIC_BASE_URL ||
+      "https://sanjuantecnologia.com"
+    ).replace(/\/+$/, "");
+    const productUrl = shopBase ? `${shopBase}/shop/product/${product_id}` : "";
+
     const productLine = productInfo.sku
       ? `🏷️ <b>${escapeHtml(productInfo.name)}</b> <code>${escapeHtml(productInfo.sku)}</code>`
       : `🏷️ <b>${escapeHtml(productInfo.name)}</b>`;
 
-    // Helpers para precios
+    // Línea con link clickeable al producto en la tienda
+    const productUrlLine = productUrl
+      ? `🔗 <a href="${escapeHtml(productUrl)}">Ver en la tienda</a>`
+      : null;
+
     const refList = Number(productInfo.price_list || 0);
     const refDisc = Number(productInfo.price_discount || 0);
+    // Referencia base para calcular % OFF: prioriza descuento si existe, sino lista.
     const baseRef = refDisc > 0 ? refDisc : refList;
 
     const fmtDate = (v) => {
@@ -1013,14 +1026,52 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
       return "Sin ventana temporal";
     };
 
-    const promoLine = (a) => {
-      const pp = Number(a?.promo_price || 0);
-      if (pp > 0 && refList > 0 && pp < refList) {
-        const off = Math.round(((refList - pp) / refList) * 100);
-        return `<b>$${fmtMoney(pp)}</b> (era $${fmtMoney(refList)}, <b>-${off}%</b>)`;
+    // Calcula % OFF de un precio promo respecto a una referencia
+    const calcOff = (promoPrice, ref) => {
+      if (!(promoPrice > 0) || !(ref > 0) || promoPrice >= ref) return 0;
+      return Math.round(((ref - promoPrice) / ref) * 100);
+    };
+
+    // Bloque de precios actuales del producto (lista + descuento normal)
+    const buildPriceBlock = () => {
+      const arr = [];
+      if (refList > 0)  arr.push({ k: "💵 Precio lista",     v: `$${fmtMoney(refList)}` });
+      if (refDisc > 0 && refDisc !== refList) {
+        const off = calcOff(refDisc, refList);
+        arr.push({
+          k: "💸 Precio descuento (contado)",
+          v: off > 0 ? `$${fmtMoney(refDisc)} <i>(-${off}% vs lista)</i>` : `$${fmtMoney(refDisc)}`,
+        });
       }
-      if (pp > 0) return `<b>$${fmtMoney(pp)}</b>`;
-      return "—";
+      return arr;
+    };
+
+    // Bloque de precio promo aplicado (con dos % OFF cuando hay descuento + lista)
+    const buildPromoPriceBlock = (a) => {
+      const pp = Number(a?.promo_price || 0);
+      if (!(pp > 0)) return [];
+      const lines = [{ k: "🎯 Precio en promoción", v: `<b>$${fmtMoney(pp)}</b>` }];
+      const offList = calcOff(pp, refList);
+      const offDisc = calcOff(pp, refDisc);
+      if (offList > 0 && refDisc > 0 && refDisc !== refList) {
+        // Mostramos ambos % OFF
+        const ahorroL = refList - pp;
+        const ahorroD = refDisc - pp;
+        lines.push({
+          k: "📉 Ahorro vs lista",
+          v: `<b>$${fmtMoney(ahorroL)}</b> (<b>-${offList}%</b> OFF)`,
+        });
+        if (offDisc > 0) {
+          lines.push({
+            k: "📉 Ahorro vs descuento",
+            v: `<b>$${fmtMoney(ahorroD)}</b> (<b>-${offDisc}%</b> OFF)`,
+          });
+        }
+      } else if (offList > 0) {
+        const ahorro = refList - pp;
+        lines.push({ k: "📉 Ahorro", v: `<b>$${fmtMoney(ahorro)}</b> (<b>-${offList}%</b> OFF)` });
+      }
+      return lines;
     };
 
     const qtyRuleLine = (a) => {
@@ -1037,14 +1088,20 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
     // ─── ACTIVACIÓN ─────────────────────────────────────────────
     if (!wasPromo && isPromo) {
       const lines = [productLine];
-      const pl = promoLine(after);
-      if (pl !== "—") {
-        lines.push({ k: "🎯 Precio promo", v: pl });
-      } else if (refList > 0) {
-        lines.push({ k: "Precio lista", v: `$${fmtMoney(refList)}` });
+      if (productUrlLine) lines.push(productUrlLine);
+      lines.push("");
+      lines.push(...buildPriceBlock());
+      const promoBlock = buildPromoPriceBlock(after);
+      if (promoBlock.length) {
+        lines.push("");
+        lines.push(...promoBlock);
       }
       const qr = qtyRuleLine(after);
-      if (qr) lines.push({ k: "📦 Por cantidad", v: qr });
+      if (qr) {
+        lines.push("");
+        lines.push({ k: "📦 Promo por cantidad", v: qr });
+      }
+      lines.push("");
       lines.push({ k: "🕒 Vigencia", v: dateRangeText(after) });
 
       await sendAlert({
@@ -1054,7 +1111,6 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
         toggleKey: "alert_promo_change",
         reference_type: "product",
         reference_id: product_id,
-        // Dedupe corto: si se reactiva en pocas horas, igual avisa al cambiar campos
         dedupe_key_extra: `act:${after?.promo_price ?? ""}:${after?.promo_ends_at ?? ""}`,
         lines,
       });
@@ -1064,12 +1120,30 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
     // ─── DESACTIVACIÓN ──────────────────────────────────────────
     if (wasPromo && !isPromo) {
       const lines = [productLine];
-      const pl = promoLine(before);
-      if (pl !== "—") lines.push({ k: "🎯 Precio promo previo", v: pl });
+      if (productUrlLine) lines.push(productUrlLine);
+      lines.push("");
+
+      // Mostrar el precio promo previo y su ahorro
+      const prevPromo = Number(before?.promo_price || 0);
+      if (prevPromo > 0) {
+        const offList = calcOff(prevPromo, refList);
+        lines.push({ k: "🎯 Precio promo previo", v: `$${fmtMoney(prevPromo)}` });
+        if (offList > 0) {
+          lines.push({
+            k: "📉 Era",
+            v: `<b>-${offList}%</b> OFF · ahorro $${fmtMoney(refList - prevPromo)}`,
+          });
+        }
+      }
       const qr = qtyRuleLine(before);
-      if (qr) lines.push({ k: "📦 Por cantidad previa", v: qr });
-      if (baseRef > 0) {
-        lines.push({ k: "💰 Precio actual", v: `<b>$${fmtMoney(baseRef)}</b>` });
+      if (qr) lines.push({ k: "📦 Promo por cantidad previa", v: qr });
+
+      // Bloque de "vuelve a"
+      lines.push("");
+      lines.push("🔁 <b>Vuelve a precio normal:</b>");
+      lines.push(...buildPriceBlock());
+      if (refList === 0 && refDisc === 0) {
+        lines.push({ k: "💰 Precio actual", v: "—" });
       }
 
       await sendAlert({
@@ -1087,20 +1161,36 @@ async function notifyPromoChange({ product_id, before = {}, after = {}, source =
 
     // ─── MODIFICACIÓN (estaba en promo y siguió en promo) ───────
     if (wasPromo && isPromo && promoFieldsChanged) {
-      const lines = [productLine, "✏️ <b>Promo modificada</b>"];
+      const lines = [productLine];
+      if (productUrlLine) lines.push(productUrlLine);
+      lines.push("");
+      lines.push(...buildPriceBlock());
+      lines.push("");
 
-      // Cambios de precio
+      // Cambios de precio promo
       const beforePrice = Number(before?.promo_price || 0);
       const afterPrice  = Number(after?.promo_price  || 0);
       if (beforePrice !== afterPrice) {
+        const offBefore = calcOff(beforePrice, refList);
+        const offAfter  = calcOff(afterPrice,  refList);
         const arrow = beforePrice > 0 && afterPrice > 0
           ? `$${fmtMoney(beforePrice)} → <b>$${fmtMoney(afterPrice)}</b>`
           : afterPrice > 0
             ? `<b>$${fmtMoney(afterPrice)}</b>`
             : "—";
         lines.push({ k: "🎯 Precio promo", v: arrow });
+        if (offBefore || offAfter) {
+          lines.push({
+            k: "📉 OFF",
+            v: `${offBefore ? `-${offBefore}%` : "—"} → <b>${offAfter ? `-${offAfter}%` : "—"}</b>`,
+          });
+        }
       } else if (afterPrice > 0) {
+        const offAfter = calcOff(afterPrice, refList);
         lines.push({ k: "🎯 Precio promo", v: `$${fmtMoney(afterPrice)}` });
+        if (offAfter > 0) {
+          lines.push({ k: "📉 OFF", v: `<b>-${offAfter}%</b>` });
+        }
       }
 
       // Ventana
