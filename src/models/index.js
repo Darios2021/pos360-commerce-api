@@ -31,6 +31,14 @@ const Category = require("./Category")(sequelize, DataTypes);
 const Subcategory = require("./Subcategory")(sequelize, DataTypes);
 const Product = require("./Product")(sequelize, DataTypes);
 const ProductImage = require("./ProductImage")(sequelize, DataTypes);
+
+// Kit components (opcional — si la tabla aún no existe, falla y queda null)
+let ProductKitItem = null;
+try {
+  ProductKitItem = require("./ProductKitItem")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ ProductKitItem no cargado:", e?.message);
+}
 const Branch = require("./Branch")(sequelize, DataTypes);
 const Warehouse = require("./Warehouse")(sequelize, DataTypes);
 const StockBalance = require("./StockBalance")(sequelize, DataTypes);
@@ -330,6 +338,13 @@ safeHasMany(Subcategory, Product, { foreignKey: "subcategory_id", as: "products"
 safeHasMany(Product, ProductImage, { foreignKey: "product_id", as: "images" });
 safeBelongsTo(ProductImage, Product, { foreignKey: "product_id", as: "product" });
 
+// Product ↔ KitItems (componentes del kit)
+if (ProductKitItem) {
+  safeHasMany(Product, ProductKitItem, { foreignKey: "kit_id", as: "kitItems" });
+  safeBelongsTo(ProductKitItem, Product, { foreignKey: "kit_id", as: "kit" });
+  safeBelongsTo(ProductKitItem, Product, { foreignKey: "component_id", as: "component" });
+}
+
 // Product ↔ Videos
 if (ProductVideo) {
   safeHasMany(Product, ProductVideo, { foreignKey: "product_id", as: "videos" });
@@ -581,6 +596,7 @@ const models = {
   Product,
   ProductImage,
   ProductVideo,
+  ProductKitItem,
   Branch,
   Warehouse,
   StockBalance,

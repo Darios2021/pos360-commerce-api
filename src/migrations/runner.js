@@ -60,6 +60,43 @@ const columnSteps = [
     column: "promo_qty_mode",
     def:    "VARCHAR(10) NULL COMMENT 'Modo descuento por volumen: amount | percent'",
   },
+
+  // ── Kits / combos ────────────────────────────────────────────────────────
+  // Un kit es un producto que agrupa otros productos. Se vende como un solo
+  // item con su precio fijo, pero al confirmar la venta se descuenta stock
+  // de cada componente individualmente.
+  {
+    id:     "products__is_kit",
+    table:  "products",
+    column: "is_kit",
+    def:    "TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Indica si el producto es un kit que agrupa otros productos'",
+  },
+];
+
+// Tablas a crear si no existen
+const tableSteps = [
+  {
+    id:     "product_kit_items",
+    table:  "product_kit_items",
+    sql: `
+      CREATE TABLE IF NOT EXISTS product_kit_items (
+        id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        kit_id          BIGINT UNSIGNED NOT NULL COMMENT 'FK al producto-kit (products.id)',
+        component_id    BIGINT UNSIGNED NOT NULL COMMENT 'FK al producto componente (products.id)',
+        qty             DECIMAL(12,3) NOT NULL DEFAULT 1.000 COMMENT 'Cantidad del componente en el kit',
+        sort_order      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Orden de visualización',
+        created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_kit_component (kit_id, component_id),
+        KEY ix_kit_id (kit_id),
+        KEY ix_component_id (component_id),
+        CONSTRAINT fk_pki_kit FOREIGN KEY (kit_id) REFERENCES products (id) ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT fk_pki_component FOREIGN KEY (component_id) REFERENCES products (id) ON DELETE RESTRICT ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Componentes de un kit/combo de productos';
+    `,
+  },
 ];
 
 async function columnExists(sequelize, table, column) {
@@ -78,7 +115,38 @@ async function columnExists(sequelize, table, column) {
   }
 }
 
+async function tableExists(sequelize, table) {
+  try {
+    const rows = await sequelize.query(
+      `SELECT COUNT(*) AS cnt
+       FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME   = :table`,
+      { type: QueryTypes.SELECT, replacements: { table } }
+    );
+    return Number(rows?.[0]?.cnt ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function runStartupMigrations(sequelize) {
+  // Tablas nuevas primero (las columnas pueden depender de FKs)
+  for (const step of tableSteps) {
+    try {
+      const exists = await tableExists(sequelize, step.table);
+      if (exists) {
+        console.log(`ℹ️  [migration] ${step.id} — tabla ya existe, skip`);
+        continue;
+      }
+      await sequelize.query(step.sql, { type: QueryTypes.RAW });
+      console.log(`✅ [migration] ${step.id} — tabla creada`);
+    } catch (e) {
+      console.warn(`⚠️  [migration] ${step.id} falló:`, e.message);
+    }
+  }
+
+  // Columnas
   for (const step of columnSteps) {
     try {
       const exists = await columnExists(sequelize, step.table, step.column);

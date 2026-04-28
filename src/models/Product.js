@@ -73,6 +73,11 @@ module.exports = (sequelize, DataTypes) => {
       promo_qty_mode: { type: DataTypes.STRING(10), allowNull: true, defaultValue: null },
 
       tax_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: "21.00" },
+
+      // Kit/combo: si es true, el producto agrupa otros (sus componentes
+      // viven en product_kit_items). El kit no tiene stock propio — su
+      // disponibilidad se calcula como min(stock componente / qty).
+      is_kit: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
       tableName: "products",
@@ -125,6 +130,14 @@ module.exports = (sequelize, DataTypes) => {
       Product.hasMany(models.ProductImage, {
         foreignKey: "product_id",
         as: "images",
+      });
+    }
+
+    // Kit components (si es kit, lista de componentes con su qty)
+    if (models.ProductKitItem) {
+      Product.hasMany(models.ProductKitItem, {
+        foreignKey: "kit_id",
+        as: "kitItems",
       });
     }
   };

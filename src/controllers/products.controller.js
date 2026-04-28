@@ -190,6 +190,24 @@ function buildProductIncludes({ includeBranch = false } = {}) {
   const imgAs = A.images ? "images" : A.productImages ? "productImages" : A.ProductImages ? "ProductImages" : null;
   if (imgAs) inc.push({ association: imgAs, required: false });
 
+  // kitItems → product (componente) → images
+  const kitAs = A.kitItems ? "kitItems" : null;
+  if (kitAs) {
+    inc.push({
+      association: kitAs,
+      required: false,
+      include: [
+        {
+          association: "component",
+          required: false,
+          include: [
+            { association: "images", required: false },
+          ],
+        },
+      ],
+    });
+  }
+
   if (includeBranch) {
     const brAs = A.branch ? "branch" : A.Branch ? "Branch" : null;
     if (brAs) {
@@ -472,6 +490,8 @@ function pickBody(body = {}) {
     "promo_qty_threshold",
     "promo_qty_discount",
     "promo_qty_mode",
+    // Kit/combo
+    "is_kit",
   ];
 
   for (const k of fields) if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
@@ -488,7 +508,7 @@ function pickBody(body = {}) {
   if (out.subcategory_id != null) out.subcategory_id = toInt(out.subcategory_id, null);
   if (out.branch_id != null) out.branch_id = toInt(out.branch_id, null);
 
-  const bools = ["is_new", "is_promo", "track_stock", "sheet_has_stock", "is_active"];
+  const bools = ["is_new", "is_promo", "track_stock", "sheet_has_stock", "is_active", "is_kit"];
   for (const b of bools) if (out[b] != null) out[b] = toBool(out[b], false);
 
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
@@ -581,6 +601,70 @@ async function upsertProductBranches({ productId, branchIds, transaction = null 
       AND branch_id IN (${inPH})
     `,
     { replacements: [pid, ...bids], transaction }
+  );
+}
+
+// =====================
+// product_kit_items: normalización + replace
+// =====================
+// Acepta cualquiera de estos formatos en el body:
+//   kit_items: [{ component_id, qty, sort_order? }, ...]
+//   kit_items: [{ id, qty, sort_order? }, ...]   ← id = component_id
+//   kit_items: [123, 456, ...]                   ← qty=1 cada uno
+function normalizeKitItemsInput(body = {}) {
+  const raw = body.kit_items ?? body.kitItems ?? null;
+  if (!Array.isArray(raw)) return null; // null = no tocar; [] = vaciar
+
+  const out = [];
+  for (let i = 0; i < raw.length; i++) {
+    const it = raw[i];
+    let componentId = 0;
+    let qty = 1;
+    let sortOrder = i;
+
+    if (it && typeof it === "object") {
+      componentId = toInt(it.component_id ?? it.componentId ?? it.id ?? it.product_id ?? it.productId, 0);
+      qty = toFloat(it.qty ?? it.quantity ?? 1, 1);
+      sortOrder = toInt(it.sort_order ?? it.sortOrder ?? i, i);
+    } else {
+      componentId = toInt(it, 0);
+    }
+
+    if (componentId > 0 && qty > 0) {
+      out.push({ component_id: componentId, qty, sort_order: sortOrder });
+    }
+  }
+  return out;
+}
+
+async function replaceKitItems({ kitId, items, transaction = null }) {
+  const pid = toInt(kitId, 0);
+  if (!pid) return;
+  // Borramos todo y reescribimos. Es un kit, generalmente pocas filas.
+  await sequelize.query(
+    `DELETE FROM product_kit_items WHERE kit_id = ?`,
+    { replacements: [pid], transaction }
+  );
+
+  if (!Array.isArray(items) || !items.length) return;
+
+  // Filtramos auto-referencia (un kit no puede contener-se a sí mismo)
+  const clean = items.filter((it) => toInt(it.component_id, 0) > 0 && toInt(it.component_id, 0) !== pid);
+  if (!clean.length) return;
+
+  const placeholders = clean.map(() => "(?, ?, ?, ?)").join(", ");
+  const values = [];
+  for (const it of clean) {
+    values.push(pid, it.component_id, Number(it.qty || 1), Number(it.sort_order || 0));
+  }
+
+  await sequelize.query(
+    `
+    INSERT INTO product_kit_items (kit_id, component_id, qty, sort_order)
+    VALUES ${placeholders}
+    ON DUPLICATE KEY UPDATE qty = VALUES(qty), sort_order = VALUES(sort_order)
+    `,
+    { replacements: values, transaction }
   );
 }
 
@@ -1251,6 +1335,12 @@ async function create(req, res, next) {
       const bids = !admin ? [payload.branch_id] : bodyBranchIds.length ? bodyBranchIds : [payload.branch_id];
       await upsertProductBranches({ productId: p.id, branchIds: bids, transaction: t });
 
+      // Si es kit, persistir componentes
+      const kitItems = normalizeKitItemsInput(req.body || {});
+      if (kitItems && (payload.is_kit === true || payload.is_kit === 1)) {
+        await replaceKitItems({ kitId: p.id, items: kitItems, transaction: t });
+      }
+
       return p.id;
     });
 
@@ -1414,6 +1504,21 @@ async function update(req, res, next) {
           const bids = bodyBranchIds.length ? bodyBranchIds : [toInt(p.branch_id, 0)].filter(Boolean);
           await upsertProductBranches({ productId: id, branchIds: bids, transaction: t });
         }
+      }
+
+      // Kit components: solo tocar si vino kit_items en el body
+      const hasKitItems =
+        Object.prototype.hasOwnProperty.call(req.body || {}, "kit_items") ||
+        Object.prototype.hasOwnProperty.call(req.body || {}, "kitItems");
+      if (hasKitItems) {
+        const kitItems = normalizeKitItemsInput(req.body || {}) || [];
+        // Si el producto deja de ser kit (is_kit=false) → vaciamos componentes
+        const isKitNow = patch.is_kit === undefined ? !!p.is_kit : !!patch.is_kit;
+        await replaceKitItems({
+          kitId: id,
+          items: isKitNow ? kitItems : [],
+          transaction: t,
+        });
       }
     });
 

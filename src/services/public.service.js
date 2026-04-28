@@ -675,6 +675,63 @@ module.exports = {
     const stockMap = await getStockByBranchMap([pid]);
     item.stock_by_branch = stockMap[pid] || [];
 
+    // is_kit puede no estar en la VIEW v_public_catalog (legacy). Lo leemos
+    // directo de products y lo merge-amos al item.
+    try {
+      const [pRows] = await sequelize.query(
+        `SELECT is_kit FROM products WHERE id = :pid LIMIT 1`,
+        { replacements: { pid } }
+      );
+      item.is_kit = Number(pRows?.[0]?.is_kit || 0) === 1 ? 1 : 0;
+    } catch (e) {
+      item.is_kit = 0;
+    }
+
+    // ── Kit / combo: si el producto es un kit, traemos componentes con su info
+    if (Number(item.is_kit) === 1) {
+      try {
+        const [kitRows] = await sequelize.query(
+          `
+          SELECT
+            pki.qty                        AS qty,
+            pki.sort_order                 AS sort_order,
+            p.id                           AS component_id,
+            p.name                         AS name,
+            p.sku                          AS sku,
+            p.price_list                   AS price_list,
+            p.price_discount               AS price_discount,
+            (
+              SELECT pi.url
+              FROM product_images pi
+              WHERE pi.product_id = p.id
+              ORDER BY pi.sort_order ASC, pi.id ASC
+              LIMIT 1
+            )                              AS image_url
+          FROM product_kit_items pki
+          JOIN products p ON p.id = pki.component_id
+          WHERE pki.kit_id = :kit_id
+            AND p.is_active = 1
+          ORDER BY pki.sort_order ASC, pki.id ASC
+          `,
+          { replacements: { kit_id: pid } }
+        );
+        item.kit_items = (kitRows || []).map((r) => ({
+          component_id: Number(r.component_id),
+          name: String(r.name || ""),
+          sku: String(r.sku || ""),
+          qty: Number(r.qty || 1),
+          price_list: Number(r.price_list || 0),
+          price_discount: Number(r.price_discount || 0),
+          image_url: r.image_url || null,
+        }));
+      } catch (e) {
+        // si la tabla aún no existe, devolvemos array vacío
+        item.kit_items = [];
+      }
+    } else {
+      item.kit_items = [];
+    }
+
     return item;
   },
 
