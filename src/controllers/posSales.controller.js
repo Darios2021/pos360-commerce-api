@@ -469,7 +469,7 @@ async function listSales(req, res, next) {
 
     const rows = await Sale.findAll({
       where,
-      order: [["id", "DESC"]],
+      order: [["sold_at", "DESC"], ["id", "DESC"]],
       limit,
       offset,
       include,
