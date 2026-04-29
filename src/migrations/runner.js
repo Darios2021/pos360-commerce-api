@@ -89,6 +89,12 @@ const columnSteps = [
     column: "password_hash",
     def:    "VARCHAR(255) NULL COMMENT 'Hash bcrypt de la password elegida por el cliente'",
   },
+  {
+    id:     "ecom_customers__picture_url",
+    table:  "ecom_customers",
+    column: "picture_url",
+    def:    "VARCHAR(500) NULL COMMENT 'URL de la foto de perfil (Google picture)'",
+  },
 ];
 
 // Tablas a crear si no existen

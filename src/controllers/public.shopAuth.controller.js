@@ -23,6 +23,7 @@ function safeCustomer(c) {
     first_name: c.first_name,
     last_name: c.last_name,
     phone: c.phone,
+    picture_url: c.picture_url || null,
     // Coerce a boolean — viene como 0/1 desde MySQL
     profile_completed: !!Number(c.profile_completed),
   };
@@ -60,6 +61,7 @@ async function loginGoogleIdToken(req, res) {
       email,
       first_name: payload.given_name || null,
       last_name: payload.family_name || null,
+      picture: payload.picture || null,
     });
 
     // Upsert identity

@@ -32,28 +32,30 @@ async function findCustomerByEmail(email) {
  * en true es vía updateCustomerProfile (cuando el usuario completa el form).
  * Cuando crea uno nuevo, queda con profile_completed=0 (default DB).
  */
-async function findOrCreateCustomerByEmail({ email, first_name = null, last_name = null, phone = null }) {
+async function findOrCreateCustomerByEmail({ email, first_name = null, last_name = null, phone = null, picture = null }) {
   const e = String(email || "").trim().toLowerCase();
   if (!e) throw new Error("EMAIL_REQUIRED");
 
   const existing = await findCustomerByEmail(e);
   if (existing) {
-    // Solo rellenamos campos vacíos con los datos que llegan de Google,
-    // sin pisar lo que el usuario ya haya cargado a mano.
+    // Rellenamos campos vacíos con los datos que llegan de Google y
+    // SIEMPRE refrescamos la foto (Google la rota cada cierto tiempo).
     const needs =
       (first_name && !existing.first_name) ||
       (last_name && !existing.last_name) ||
-      (phone && !existing.phone);
+      (phone && !existing.phone) ||
+      (picture && picture !== existing.picture_url);
 
     if (needs) {
       await db.sequelize.query(
         `UPDATE ecom_customers
-         SET first_name = COALESCE(first_name, :first_name),
-             last_name  = COALESCE(last_name, :last_name),
-             phone      = COALESCE(phone, :phone),
-             updated_at = CURRENT_TIMESTAMP
+         SET first_name  = COALESCE(first_name, :first_name),
+             last_name   = COALESCE(last_name, :last_name),
+             phone       = COALESCE(phone, :phone),
+             picture_url = COALESCE(:picture, picture_url),
+             updated_at  = CURRENT_TIMESTAMP
          WHERE id = :id`,
-        { replacements: { first_name, last_name, phone, id: existing.id } }
+        { replacements: { first_name, last_name, phone, picture, id: existing.id } }
       );
       return await getCustomerById(existing.id);
     }
@@ -62,9 +64,9 @@ async function findOrCreateCustomerByEmail({ email, first_name = null, last_name
   }
 
   await db.sequelize.query(
-    `INSERT INTO ecom_customers (email, first_name, last_name, phone, created_at, updated_at)
-     VALUES (:email, :first_name, :last_name, :phone, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    { replacements: { email: e, first_name, last_name, phone } }
+    `INSERT INTO ecom_customers (email, first_name, last_name, phone, picture_url, created_at, updated_at)
+     VALUES (:email, :first_name, :last_name, :phone, :picture, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    { replacements: { email: e, first_name, last_name, phone, picture } }
   );
 
   return await findCustomerByEmail(e);
