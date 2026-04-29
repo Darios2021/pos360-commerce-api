@@ -71,6 +71,24 @@ const columnSteps = [
     column: "is_kit",
     def:    "TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Indica si el producto es un kit que agrupa otros productos'",
   },
+
+  // ── Shop customers: perfil completo + password ──────────────────────────
+  // Para forzar a los clientes (incluso los logueados con Google) a completar
+  // sus datos de contacto y elegir una password antes de comprar.
+  // Default 0 → todos los registros existentes quedan marcados como incompletos
+  // y deberán completar el perfil la próxima vez que entren al shop.
+  {
+    id:     "ecom_customers__profile_completed",
+    table:  "ecom_customers",
+    column: "profile_completed",
+    def:    "TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Cliente completó nombre/apellido/teléfono y password real'",
+  },
+  {
+    id:     "ecom_customers__password_hash",
+    table:  "ecom_customers",
+    column: "password_hash",
+    def:    "VARCHAR(255) NULL COMMENT 'Hash bcrypt de la password elegida por el cliente'",
+  },
 ];
 
 // Tablas a crear si no existen

@@ -1,4 +1,3 @@
-// ✅ COPY-PASTE FINAL COMPLETO
 // src/controllers/public.shopAuth.controller.js
 
 const { OAuth2Client } = require("google-auth-library");
@@ -9,7 +8,10 @@ const {
   createShopSessionForCustomer,
   getShopCustomerFromRequest,
 } = require("../services/shopSession.service");
-const { findOrCreateCustomerByEmail } = require("../services/shopCustomer.service");
+const {
+  findOrCreateCustomerByEmail,
+  updateCustomerProfile,
+} = require("../services/shopCustomer.service");
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -21,6 +23,8 @@ function safeCustomer(c) {
     first_name: c.first_name,
     last_name: c.last_name,
     phone: c.phone,
+    // Coerce a boolean — viene como 0/1 desde MySQL
+    profile_completed: !!Number(c.profile_completed),
   };
 }
 
@@ -86,8 +90,36 @@ async function loginGoogleIdToken(req, res) {
   }
 }
 
+// PATCH /api/v1/public/auth/profile  body: { first_name, last_name, phone, password }
+// Requiere sesión activa del shop.
+async function updateProfile(req, res) {
+  try {
+    const customer = await getShopCustomerFromRequest(req);
+    if (!customer?.id) return res.status(401).json({ error: "NOT_LOGGED_IN" });
+
+    const { first_name, last_name, phone, password } = req.body || {};
+
+    const updated = await updateCustomerProfile(customer.id, {
+      first_name,
+      last_name,
+      phone,
+      password,
+    });
+
+    return res.json({ customer: safeCustomer(updated) });
+  } catch (e) {
+    if (e?.code) {
+      const status = e.status || 400;
+      return res.status(status).json({ error: e.code });
+    }
+    console.error("updateProfile:", e?.message || e);
+    return res.status(500).json({ error: "UPDATE_PROFILE_FAILED" });
+  }
+}
+
 module.exports = {
   me,
   logout,
   loginGoogleIdToken,
+  updateProfile,
 };
