@@ -5,10 +5,12 @@
 // safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 //
 // Por eso ACÁ ADENTRO las rutas van SIN "/admin/shop":
-// - GET  /orders
-// - GET  /orders/:id
+// - GET   /orders
+// - GET   /orders/:id
+// - PATCH /orders/:id/status
 
-const router = require("express").Router();
+const express = require("express");
+const router = express.Router();
 const ctrl = require("../controllers/admin.shopOrders.controller");
 
 function mustFn(fn, name) {
@@ -20,6 +22,7 @@ function mustFn(fn, name) {
 
 mustFn(ctrl.listOrders, "listOrders");
 mustFn(ctrl.getOrderById, "getOrderById");
+mustFn(ctrl.updateStatus, "updateStatus");
 
 function allowAdminOnly() {
   return (req, res, next) => {
@@ -41,5 +44,6 @@ function allowAdminOnly() {
 // ✅ OJO: SIN /admin/shop acá
 router.get("/orders", allowAdminOnly(), ctrl.listOrders);
 router.get("/orders/:id", allowAdminOnly(), ctrl.getOrderById);
+router.patch("/orders/:id/status", allowAdminOnly(), express.json(), ctrl.updateStatus);
 
 module.exports = router;

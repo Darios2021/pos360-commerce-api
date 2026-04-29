@@ -95,6 +95,28 @@ const columnSteps = [
     column: "picture_url",
     def:    "VARCHAR(500) NULL COMMENT 'URL de la foto de perfil (Google picture)'",
   },
+
+  // ── Shop orders: timestamp de retiro/entrega ────────────────────────────
+  // Se setea cuando el admin marca el pedido como "delivered" o "picked_up".
+  // Permite mostrar al cliente cuándo retiró su compra.
+  {
+    id:     "ecom_orders__picked_up_at",
+    table:  "ecom_orders",
+    column: "picked_up_at",
+    def:    "TIMESTAMP NULL DEFAULT NULL COMMENT 'Cuándo el cliente retiró/recibió el pedido'",
+  },
+  {
+    id:     "ecom_orders__ready_at",
+    table:  "ecom_orders",
+    column: "ready_at",
+    def:    "TIMESTAMP NULL DEFAULT NULL COMMENT 'Cuándo el pedido quedó listo para retirar/enviar'",
+  },
+  {
+    id:     "ecom_orders__processing_at",
+    table:  "ecom_orders",
+    column: "processing_at",
+    def:    "TIMESTAMP NULL DEFAULT NULL COMMENT 'Cuándo el pedido empezó a prepararse'",
+  },
 ];
 
 // Tablas a crear si no existen

@@ -389,7 +389,94 @@ async function getOrderById(req, res) {
   }
 }
 
+/**
+ * PATCH /api/v1/admin/shop/orders/:id/status
+ *
+ * Body: { status: "created" | "processing" | "ready" | "delivered" | "cancelled" }
+ *
+ * Reglas:
+ * - Cualquier transición es permitida (el operador del POS sabe lo que hace),
+ *   pero validamos que el status sea uno de los conocidos.
+ * - Auto-setea timestamps según el nuevo status:
+ *     processing → processing_at = NOW()
+ *     ready      → ready_at = NOW()
+ *     delivered  → picked_up_at = NOW()  (cubre "retiró" y "recibió envío")
+ *     cancelled  → cancelled_at = NOW()
+ * - Si vuelve hacia atrás (ej: delivered → ready), NO limpia timestamps previos:
+ *   queremos preservar la historia del pedido. Si hay que reabrir, mejor un
+ *   endpoint distinto.
+ */
+async function updateStatus(req, res) {
+  try {
+    const orderId = toInt(req.params.id, 0);
+    if (!orderId) {
+      return res.status(400).json({ ok: false, message: "order_id inválido" });
+    }
+
+    const VALID = ["created", "processing", "ready", "delivered", "cancelled"];
+    const next = String(req.body?.status || "").trim().toLowerCase();
+    if (!VALID.includes(next)) {
+      return res.status(400).json({
+        ok: false,
+        message: `status inválido. Debe ser uno de: ${VALID.join(", ")}`,
+      });
+    }
+
+    // Verificamos que el pedido exista
+    const [rows] = await sequelize.query(
+      `SELECT id, status FROM ecom_orders WHERE id = :id LIMIT 1`,
+      { replacements: { id: orderId } }
+    );
+    const current = rows?.[0];
+    if (!current) {
+      return res.status(404).json({ ok: false, message: "Pedido no encontrado" });
+    }
+
+    // Mapeo status → columna timestamp a actualizar (solo si era NULL).
+    const tsColMap = {
+      processing: "processing_at",
+      ready: "ready_at",
+      delivered: "picked_up_at",
+      cancelled: "cancelled_at",
+    };
+    const tsCol = tsColMap[next] || null;
+
+    // Construir UPDATE dinámico
+    let setClause = `status = :status, updated_at = CURRENT_TIMESTAMP`;
+    if (tsCol) {
+      // COALESCE: solo setea si estaba NULL (preserva el primer marcado).
+      setClause += `, ${tsCol} = COALESCE(${tsCol}, CURRENT_TIMESTAMP)`;
+    }
+
+    await sequelize.query(
+      `UPDATE ecom_orders SET ${setClause} WHERE id = :id`,
+      { replacements: { status: next, id: orderId } }
+    );
+
+    // Devolvemos el order actualizado para que el admin refresque su UI.
+    const [updatedRows] = await sequelize.query(
+      `SELECT * FROM ecom_orders WHERE id = :id LIMIT 1`,
+      { replacements: { id: orderId } }
+    );
+
+    return res.json({
+      ok: true,
+      order: updatedRows?.[0] || null,
+      previous_status: current.status,
+      new_status: next,
+    });
+  } catch (e) {
+    console.error("❌ updateStatus error:", e);
+    return res.status(500).json({
+      ok: false,
+      message: "Error actualizando estado.",
+      detail: e?.message || String(e),
+    });
+  }
+}
+
 module.exports = {
   listOrders,
   getOrderById,
+  updateStatus,
 };

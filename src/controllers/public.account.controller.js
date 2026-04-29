@@ -38,9 +38,18 @@ exports.getMyOrders = async (req, res) => {
         o.shipping_total,
         o.total,
         o.fulfillment_type,
+        o.branch_id,
         o.created_at,
         o.paid_at,
+        o.processing_at,
+        o.ready_at,
+        o.picked_up_at,
         o.cancelled_at,
+        o.ship_address1,
+        o.ship_city,
+
+        b.name AS branch_name,
+        b.address AS branch_address,
 
         (SELECT COUNT(*)
          FROM ecom_order_items oi
@@ -67,6 +76,7 @@ exports.getMyOrders = async (req, res) => {
          LIMIT 1) AS first_product_image_url
 
       FROM ecom_orders o
+      LEFT JOIN branches b ON b.id = o.branch_id
       WHERE o.customer_id = :customerId
       ORDER BY o.created_at DESC
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
@@ -96,9 +106,14 @@ exports.getMyOrderDetail = async (req, res) => {
     if (!orderId) return res.status(400).json({ message: "order_id inválido" });
 
     const orderSql = `
-      SELECT *
-      FROM ecom_orders
-      WHERE id = :orderId AND customer_id = :customerId
+      SELECT
+        o.*,
+        b.name AS branch_name,
+        b.address AS branch_address,
+        b.phone AS branch_phone
+      FROM ecom_orders o
+      LEFT JOIN branches b ON b.id = o.branch_id
+      WHERE o.id = :orderId AND o.customer_id = :customerId
       LIMIT 1
     `;
 
