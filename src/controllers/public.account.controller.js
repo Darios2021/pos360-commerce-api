@@ -138,13 +138,28 @@ exports.getMyFavorites = async (req, res) => {
   try {
     const customerId = req.customer.id;
 
+    // Devolvemos todos los campos que el componente ProductCard del shop
+    // necesita para renderizar precio, promo, kit, marca/modelo, etc.
+    // Si en el futuro ProductCard pide más campos, sumarlos acá.
     const sql = `
       SELECT
         f.id,
         f.product_id,
         f.created_at,
+        p.id        AS pid,
         p.name,
+        p.brand,
+        p.model,
         p.price,
+        p.price_list,
+        p.price_discount,
+        p.promo_price,
+        p.promo_starts_at,
+        p.promo_ends_at,
+        p.promo_qty_threshold,
+        p.promo_qty_discount,
+        p.promo_qty_mode,
+        p.is_kit,
         (SELECT pi.url
          FROM product_images pi
          WHERE pi.product_id = p.id
