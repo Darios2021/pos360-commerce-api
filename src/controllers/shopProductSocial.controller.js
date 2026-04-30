@@ -97,7 +97,7 @@ async function createQuestion(req, res, next) {
 
     const text = clean(req.body?.text, MAX_TEXT);
     if (!text) return fail(res, 400, "INVALID_TEXT", "Escribí tu pregunta");
-    if (text.length < 5) return fail(res, 400, "TEXT_TOO_SHORT", "La pregunta es muy corta");
+    if (text.length < 3) return fail(res, 400, "TEXT_TOO_SHORT", "La pregunta es muy corta");
 
     // Producto existe y es activo (control mínimo)
     const [[prod]] = await db.sequelize.query(
@@ -117,13 +117,14 @@ async function createQuestion(req, res, next) {
       return fail(res, 429, "TOO_MANY_REQUESTS", "Esperá unos segundos antes de volver a preguntar");
     }
 
-    const [result] = await db.sequelize.query(
+    const [insertedId] = await db.sequelize.query(
       `INSERT INTO product_questions (product_id, customer_id, text, is_public, created_at, updated_at)
        VALUES (:pid, :cid, :text, 1, NOW(), NOW())`,
-      { replacements: { pid: productId, cid: customer.id, text } }
+      {
+        replacements: { pid: productId, cid: customer.id, text },
+        type: db.sequelize.QueryTypes.INSERT,
+      }
     );
-
-    const insertedId = result?.insertId || (Array.isArray(result) ? result[0]?.insertId : null);
 
     return res.status(201).json({
       ok: true,
@@ -291,7 +292,7 @@ async function createReview(req, res, next) {
       isVerified = 0;
     }
 
-    const [result] = await db.sequelize.query(
+    const [insertedId] = await db.sequelize.query(
       `INSERT INTO product_reviews
          (product_id, customer_id, rating, comment, is_verified_purchase, is_visible, created_at, updated_at)
        VALUES (:pid, :cid, :rating, :comment, :ver, 1, NOW(), NOW())`,
@@ -303,10 +304,9 @@ async function createReview(req, res, next) {
           comment: comment || null,
           ver: isVerified,
         },
+        type: db.sequelize.QueryTypes.INSERT,
       }
     );
-
-    const insertedId = result?.insertId || (Array.isArray(result) ? result[0]?.insertId : null);
 
     return res.status(201).json({
       ok: true,
