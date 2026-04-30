@@ -212,7 +212,18 @@ module.exports = {
 
   async listBranches() {
     const [rows] = await sequelize.query(`
-      SELECT id, name, code, address, city
+      SELECT
+        id,
+        name,
+        code,
+        address,
+        city,
+        province,
+        latitude,
+        longitude,
+        phone,
+        hours,
+        maps_url
       FROM branches
       WHERE is_active = 1
       ORDER BY name ASC
