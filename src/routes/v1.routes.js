@@ -269,6 +269,7 @@ const adminShopBrandingRoutes = loadRoute("./admin.shopBranding.routes", { optio
 const adminShopOrdersRoutes = loadRoute("./admin.shopOrders.routes", { optional: false });
 const adminShopSettingsRoutes = loadRoute("./admin.shopSettings.routes", { optional: false });
 const adminShopPaymentsRoutes = loadRoute("./admin.shopPayments.routes", { optional: false });
+const adminShopQARoutes = loadRoute("./admin.shopQA.routes", { optional: true });
 
 // ✅ THEME (admin)
 const adminShopThemeRoutes = loadRoute("./admin.shopTheme.routes", { optional: true });
@@ -388,6 +389,9 @@ safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopBrandingRoutes
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopOrdersRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopSettingsRoutes);
 safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopPaymentsRoutes);
+
+// ✅ Q&A + Reviews admin (consultas web)
+if (adminShopQARoutes) safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopQARoutes);
 
 if (adminShopThemeRoutes) {
   safeUse("/admin/shop", requireAuth, attachAccessContext, adminShopThemeRoutes);

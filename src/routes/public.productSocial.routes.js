@@ -6,7 +6,10 @@
 const router = require("express").Router();
 
 const ctrl = require("../controllers/shopProductSocial.controller");
-const { requireShopCustomer } = require("../middlewares/shopCustomerAuth.middleware");
+const {
+  requireShopCustomer,
+  hydrateShopCustomer,
+} = require("../middlewares/shopCustomerAuth.middleware");
 
 // ── Preguntas ──
 router.get("/:id/questions", ctrl.listQuestions);
@@ -14,7 +17,8 @@ router.post("/:id/questions", requireShopCustomer, ctrl.createQuestion);
 
 // ── Reviews ──
 router.get("/:id/reviews", ctrl.listReviews);
-router.get("/:id/reviews/summary", ctrl.reviewsSummary);
+// summary expone flags si el customer está logueado (puede o no estarlo)
+router.get("/:id/reviews/summary", hydrateShopCustomer, ctrl.reviewsSummary);
 router.post("/:id/reviews", requireShopCustomer, ctrl.createReview);
 
 module.exports = router;

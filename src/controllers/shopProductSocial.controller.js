@@ -231,12 +231,50 @@ async function reviewsSummary(req, res, next) {
       }
     }
 
+    /* Flags para el customer logueado:
+       - has_purchased: tiene una compra finalizada del producto
+       - has_reviewed:  ya dejó una review
+       - can_review:    está logueado, compró y NO opinó aún
+    */
+    let hasPurchased = false;
+    let hasReviewed = false;
+    const customer = req.customer;
+
+    if (customer?.id) {
+      try {
+        const [[r1]] = await db.sequelize.query(
+          `SELECT 1 AS ok
+           FROM ecom_order_items oi
+           INNER JOIN ecom_orders o ON o.id = oi.order_id
+           WHERE o.customer_id = :cid
+             AND oi.product_id = :pid
+             AND o.status IN ('delivered','completed','paid','received')
+           LIMIT 1`,
+          { replacements: { cid: customer.id, pid: productId } }
+        );
+        hasPurchased = !!r1;
+      } catch { /* schema distinto: dejamos false */ }
+
+      try {
+        const [[r2]] = await db.sequelize.query(
+          `SELECT 1 AS ok FROM product_reviews
+           WHERE product_id = :pid AND customer_id = :cid LIMIT 1`,
+          { replacements: { pid: productId, cid: customer.id } }
+        );
+        hasReviewed = !!r2;
+      } catch { /* tabla no creada aún */ }
+    }
+
     return res.json({
       ok: true,
       product_id: productId,
       total,
       average: total > 0 ? Math.round((sum / total) * 10) / 10 : 0,
       distribution,
+      is_authenticated: !!customer?.id,
+      has_purchased: hasPurchased,
+      has_reviewed: hasReviewed,
+      can_review: !!customer?.id && hasPurchased && !hasReviewed,
     });
   } catch (e) {
     next(e);
@@ -272,7 +310,8 @@ async function createReview(req, res, next) {
       return fail(res, 409, "ALREADY_REVIEWED", "Ya dejaste tu opinión sobre este producto");
     }
 
-    // Verified purchase: hay algún ecom_order_item del producto en una orden del customer entregada
+    // Verified purchase: solo puede opinar quien efectivamente compró el producto.
+    // Buscamos al menos una orden del customer con este product_id en estado finalizado.
     let isVerified = 0;
     try {
       const [[verified]] = await db.sequelize.query(
@@ -287,9 +326,16 @@ async function createReview(req, res, next) {
       );
       isVerified = verified ? 1 : 0;
     } catch {
-      // si la tabla/columna no calza exactamente con el schema real, no rompemos —
-      // dejamos is_verified_purchase = 0 y el admin puede ajustarlo después.
       isVerified = 0;
+    }
+
+    if (!isVerified) {
+      return fail(
+        res,
+        403,
+        "PURCHASE_REQUIRED",
+        "Solo podés opinar de productos que hayas comprado"
+      );
     }
 
     const [insertedId] = await db.sequelize.query(
