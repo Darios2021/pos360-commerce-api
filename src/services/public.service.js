@@ -797,20 +797,32 @@ module.exports = {
   },
 
   async getShopBranding() {
-    const [rows] = await sequelize.query(`
-      SELECT id, name, logo_url, favicon_url, updated_at
-      FROM shop_branding
-      WHERE id = 1
-      LIMIT 1
-    `);
-
-    const r = rows?.[0] || null;
+    // Pedimos campos extendidos en cascada para mantener compat con DBs viejas.
+    let r = null;
+    try {
+      const [rows] = await sequelize.query(`
+        SELECT id, name, logo_url, favicon_url, holiday_overlay_url, updated_at
+        FROM shop_branding
+        WHERE id = 1
+        LIMIT 1
+      `);
+      r = rows?.[0] || null;
+    } catch (_) {
+      const [rows] = await sequelize.query(`
+        SELECT id, name, logo_url, favicon_url, updated_at
+        FROM shop_branding
+        WHERE id = 1
+        LIMIT 1
+      `);
+      r = rows?.[0] || null;
+    }
 
     if (!r) {
       return {
         name: "San Juan Tecnología",
         logo_url: "",
         favicon_url: "",
+        holiday_overlay_url: "",
         updated_at: new Date().toISOString(),
       };
     }
@@ -819,6 +831,7 @@ module.exports = {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
       favicon_url: r.favicon_url || "",
+      holiday_overlay_url: r.holiday_overlay_url || "",
       updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
     };
   },

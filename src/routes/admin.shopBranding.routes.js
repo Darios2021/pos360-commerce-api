@@ -20,6 +20,12 @@ const upload = multer({
   limits: { fileSize: 12 * 1024 * 1024 }, // 12MB (OG puede ser pesada)
 });
 
+// Multer separado para holiday overlay: permite videos cortos (hasta 8MB).
+const uploadOverlay = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+});
+
 function mustFn(fn, name) {
   if (typeof fn !== "function") {
     console.error(`❌ admin.shopBranding: handler inválido "${name}" ->`, typeof fn);
@@ -32,6 +38,8 @@ mustFn(ctrl.updateBranding, "updateBranding");
 mustFn(ctrl.uploadLogo, "uploadLogo");
 mustFn(ctrl.uploadFavicon, "uploadFavicon");
 mustFn(ctrl.uploadOgImage, "uploadOgImage");
+mustFn(ctrl.uploadHolidayOverlay, "uploadHolidayOverlay");
+mustFn(ctrl.removeHolidayOverlay, "removeHolidayOverlay");
 
 router.get("/branding", ctrl.getBranding);
 router.put("/branding", ctrl.updateBranding);
@@ -39,6 +47,10 @@ router.put("/branding", ctrl.updateBranding);
 router.post("/branding/logo", upload.single("file"), ctrl.uploadLogo);
 router.post("/branding/favicon", upload.single("file"), ctrl.uploadFavicon);
 router.post("/branding/og-image", upload.single("file"), ctrl.uploadOgImage);
+
+// 🇦🇷 Decoración estacional sobre el logo (GIF/PNG/MP4)
+router.post("/branding/holiday-overlay", uploadOverlay.single("file"), ctrl.uploadHolidayOverlay);
+router.delete("/branding/holiday-overlay", ctrl.removeHolidayOverlay);
 
 // Íconos custom de redes sociales (CRM email).
 router.get("/branding/social-icons", ctrl.listSocialIcons);

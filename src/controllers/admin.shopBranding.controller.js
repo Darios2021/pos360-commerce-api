@@ -18,15 +18,18 @@ function invalidateEmailBrandingCache() {
 // Se agregan idempotentemente. Si la columna ya existe MySQL devuelve
 // "Duplicate column name" — lo ignoramos.
 const EXTENDED_COLUMNS = [
-  ["address",          "VARCHAR(255) NULL"],
-  ["maps_url",         "VARCHAR(512) NULL"],
-  ["phone_display",    "VARCHAR(60) NULL"],
-  ["whatsapp_display", "VARCHAR(60) NULL"],
-  ["business_hours",   "VARCHAR(255) NULL"],
-  ["tagline",          "VARCHAR(255) NULL"],
-  ["accent_color",     "VARCHAR(20) NULL"],
-  ["bg_color",         "VARCHAR(20) NULL"],
-  ["footer_note",      "VARCHAR(512) NULL"],
+  ["address",            "VARCHAR(255) NULL"],
+  ["maps_url",           "VARCHAR(512) NULL"],
+  ["phone_display",      "VARCHAR(60) NULL"],
+  ["whatsapp_display",   "VARCHAR(60) NULL"],
+  ["business_hours",     "VARCHAR(255) NULL"],
+  ["tagline",            "VARCHAR(255) NULL"],
+  ["accent_color",       "VARCHAR(20) NULL"],
+  ["bg_color",           "VARCHAR(20) NULL"],
+  ["footer_note",        "VARCHAR(512) NULL"],
+  // Decoración estacional sobre el logo (gorrito argentino, navidad, etc.)
+  // Acepta GIF/PNG/MP4. Si está NULL, no se muestra nada.
+  ["holiday_overlay_url", "VARCHAR(512) NULL"],
 ];
 
 let _extendedColumnsEnsured = false;
@@ -165,6 +168,53 @@ async function uploadFavicon(req, res, next) {
       replacements: [up.url],
     });
 
+    const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
+    return res.json({ ok: true, item: rows?.[0] || null });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+// 🇦🇷 Decoración estacional sobre el logo. Acepta GIF/PNG/JPG/WebP/MP4/WebM/MOV.
+async function uploadHolidayOverlay(req, res, next) {
+  try {
+    await ensureRow();
+
+    const file = req.file;
+    if (!file) {
+      return res
+        .status(400)
+        .json({ ok: false, code: "FILE_REQUIRED", message: "Falta el archivo (file)." });
+    }
+
+    const up = await uploadShopAsset({ file, kind: "holiday-overlay" });
+
+    await sequelize.query(
+      `UPDATE shop_branding SET holiday_overlay_url=?, updated_at=NOW() WHERE id=1`,
+      { replacements: [up.url] }
+    );
+
+    invalidateEmailBrandingCache();
+
+    const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
+    return res.json({ ok: true, item: rows?.[0] || null });
+  } catch (e) {
+    if (e?.statusCode) {
+      return res
+        .status(e.statusCode)
+        .json({ ok: false, code: "VALIDATION", message: e.message });
+    }
+    return next(e);
+  }
+}
+
+async function removeHolidayOverlay(req, res, next) {
+  try {
+    await ensureRow();
+    await sequelize.query(
+      `UPDATE shop_branding SET holiday_overlay_url=NULL, updated_at=NOW() WHERE id=1`
+    );
+    invalidateEmailBrandingCache();
     const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
     return res.json({ ok: true, item: rows?.[0] || null });
   } catch (e) {
@@ -335,6 +385,8 @@ module.exports = {
   uploadLogo,
   uploadFavicon,
   uploadOgImage,
+  uploadHolidayOverlay,
+  removeHolidayOverlay,
   listSocialIcons,
   uploadSocialIcon,
   deleteSocialIcon,

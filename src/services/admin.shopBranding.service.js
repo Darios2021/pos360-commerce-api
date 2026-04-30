@@ -30,8 +30,28 @@ function extFromMime(mime) {
   if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
   if (m.includes("webp")) return "webp";
   if (m.includes("svg")) return "svg";
+  if (m.includes("gif")) return "gif";
   if (m.includes("x-icon") || m.includes("ico")) return "ico";
+  if (m.includes("mp4")) return "mp4";
+  if (m.includes("webm")) return "webm";
+  if (m.includes("quicktime") || m.includes("mov")) return "mov";
   return "bin";
+}
+
+// Mime-types aceptados para holiday-overlay: imagen estática, GIF animado o video corto.
+const HOLIDAY_OVERLAY_ALLOWED_MIMES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+];
+
+function isAllowedHolidayOverlayMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  return HOLIDAY_OVERLAY_ALLOWED_MIMES.includes(m);
 }
 
 async function putObject({ key, buffer, contentType, cacheControl }) {
@@ -108,6 +128,17 @@ async function uploadShopAsset({ file, kind }) {
   } else if (safeKind === "logo") {
     const ext = extFromMime(file.mimetype);
     key = `shop/${ts}-logo.${ext}`; // versionado
+  } else if (safeKind === "holiday-overlay") {
+    if (!isAllowedHolidayOverlayMime(file.mimetype)) {
+      const e = new Error(
+        "HOLIDAY_OVERLAY_INVALID_MIME: Aceptamos PNG, JPG, WebP, GIF, MP4, WebM o MOV."
+      );
+      e.statusCode = 400;
+      throw e;
+    }
+    const ext = extFromMime(file.mimetype);
+    key = `shop/${ts}-holiday.${ext}`; // versionado para evitar caché
+    cacheControl = "public, max-age=86400"; // 1 día (más cortito porque es seasonal)
   } else {
     const ext = extFromMime(file.mimetype);
     key = `shop/${ts}-asset.${ext}`;
@@ -117,4 +148,4 @@ async function uploadShopAsset({ file, kind }) {
   return { url: up.url, key: up.key, contentType: up.contentType };
 }
 
-module.exports = { uploadShopAsset };
+module.exports = { uploadShopAsset, HOLIDAY_OVERLAY_ALLOWED_MIMES };

@@ -55,11 +55,12 @@ async function ensureRow() {
 async function getRow() {
   await ensureRow();
 
-  // Selección compatible (si no existe og_image_url, no lo pedimos)
+  // Selección compatible: pedimos los campos en cascada y caemos si falta alguno
   try {
+    // Versión más nueva (con holiday_overlay_url)
     const [rows] = await sequelize.query(
       `
-      SELECT id, name, logo_url, favicon_url, og_image_url, updated_at
+      SELECT id, name, logo_url, favicon_url, og_image_url, holiday_overlay_url, updated_at
       FROM shop_branding
       WHERE id = 1
       LIMIT 1
@@ -67,15 +68,29 @@ async function getRow() {
     );
     return rows?.[0] || null;
   } catch (_) {
-    const [rows] = await sequelize.query(
-      `
-      SELECT id, name, logo_url, favicon_url, updated_at
-      FROM shop_branding
-      WHERE id = 1
-      LIMIT 1
-      `
-    );
-    return rows?.[0] || null;
+    try {
+      // Versión intermedia (con og_image_url)
+      const [rows] = await sequelize.query(
+        `
+        SELECT id, name, logo_url, favicon_url, og_image_url, updated_at
+        FROM shop_branding
+        WHERE id = 1
+        LIMIT 1
+        `
+      );
+      return rows?.[0] || null;
+    } catch (_) {
+      // Versión vieja (sin og_image_url)
+      const [rows] = await sequelize.query(
+        `
+        SELECT id, name, logo_url, favicon_url, updated_at
+        FROM shop_branding
+        WHERE id = 1
+        LIMIT 1
+        `
+      );
+      return rows?.[0] || null;
+    }
   }
 }
 
