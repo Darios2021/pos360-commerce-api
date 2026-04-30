@@ -216,6 +216,9 @@ const publicAccountRoutes = loadRoute("./public.account.routes", { optional: tru
 // ✅ videos públicos por producto (GET /public/products/:id/videos)
 const publicProductVideosRoutes = loadRoute("./publicProductVideos.routes", { optional: false });
 
+// ✅ Q&A + Reviews del shop público (GET/POST /public/products/:id/questions y /reviews)
+const publicProductSocialRoutes = loadRoute("./public.productSocial.routes", { optional: true });
+
 // ✅ videos feed global (GET /public/videos/feed)
 const publicVideosFeedRoutes = loadRoute("./publicVideosFeed.routes", { optional: true });
 
@@ -309,6 +312,9 @@ if (publicAccountRoutes) safeUse("/public/account", publicAccountRoutes);
 
 // Videos públicos por producto
 safeUse("/public", publicProductVideosRoutes);
+
+// ✅ Q&A + Reviews del shop público (montado bajo /public/products/:id/...)
+if (publicProductSocialRoutes) safeUse("/public/products", publicProductSocialRoutes);
 
 // Videos feed global para Home
 if (publicVideosFeedRoutes) safeUse("/public", publicVideosFeedRoutes);
