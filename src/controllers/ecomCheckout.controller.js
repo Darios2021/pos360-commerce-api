@@ -945,9 +945,13 @@ async function checkout(req, res) {
       });
     }
 
-    // Notificación a Telegram: distinguimos "Reserva" (pickup) vs "Compra"
-    // (delivery). Fire-and-forget — nunca debe romper la respuesta al cliente.
-    if (result?.order?.id) {
+    // Notificación a Telegram al crear la orden.
+    //   - MercadoPago (cualquier fulfillment): NO se notifica acá. Esperamos
+    //     a que MP confirme via webhook → ahí dispara shop_payment_confirmed.
+    //     Esto evita avisos prematuros si el cliente abandona el checkout.
+    //   - Pickup + transferencia/efectivo/seller → "Nueva reserva".
+    //   - Delivery + transferencia/efectivo/seller → "Nueva compra".
+    if (result?.order?.id && provider !== "mercadopago") {
       notifyShopOrderCreated({
         order: result.order,
         fulfillment_type,

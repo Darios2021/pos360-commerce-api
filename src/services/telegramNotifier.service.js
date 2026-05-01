@@ -150,6 +150,7 @@ async function ensureTables() {
       alert_stock_big_adjust TINYINT(1) NOT NULL DEFAULT 0,
       alert_shop_new_order TINYINT(1) NOT NULL DEFAULT 0,
       alert_shop_new_reservation TINYINT(1) NOT NULL DEFAULT 0,
+      alert_shop_payment_confirmed TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_dispatched TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_pending TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_received TINYINT(1) NOT NULL DEFAULT 1,
@@ -195,6 +196,7 @@ async function ensureTables() {
     { name: "alert_cash_closed",           ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_promo_change",          ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_shop_new_reservation",  ddl: "TINYINT(1) NOT NULL DEFAULT 0" },
+    { name: "alert_shop_payment_confirmed",ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
   ];
   for (const c of newCols) {
     try {
@@ -236,6 +238,7 @@ async function saveConfig(patch = {}) {
     "alert_cash_overtime", "alert_cash_big_out",
     "alert_stock_zero", "alert_stock_low", "alert_stock_negative",
     "alert_stock_big_adjust", "alert_shop_new_order", "alert_shop_new_reservation",
+    "alert_shop_payment_confirmed",
     "alert_transfer_dispatched", "alert_transfer_pending", "alert_transfer_received",
     "alert_promo_change",
     "thresholds",

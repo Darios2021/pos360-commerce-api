@@ -22,6 +22,31 @@
 const crypto = require("crypto");
 const { sequelize } = require("../models");
 
+// ---- Migración idempotente: stock_restored en ecom_orders ----
+// Permite restauración de stock idempotente cuando MP rechaza/cancela.
+// Se ejecuta UNA sola vez por proceso (lazy).
+let stockRestoredColumnReady = false;
+async function ensureStockRestoredColumn() {
+  if (stockRestoredColumnReady) return;
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'ecom_orders'
+         AND COLUMN_NAME = 'stock_restored'`
+    );
+    const exists = Number(rows?.[0]?.n || 0) > 0;
+    if (!exists) {
+      await sequelize.query(
+        `ALTER TABLE ecom_orders ADD COLUMN stock_restored TINYINT(1) NOT NULL DEFAULT 0`
+      );
+    }
+    stockRestoredColumnReady = true;
+  } catch (e) {
+    console.warn("[mpWebhook] migración stock_restored falló:", e?.message);
+  }
+}
+
 function reqId() {
   return crypto.randomBytes(8).toString("hex");
 }
@@ -340,6 +365,107 @@ async function updatePaymentAndOrder({ paymentRow, mp, merchantOrderId, localPay
     localPayStatus,
     orderPaymentStatus,
   });
+
+  // ---- (post-update) Restauración de stock para pagos no aprobados ----
+  // Idempotente: usamos la columna `stock_restored` como flag — sólo
+  // restauramos si stock_restored = 0 y luego lo seteamos en 1.
+  // Esto cubre rejected / cancelled / refunded / chargeback. Para refunded /
+  // chargeback el stock vuelve disponible para vender (ya nadie está pagándolo).
+  const STATUSES_RESTORE_STOCK = new Set([
+    "rejected",
+    "cancelled",
+    "refunded",
+    "chargeback",
+  ]);
+
+  if (STATUSES_RESTORE_STOCK.has(toStr(localPayStatus).toLowerCase())) {
+    try {
+      await restoreOrderStock({ order_id, rid, t });
+    } catch (e) {
+      log(rid, "restoreOrderStock falló", { order_id, error: e?.message || e });
+    }
+  }
+}
+
+/**
+ * Restaura el stock de una orden cuando el pago NO fue aprobado.
+ * Idempotente: el flag `stock_restored` evita doble restauración.
+ *
+ * Pasos:
+ *  1) SELECT FOR UPDATE de ecom_orders por order_id.
+ *  2) Si stock_restored = 1 → skip silencioso.
+ *  3) Resolver warehouse desde branch_id (mismo branch que se usó al
+ *     descontar — pickup_branch_id para pickup, branch_id para delivery).
+ *  4) Por cada ecom_order_items con producto track_stock=true,
+ *     sumar la qty al stock_balances correspondiente.
+ *  5) Marcar stock_restored = 1.
+ */
+async function restoreOrderStock({ order_id, rid, t }) {
+  const [orderRows] = await sequelize.query(
+    `SELECT id, branch_id, fulfillment_type, stock_restored
+       FROM ecom_orders
+      WHERE id = :id
+      FOR UPDATE`,
+    { replacements: { id: order_id }, transaction: t }
+  );
+  const order = orderRows?.[0];
+  if (!order) {
+    log(rid, "restoreOrderStock: orden no encontrada", { order_id });
+    return;
+  }
+  if (Number(order.stock_restored) === 1) {
+    log(rid, "restoreOrderStock: ya restaurado, skip", { order_id });
+    return;
+  }
+
+  // Para pickup el stock se descontó en la sucursal de retiro
+  // (branch_id_for_order ya guardado en ecom_orders.branch_id).
+  const stock_branch_id = Number(order.branch_id) || 0;
+  if (!stock_branch_id) {
+    log(rid, "restoreOrderStock: sin branch_id, skip", { order_id });
+    return;
+  }
+
+  const [whRows] = await sequelize.query(
+    `SELECT id FROM warehouses WHERE branch_id = :bid AND is_active = 1 ORDER BY id ASC LIMIT 1`,
+    { replacements: { bid: stock_branch_id }, transaction: t }
+  );
+  const warehouse_id = whRows?.[0]?.id ? Number(whRows[0].id) : 0;
+  if (!warehouse_id) {
+    log(rid, "restoreOrderStock: sin warehouse, skip", { order_id, branch_id: stock_branch_id });
+    return;
+  }
+
+  // Sólo productos con track_stock = true (mismo filtro del checkout)
+  const [items] = await sequelize.query(
+    `SELECT oi.product_id, oi.qty
+       FROM ecom_order_items oi
+       JOIN products p ON p.id = oi.product_id
+      WHERE oi.order_id = :id AND p.track_stock = 1`,
+    { replacements: { id: order_id }, transaction: t }
+  );
+
+  for (const it of items || []) {
+    const pid = Number(it.product_id);
+    const qty = Number(it.qty);
+    if (!pid || !(qty > 0)) continue;
+
+    await sequelize.query(
+      `UPDATE stock_balances SET qty = qty + :qty WHERE warehouse_id = :wid AND product_id = :pid`,
+      { replacements: { qty, wid: warehouse_id, pid }, transaction: t }
+    );
+  }
+
+  await sequelize.query(
+    `UPDATE ecom_orders SET stock_restored = 1, updated_at = CURRENT_TIMESTAMP WHERE id = :id`,
+    { replacements: { id: order_id }, transaction: t }
+  );
+
+  log(rid, "stock restaurado", {
+    order_id,
+    warehouse_id,
+    items_count: items?.length || 0,
+  });
 }
 
 async function mercadopagoWebhook(req, res) {
@@ -399,6 +525,10 @@ async function mercadopagoWebhook(req, res) {
   if (!topic || !id) {
     return res.status(200).json({ ok: true, rid, ignored: true });
   }
+
+  // Asegurar columna stock_restored antes de cualquier transacción
+  // (idempotente — sólo corre la primera vez por proceso).
+  await ensureStockRestoredColumn();
 
   try {
     let mpPayment = null;
@@ -462,6 +592,18 @@ async function mercadopagoWebhook(req, res) {
       };
     });
 
+    // Post-commit: si MP aprobó la compra, disparar alerta Telegram
+    // "Compra confirmada". Fire-and-forget — no rompe la respuesta.
+    if (out?.updated && out?.localPayStatus === "approved" && out?.order_id) {
+      notifyShopPaymentConfirmed({
+        order_id: out.order_id,
+        mpPayment,
+        rid,
+      }).catch((e) =>
+        log(rid, "notifyShopPaymentConfirmed falló", { error: e?.message || e })
+      );
+    }
+
     return res.status(200).json(out);
   } catch (e) {
     log(rid, "ERROR", { message: e?.message || String(e), statusCode: e?.statusCode, payload: e?.payload || null });
@@ -474,6 +616,123 @@ async function mercadopagoWebhook(req, res) {
       message: "Error procesando webhook MercadoPago",
       detail: e?.payload || e?.detail || e?.message || String(e),
     });
+  }
+}
+
+/**
+ * Dispara alerta Telegram "Compra confirmada" cuando MP aprueba el pago.
+ * Fire-and-forget — nunca lanza, sólo loguea.
+ *
+ * Lee la orden + items + sucursal de la DB para construir el mensaje.
+ */
+async function notifyShopPaymentConfirmed({ order_id, mpPayment, rid }) {
+  try {
+    const tg = require("../services/telegramNotifier.service");
+
+    const [orderRows] = await sequelize.query(
+      `SELECT o.id, o.public_code, o.fulfillment_type, o.branch_id, o.total,
+              o.ship_address1, o.ship_city, o.ship_province,
+              b.name AS branch_name
+         FROM ecom_orders o
+         LEFT JOIN branches b ON b.id = o.branch_id
+        WHERE o.id = :id
+        LIMIT 1`,
+      { replacements: { id: order_id } }
+    );
+    const order = orderRows?.[0];
+    if (!order) return;
+
+    // Buyer info: viene en external_payload del payment, pero como
+    // fallback más confiable lo leemos del último payment de la orden.
+    let buyer_name = null,
+      buyer_email = null,
+      buyer_phone = null,
+      method_code = null;
+    try {
+      const [payRows] = await sequelize.query(
+        `SELECT external_payload, method
+           FROM ecom_payments
+          WHERE order_id = :id
+          ORDER BY id DESC LIMIT 1`,
+        { replacements: { id: order_id } }
+      );
+      const raw = payRows?.[0]?.external_payload;
+      method_code = payRows?.[0]?.method || null;
+      if (raw) {
+        const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+        buyer_name = payload?.buyer?.name || null;
+        buyer_email = payload?.buyer?.email || null;
+        buyer_phone = payload?.buyer?.phone || null;
+      }
+    } catch (_) {}
+
+    // Si no había buyer en payload, usar lo de MP
+    buyer_name = buyer_name || mpPayment?.payer?.first_name || mpPayment?.payer?.email || null;
+    buyer_email = buyer_email || mpPayment?.payer?.email || null;
+
+    const [items] = await sequelize.query(
+      `SELECT oi.product_id, oi.qty, p.name AS product_name
+         FROM ecom_order_items oi
+         LEFT JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = :id`,
+      { replacements: { id: order_id } }
+    );
+
+    const itemsCount = (items || []).reduce(
+      (acc, x) => acc + Number(x?.qty || 0),
+      0
+    );
+    const fmtMoney = (n) =>
+      `$ ${new Intl.NumberFormat("es-AR").format(Math.round(Number(n) || 0))}`;
+
+    const isPickup = String(order.fulfillment_type) === "pickup";
+
+    const lines = [
+      { k: "Pedido", v: order.public_code || `#${order.id}` },
+      { k: "Cliente", v: buyer_name || "—" },
+      { k: "Email", v: buyer_email || "—" },
+      buyer_phone ? { k: "Teléfono", v: buyer_phone } : null,
+      { k: "Total", v: fmtMoney(order.total) },
+      { k: "Items", v: String(itemsCount) },
+      {
+        k: "Tipo",
+        v: isPickup
+          ? `Retiro en sucursal${order.branch_name ? ` — ${order.branch_name}` : ""}`
+          : "Envío a domicilio",
+      },
+    ].filter(Boolean);
+
+    if (!isPickup) {
+      const addr = [order.ship_address1, order.ship_city, order.ship_province]
+        .filter(Boolean)
+        .join(", ");
+      if (addr) lines.push({ k: "Dirección", v: addr });
+    }
+
+    if (method_code) {
+      lines.push({ k: "Pago", v: `${method_code} (mercadopago)` });
+    } else {
+      lines.push({ k: "Pago", v: "mercadopago" });
+    }
+    if (mpPayment?.id) {
+      lines.push({ k: "MP ID", v: String(mpPayment.id) });
+    }
+
+    await tg.sendAlert({
+      code: "shop_payment_confirmed",
+      toggleKey: "alert_shop_payment_confirmed",
+      title: "Compra confirmada (MercadoPago)",
+      lines,
+      severity: "low",
+      reference_type: "ecom_order",
+      reference_id: order.id,
+      ref: order.public_code || null,
+    });
+  } catch (e) {
+    console.warn(
+      "[mpWebhook] notifyShopPaymentConfirmed falló:",
+      e?.message || e
+    );
   }
 }
 
