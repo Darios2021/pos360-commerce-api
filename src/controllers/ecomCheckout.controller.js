@@ -945,6 +945,23 @@ async function checkout(req, res) {
       });
     }
 
+    // Notificación a Telegram: distinguimos "Reserva" (pickup) vs "Compra"
+    // (delivery). Fire-and-forget — nunca debe romper la respuesta al cliente.
+    if (result?.order?.id) {
+      notifyShopOrderCreated({
+        order: result.order,
+        fulfillment_type,
+        provider,
+        method_code,
+        buyer_name,
+        buyer_email,
+        buyer_phone,
+        pickup_branch_id,
+        shipping,
+        items,
+      }).catch((e) => console.warn("[ecomCheckout] telegram notify falló:", e?.message));
+    }
+
     return res.json({ ok: true, request_id, ...result });
   } catch (e) {
     const detail =
@@ -963,6 +980,102 @@ async function checkout(req, res) {
       detail,
       request_id,
     });
+  }
+}
+
+/**
+ * Dispara una alerta de Telegram cuando se crea un pedido del shop.
+ * - pickup → "Nueva reserva" (toggle alert_shop_new_reservation)
+ * - delivery → "Nueva compra" (toggle alert_shop_new_order)
+ *
+ * Fire-and-forget: nunca lanza, sólo loguea en caso de error.
+ */
+async function notifyShopOrderCreated({
+  order,
+  fulfillment_type,
+  provider,
+  method_code,
+  buyer_name,
+  buyer_email,
+  buyer_phone,
+  pickup_branch_id,
+  shipping,
+  items,
+}) {
+  try {
+    const tg = require("../services/telegramNotifier.service");
+
+    const isReservation = fulfillment_type === "pickup";
+
+    // Buscar el nombre de la sucursal (mejor mensaje, no rompe si falla).
+    let branch_name = null;
+    if (isReservation && pickup_branch_id) {
+      try {
+        const [rows] = await sequelize.query(
+          `SELECT name FROM branches WHERE id = :id LIMIT 1`,
+          { replacements: { id: pickup_branch_id } }
+        );
+        branch_name = rows?.[0]?.name || null;
+      } catch (_) {}
+    }
+
+    const itemsCount = (items || []).reduce(
+      (acc, x) => acc + Number(x?.qty || 0),
+      0
+    );
+    const fmtMoney = (n) =>
+      `$ ${new Intl.NumberFormat("es-AR").format(Math.round(Number(n) || 0))}`;
+
+    const lines = [
+      { k: "Pedido", v: order.public_code || `#${order.id}` },
+      { k: "Cliente", v: buyer_name || "—" },
+      { k: "Email", v: buyer_email || "—" },
+      { k: "Teléfono", v: buyer_phone || "—" },
+      { k: "Total", v: fmtMoney(order.total) },
+      { k: "Items", v: String(itemsCount) },
+    ];
+
+    if (isReservation) {
+      lines.push({
+        k: "Tipo",
+        v: `Retiro en sucursal${branch_name ? ` — ${branch_name}` : ""}`,
+      });
+    } else {
+      lines.push({ k: "Tipo", v: "Envío a domicilio" });
+      const addr = [
+        shipping?.address1,
+        shipping?.city,
+        shipping?.province,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      if (addr) lines.push({ k: "Dirección", v: addr });
+    }
+
+    if (method_code) {
+      lines.push({
+        k: "Pago",
+        v: `${method_code}${provider ? ` (${provider})` : ""}`,
+      });
+    }
+
+    await tg.sendAlert({
+      code: isReservation ? "shop_new_reservation" : "shop_new_order",
+      toggleKey: isReservation
+        ? "alert_shop_new_reservation"
+        : "alert_shop_new_order",
+      title: isReservation ? "Nueva reserva" : "Nueva compra",
+      lines,
+      severity: "low",
+      reference_type: "ecom_order",
+      reference_id: order.id,
+      ref: order.public_code || null,
+    });
+  } catch (e) {
+    console.warn(
+      "[ecomCheckout] notifyShopOrderCreated falló:",
+      e?.message || e
+    );
   }
 }
 
