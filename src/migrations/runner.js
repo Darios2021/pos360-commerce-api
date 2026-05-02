@@ -176,6 +176,80 @@ async function tableExists(sequelize, table) {
   }
 }
 
+/**
+ * Asegura que exista un método de pago "Efectivo" activo.
+ * - Si hay un row con kind=CASH activo → no hace nada.
+ * - Si hay un row con kind=CASH inactivo → lo activa.
+ * - Si no hay ninguno → lo crea con defaults razonables (CASH, vuelto on,
+ *   counts_as_cash_in_register, sin recargos, todos los flujos habilitados).
+ *
+ * Esto previene que el POS quede sin método de pago en efectivo si
+ * alguien lo desactiva o borra accidentalmente.
+ */
+async function ensureCashPaymentMethod(sequelize) {
+  try {
+    // 1) Hay alguno activo?
+    const [activeRows] = await sequelize.query(
+      `SELECT id FROM payment_methods
+       WHERE UPPER(kind) = 'CASH' AND is_active = 1
+       LIMIT 1`
+    );
+    if (activeRows && activeRows.length) {
+      console.log(`ℹ️  [seed] Método CASH ya existe activo (id=${activeRows[0].id})`);
+      return;
+    }
+
+    // 2) Hay alguno inactivo? Activarlo.
+    const [inactiveRows] = await sequelize.query(
+      `SELECT id FROM payment_methods
+       WHERE UPPER(kind) = 'CASH'
+       ORDER BY id ASC LIMIT 1`
+    );
+    if (inactiveRows && inactiveRows.length) {
+      const id = inactiveRows[0].id;
+      await sequelize.query(
+        `UPDATE payment_methods SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = :id`,
+        { replacements: { id } }
+      );
+      console.log(`✅ [seed] Método CASH (id=${id}) reactivado`);
+      return;
+    }
+
+    // 3) No existe. Crear desde cero.
+    await sequelize.query(`
+      INSERT INTO payment_methods
+        (code, name, display_name, kind, provider_code,
+         is_active, is_default, is_system, is_featured,
+         sort_order, allow_mixed,
+         only_pos, only_ecom, only_backoffice,
+         allows_change, counts_as_cash_in_register, impacts_cash_register,
+         register_group, settlement_delay_days,
+         pricing_mode, surcharge_percent, surcharge_fixed_amount,
+         rounding_mode,
+         supports_installments, min_installments, max_installments, default_installments,
+         installment_pricing_mode, installment_surcharge_percent,
+         input_schema_json, meta,
+         created_at, updated_at)
+      VALUES
+        ('cash', 'Efectivo', 'Efectivo', 'CASH', 'cash',
+         1, 1, 1, 1,
+         10, 0,
+         0, 0, 0,
+         1, 1, 1,
+         'CASH', 0,
+         'SALE_PRICE', 0, 0,
+         'NONE',
+         0, 1, 1, 1,
+         'SAME_AS_BASE', 0,
+         '{"fields":[]}', '{}',
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+    console.log(`✅ [seed] Método "Efectivo" (CASH) creado de cero`);
+  } catch (e) {
+    console.warn(`⚠️  [seed] ensureCashPaymentMethod falló:`, e.message);
+  }
+}
+
 async function runStartupMigrations(sequelize) {
   // Tablas nuevas primero (las columnas pueden depender de FKs)
   for (const step of tableSteps) {
@@ -214,6 +288,9 @@ async function runStartupMigrations(sequelize) {
       }
     }
   }
+
+  // Data seeds idempotentes
+  await ensureCashPaymentMethod(sequelize);
 }
 
 module.exports = { runStartupMigrations };
