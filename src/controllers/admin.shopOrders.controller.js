@@ -644,6 +644,12 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
 
     const isPickup = String(order.fulfillment_type) === "pickup";
 
+    const adminBase =
+      toStr(process.env.ADMIN_BASE_URL) ||
+      toStr(process.env.PUBLIC_BASE_URL) ||
+      "https://sanjuantecnologia.com";
+    const adminUrl = `${adminBase.replace(/\/$/, "")}/app/admin/shop/orders/${order.id}`;
+
     const lines = [
       { k: "Pedido", v: order.public_code || `#${order.id}` },
       { k: "Cliente", v: buyer_name || order.ship_name || "—" },
@@ -658,6 +664,7 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
       },
       method_code ? { k: "Pago", v: method_code } : null,
       `\n<b>Productos:</b>\n${itemsSummary}${moreCount}`,
+      `\n<a href="${adminUrl}">🔧 Gestionar pedido en backoffice</a>`,
     ].filter(Boolean);
 
     await tg.sendAlert({

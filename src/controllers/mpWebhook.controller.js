@@ -594,6 +594,13 @@ async function notifyShopPaymentConfirmed({ order_id, mpPayment, rid }) {
       lines.push({ k: "MP ID", v: String(mpPayment.id) });
     }
 
+    const adminBase =
+      toStr(process.env.ADMIN_BASE_URL) ||
+      toStr(process.env.PUBLIC_BASE_URL) ||
+      "https://sanjuantecnologia.com";
+    const adminUrl = `${adminBase.replace(/\/$/, "")}/app/admin/shop/orders/${order.id}`;
+    lines.push(`\n<a href="${adminUrl}">🔧 Gestionar pedido en backoffice</a>`);
+
     await tg.sendAlert({
       code: "shop_payment_confirmed",
       toggleKey: "alert_shop_payment_confirmed",

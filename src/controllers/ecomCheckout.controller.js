@@ -1066,6 +1066,14 @@ async function notifyShopOrderCreated({
       lines.push(`\n<b>Productos:</b>\n${itemsSummary}${moreCount}`);
     }
 
+    // Link al detalle del pedido en el admin (clickeable desde Telegram)
+    const adminBase =
+      toStr(process.env.ADMIN_BASE_URL) ||
+      toStr(process.env.PUBLIC_BASE_URL) ||
+      "https://sanjuantecnologia.com";
+    const adminUrl = `${adminBase.replace(/\/$/, "")}/app/admin/shop/orders/${order.id}`;
+    lines.push(`\n<a href="${adminUrl}">🔧 Gestionar pedido en backoffice</a>`);
+
     // Para MP el evento dice "Reserva" porque el pago aún no se confirmó.
     // Cuando llega el webhook de MP aprobado, dispara otra alerta
     // shop_payment_confirmed que es la "compra real".
