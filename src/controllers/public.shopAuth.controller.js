@@ -7,6 +7,7 @@ const {
   clearShopSessionCookie,
   createShopSessionForCustomer,
   getShopCustomerFromRequest,
+  getSessionMaxAgeSeconds,
 } = require("../services/shopSession.service");
 const {
   findOrCreateCustomerByEmail,
@@ -85,7 +86,17 @@ async function loginGoogleIdToken(req, res) {
     const sessionToken = await createShopSessionForCustomer(req, customer.id);
     setShopSessionCookie(res, sessionToken);
 
-    return res.json({ customer: safeCustomer(customer) });
+    // Devolvemos el token también en el body para que la app móvil
+    // (Capacitor / iOS / Android) pueda persistirlo en almacenamiento
+    // seguro local (Preferences). Las cookies httpOnly NO son confiables
+    // entre cierres del WebView, por eso necesitamos un fallback Bearer.
+    return res.json({
+      customer: safeCustomer(customer),
+      session: {
+        token: sessionToken,
+        expires_in: getSessionMaxAgeSeconds(),
+      },
+    });
   } catch (e) {
     console.error("loginGoogleIdToken:", e?.message || e);
     return res.status(401).json({ error: "GOOGLE_AUTH_FAILED" });

@@ -63,8 +63,26 @@ async function createShopSessionForCustomer(req, customerId) {
   return token;
 }
 
+/**
+ * Extrae el token de sesión del request. Prioridad:
+ *  1. Cookie httpOnly `pos360_shop_session` (web standard).
+ *  2. Header `Authorization: Bearer <token>` (apps móviles que
+ *     persisten el token en almacenamiento seguro local —
+ *     Capacitor Preferences, etc. — porque las cookies httpOnly
+ *     no son confiables entre cierres del WebView).
+ */
+function extractShopSessionToken(req) {
+  const fromCookie = req.cookies?.[COOKIE];
+  if (fromCookie) return fromCookie;
+  const auth = String(req.headers?.authorization || "").trim();
+  if (/^Bearer\s+/i.test(auth)) {
+    return auth.replace(/^Bearer\s+/i, "").trim();
+  }
+  return null;
+}
+
 async function getShopCustomerFromRequest(req) {
-  const token = req.cookies?.[COOKIE];
+  const token = extractShopSessionToken(req);
   if (!token) return null;
 
   const tokenHash = sha256(token);
@@ -84,9 +102,19 @@ async function getShopCustomerFromRequest(req) {
   return await getCustomerById(sess.customer_id);
 }
 
+/**
+ * Devuelve los segundos hasta que expira la sesión, para que el cliente
+ * sepa cuánto puede confiar en el token guardado.
+ */
+function getSessionMaxAgeSeconds() {
+  return DAYS * 24 * 60 * 60;
+}
+
 module.exports = {
   setShopSessionCookie,
   clearShopSessionCookie,
   createShopSessionForCustomer,
   getShopCustomerFromRequest,
+  extractShopSessionToken,
+  getSessionMaxAgeSeconds,
 };
