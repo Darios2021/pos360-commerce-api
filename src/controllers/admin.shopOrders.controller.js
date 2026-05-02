@@ -563,10 +563,19 @@ async function updateStatus(req, res) {
       { replacements: { id: orderId } }
     );
 
-    // Disparar alerta Telegram "compra concretada" post-commit (fire-and-forget).
-    if (willCommitStock && commitResult?.reason === "committed") {
-      notifyShopOrderConfirmed({ order_id: orderId, new_status: next })
-        .catch((e) => console.warn("[admin.shopOrders] notify falló:", e?.message));
+    // Disparar alerta Telegram en CADA cambio de estado (fire-and-forget).
+    // Diferenciamos:
+    //  - processing/ready/delivered con stock recién descontado
+    //  - processing/ready/delivered sin descuento (ya estaba committed)
+    //  - cancelled
+    if (current.status !== next) {
+      const stockJustCommitted = !!(willCommitStock && commitResult?.reason === "committed");
+      notifyShopOrderStatusChanged({
+        order_id: orderId,
+        previous_status: current.status,
+        new_status: next,
+        stock_just_committed: stockJustCommitted,
+      }).catch((e) => console.warn("[admin.shopOrders] notify falló:", e?.message));
     }
 
     return res.json({
@@ -587,11 +596,35 @@ async function updateStatus(req, res) {
 }
 
 /**
- * Telegram: "Compra concretada" — se dispara cuando el operador marca
- * un pedido como processing/ready/delivered por primera vez (descuento
- * real de stock). Fire-and-forget.
+ * Mapea el nuevo status a un título + emoji + sufijo según el contexto.
+ * Si el stock acaba de descontarse en esta transición, se aclara
+ * para que el operador sepa que recién ahora "salió" del inventario.
  */
-async function notifyShopOrderConfirmed({ order_id, new_status }) {
+function statusToTitle(new_status, stock_just_committed) {
+  const s = String(new_status || "").toLowerCase();
+  const stockNote = stock_just_committed ? " — stock descontado" : "";
+  switch (s) {
+    case "processing":
+      return `📦 Pedido en preparación${stockNote}`;
+    case "ready":
+      return `✅ Pedido listo para retirar${stockNote}`;
+    case "delivered":
+      return `🎉 Pedido entregado al cliente${stockNote}`;
+    case "cancelled":
+      return "❌ Pedido cancelado";
+    case "created":
+      return "↩️ Pedido reabierto (volvió a creado)";
+    default:
+      return `🔔 Estado del pedido cambiado a "${new_status}"`;
+  }
+}
+
+/**
+ * Telegram: aviso en CADA cambio de estado de un pedido del shop.
+ * Fire-and-forget. El title varía según el status y si el stock
+ * se descontó en esta transición.
+ */
+async function notifyShopOrderStatusChanged({ order_id, previous_status, new_status, stock_just_committed }) {
   try {
     const tg = require("../services/telegramNotifier.service");
 
@@ -652,6 +685,7 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
 
     const lines = [
       { k: "Pedido", v: order.public_code || `#${order.id}` },
+      { k: "Estado", v: `${previous_status || "—"} → <b>${new_status}</b>` },
       { k: "Cliente", v: buyer_name || order.ship_name || "—" },
       buyer_email ? { k: "Email", v: buyer_email } : null,
       { k: "Teléfono", v: buyer_phone || order.ship_phone || "—" },
@@ -667,14 +701,20 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
       `\n<a href="${adminUrl}">🔧 Gestionar pedido en backoffice</a>`,
     ].filter(Boolean);
 
+    // Cancelaciones tienen severity media para que destaquen visualmente.
+    const isCancel = String(new_status).toLowerCase() === "cancelled";
+
     await tg.sendAlert({
-      code: "shop_order_confirmed",
-      toggleKey: "alert_shop_order_confirmed",
-      title: `📦 Pedido de tienda concretado (${new_status}) — stock descontado`,
+      code: "shop_order_status_changed",
+      toggleKey: "alert_shop_order_status_changed",
+      title: statusToTitle(new_status, stock_just_committed),
       lines,
-      severity: "low",
+      severity: isCancel ? "medium" : "low",
       reference_type: "ecom_order",
       reference_id: order.id,
+      // Permitir múltiples alertas para la misma orden (una por estado).
+      // Sin esto, dedupe bloquearía la 2da+ transición.
+      dedupe_key_extra: `status:${new_status}`,
       ref: order.public_code || null,
     });
   } catch (e) {

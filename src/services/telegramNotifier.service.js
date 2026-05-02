@@ -152,6 +152,7 @@ async function ensureTables() {
       alert_shop_new_reservation TINYINT(1) NOT NULL DEFAULT 1,
       alert_shop_payment_confirmed TINYINT(1) NOT NULL DEFAULT 1,
       alert_shop_order_confirmed TINYINT(1) NOT NULL DEFAULT 1,
+      alert_shop_order_status_changed TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_dispatched TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_pending TINYINT(1) NOT NULL DEFAULT 1,
       alert_transfer_received TINYINT(1) NOT NULL DEFAULT 1,
@@ -198,7 +199,8 @@ async function ensureTables() {
     { name: "alert_promo_change",          ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_shop_new_reservation",  ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "alert_shop_payment_confirmed",ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
-    { name: "alert_shop_order_confirmed",  ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_shop_order_confirmed",     ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "alert_shop_order_status_changed",ddl: "TINYINT(1) NOT NULL DEFAULT 1" },
   ];
   for (const c of newCols) {
     try {
@@ -241,6 +243,7 @@ async function saveConfig(patch = {}) {
     "alert_stock_zero", "alert_stock_low", "alert_stock_negative",
     "alert_stock_big_adjust", "alert_shop_new_order", "alert_shop_new_reservation",
     "alert_shop_payment_confirmed", "alert_shop_order_confirmed",
+    "alert_shop_order_status_changed",
     "alert_transfer_dispatched", "alert_transfer_pending", "alert_transfer_received",
     "alert_promo_change",
     "thresholds",
