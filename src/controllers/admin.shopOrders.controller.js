@@ -536,9 +536,10 @@ async function updateStatus(req, res) {
     const tsCol = tsColMap[next] || null;
 
     // ¿Esta transición concreta la compra (descuento real de stock)?
-    // Cuando pasa a "processing" o "ready" o "delivered" por primera vez
-    // (stock_committed === 0), descontamos stock dentro de la TX.
-    const COMMITS_STOCK = new Set(["processing", "ready", "delivered"]);
+    // SOLO al marcar "delivered" (entregado) descontamos stock —
+    // mientras está en preparación o listo, el inventario sigue
+    // intacto por si hay que cancelar antes de la entrega.
+    const COMMITS_STOCK = new Set(["delivered"]);
     const willCommitStock = COMMITS_STOCK.has(next) && Number(current.stock_committed) === 0;
 
     let commitResult = null;
@@ -564,17 +565,15 @@ async function updateStatus(req, res) {
     );
 
     // Disparar alerta Telegram en CADA cambio de estado (fire-and-forget).
-    // Diferenciamos:
-    //  - processing/ready/delivered con stock recién descontado
-    //  - processing/ready/delivered sin descuento (ya estaba committed)
-    //  - cancelled
     if (current.status !== next) {
       const stockJustCommitted = !!(willCommitStock && commitResult?.reason === "committed");
+      const actor = await resolveActor(req).catch(() => null);
       notifyShopOrderStatusChanged({
         order_id: orderId,
         previous_status: current.status,
         new_status: next,
         stock_just_committed: stockJustCommitted,
+        actor,
       }).catch((e) => console.warn("[admin.shopOrders] notify falló:", e?.message));
     }
 
@@ -624,7 +623,30 @@ function statusToTitle(new_status, stock_just_committed) {
  * Fire-and-forget. El title varía según el status y si el stock
  * se descontó en esta transición.
  */
-async function notifyShopOrderStatusChanged({ order_id, previous_status, new_status, stock_just_committed }) {
+/**
+ * Resuelve el usuario que está haciendo la acción a partir del JWT.
+ * Devuelve un string legible (Nombre Apellido / username / email / id).
+ * Si no se puede resolver, devuelve null y la alerta se manda sin la línea.
+ */
+async function resolveActor(req) {
+  const userId = req.user?.sub || req.user?.id;
+  if (!userId) return null;
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT id, username, first_name, last_name, email
+         FROM users WHERE id = :id LIMIT 1`,
+      { replacements: { id: Number(userId) } }
+    );
+    const u = rows?.[0];
+    if (!u) return null;
+    const fullName = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+    return fullName || u.username || u.email || `Usuario #${u.id}`;
+  } catch {
+    return null;
+  }
+}
+
+async function notifyShopOrderStatusChanged({ order_id, previous_status, new_status, stock_just_committed, actor }) {
   try {
     const tg = require("../services/telegramNotifier.service");
 
@@ -686,6 +708,7 @@ async function notifyShopOrderStatusChanged({ order_id, previous_status, new_sta
     const lines = [
       { k: "Pedido", v: order.public_code || `#${order.id}` },
       { k: "Estado", v: `${previous_status || "—"} → <b>${new_status}</b>` },
+      actor ? { k: "Operador", v: actor } : null,
       { k: "Cliente", v: buyer_name || order.ship_name || "—" },
       buyer_email ? { k: "Email", v: buyer_email } : null,
       { k: "Teléfono", v: buyer_phone || order.ship_phone || "—" },
