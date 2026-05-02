@@ -406,29 +406,38 @@ async function getOrderById(req, res) {
  *   queremos preservar la historia del pedido. Si hay que reabrir, mejor un
  *   endpoint distinto.
  */
-// Migración idempotente: stock_committed indica si el stock real ya fue
-// descontado para esta orden. ecomCheckout NO descuenta al crear; el
-// descuento ocurre cuando el operador "concreta" la compra desde admin.
-let stockCommittedColumnReady = false;
-async function ensureStockCommittedColumn() {
-  if (stockCommittedColumnReady) return;
-  try {
-    const [rows] = await sequelize.query(
-      `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE()
-         AND TABLE_NAME = 'ecom_orders'
-         AND COLUMN_NAME = 'stock_committed'`
-    );
-    const exists = Number(rows?.[0]?.n || 0) > 0;
-    if (!exists) {
-      await sequelize.query(
-        `ALTER TABLE ecom_orders ADD COLUMN stock_committed TINYINT(1) NOT NULL DEFAULT 0`
+// Migraciones idempotentes (sólo corren la primera vez por proceso).
+// - stock_committed: el descuento real ocurre al concretar (entregar).
+// - cancel_reason: motivo libre que el admin debe ingresar al cancelar.
+// - cancel_reason_by: email del operador que canceló (auditoría rápida).
+let columnsReady = false;
+async function ensureExtraColumns() {
+  if (columnsReady) return;
+  const cols = [
+    { name: "stock_committed",  ddl: "TINYINT(1) NOT NULL DEFAULT 0" },
+    { name: "cancel_reason",    ddl: "VARCHAR(500) NULL" },
+    { name: "cancel_reason_by", ddl: "VARCHAR(255) NULL" },
+  ];
+  for (const c of cols) {
+    try {
+      const [rows] = await sequelize.query(
+        `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = 'ecom_orders'
+           AND COLUMN_NAME = :name`,
+        { replacements: { name: c.name } }
       );
+      const exists = Number(rows?.[0]?.n || 0) > 0;
+      if (!exists) {
+        await sequelize.query(
+          `ALTER TABLE ecom_orders ADD COLUMN ${c.name} ${c.ddl}`
+        );
+      }
+    } catch (e) {
+      console.warn(`[admin.shopOrders] migración ${c.name} falló:`, e?.message);
     }
-    stockCommittedColumnReady = true;
-  } catch (e) {
-    console.warn("[admin.shopOrders] migración stock_committed falló:", e?.message);
   }
+  columnsReady = true;
 }
 
 /**
@@ -514,7 +523,23 @@ async function updateStatus(req, res) {
       });
     }
 
-    await ensureStockCommittedColumn();
+    await ensureExtraColumns();
+
+    // Cuando se cancela, exigir motivo no vacío. El operador siempre
+    // tiene que justificar por qué se anula un pedido (auditoría +
+    // mensaje claro al cliente cuando se le notifica).
+    let cancelReason = "";
+    if (next === "cancelled") {
+      cancelReason = String(req.body?.reason || req.body?.cancel_reason || "").trim();
+      if (cancelReason.length < 5) {
+        return res.status(400).json({
+          ok: false,
+          code: "MISSING_CANCEL_REASON",
+          message: "Para cancelar el pedido tenés que indicar un motivo (mín. 5 caracteres).",
+        });
+      }
+      if (cancelReason.length > 500) cancelReason = cancelReason.slice(0, 500);
+    }
 
     // Verificamos que el pedido exista
     const [rows] = await sequelize.query(
@@ -542,6 +567,10 @@ async function updateStatus(req, res) {
     const COMMITS_STOCK = new Set(["delivered"]);
     const willCommitStock = COMMITS_STOCK.has(next) && Number(current.stock_committed) === 0;
 
+    // Resolvemos el actor antes de la TX para poder loguearlo + enviarlo.
+    const actor = await resolveActor(req).catch(() => null);
+    const actorEmail = await resolveActorEmail(req).catch(() => null);
+
     let commitResult = null;
     await sequelize.transaction(async (t) => {
       if (willCommitStock) {
@@ -552,9 +581,15 @@ async function updateStatus(req, res) {
       if (tsCol) {
         setClause += `, ${tsCol} = COALESCE(${tsCol}, CURRENT_TIMESTAMP)`;
       }
+      const repl = { status: next, id: orderId };
+      if (next === "cancelled") {
+        setClause += `, cancel_reason = :cancel_reason, cancel_reason_by = :cancel_reason_by`;
+        repl.cancel_reason = cancelReason;
+        repl.cancel_reason_by = actorEmail || actor || null;
+      }
       await sequelize.query(
         `UPDATE ecom_orders SET ${setClause} WHERE id = :id`,
-        { replacements: { status: next, id: orderId }, transaction: t }
+        { replacements: repl, transaction: t }
       );
     });
 
@@ -567,13 +602,13 @@ async function updateStatus(req, res) {
     // Disparar alerta Telegram en CADA cambio de estado (fire-and-forget).
     if (current.status !== next) {
       const stockJustCommitted = !!(willCommitStock && commitResult?.reason === "committed");
-      const actor = await resolveActor(req).catch(() => null);
       notifyShopOrderStatusChanged({
         order_id: orderId,
         previous_status: current.status,
         new_status: next,
         stock_just_committed: stockJustCommitted,
         actor,
+        cancel_reason: next === "cancelled" ? cancelReason : null,
       }).catch((e) => console.warn("[admin.shopOrders] notify falló:", e?.message));
     }
 
@@ -646,7 +681,21 @@ async function resolveActor(req) {
   }
 }
 
-async function notifyShopOrderStatusChanged({ order_id, previous_status, new_status, stock_just_committed, actor }) {
+async function resolveActorEmail(req) {
+  const userId = req.user?.sub || req.user?.id;
+  if (!userId) return null;
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT email FROM users WHERE id = :id LIMIT 1`,
+      { replacements: { id: Number(userId) } }
+    );
+    return rows?.[0]?.email || null;
+  } catch {
+    return null;
+  }
+}
+
+async function notifyShopOrderStatusChanged({ order_id, previous_status, new_status, stock_just_committed, actor, cancel_reason }) {
   try {
     const tg = require("../services/telegramNotifier.service");
 
@@ -705,10 +754,17 @@ async function notifyShopOrderStatusChanged({ order_id, previous_status, new_sta
       "https://sanjuantecnologia.com";
     const adminUrl = `${adminBase.replace(/\/$/, "")}/app/admin/shop/orders/${order.id}`;
 
+    // Escape simple para el motivo (lo escribió el operador en libre):
+    const safeReason = String(cancel_reason || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
     const lines = [
       { k: "Pedido", v: order.public_code || `#${order.id}` },
       { k: "Estado", v: `${previous_status || "—"} → <b>${new_status}</b>` },
       actor ? { k: "Operador", v: actor } : null,
+      cancel_reason ? { k: "Motivo de cancelación", v: safeReason } : null,
       { k: "Cliente", v: buyer_name || order.ship_name || "—" },
       buyer_email ? { k: "Email", v: buyer_email } : null,
       { k: "Teléfono", v: buyer_phone || order.ship_phone || "—" },
