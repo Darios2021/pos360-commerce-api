@@ -22,31 +22,6 @@
 const crypto = require("crypto");
 const { sequelize } = require("../models");
 
-// ---- Migración idempotente: stock_restored en ecom_orders ----
-// Permite restauración de stock idempotente cuando MP rechaza/cancela.
-// Se ejecuta UNA sola vez por proceso (lazy).
-let stockRestoredColumnReady = false;
-async function ensureStockRestoredColumn() {
-  if (stockRestoredColumnReady) return;
-  try {
-    const [rows] = await sequelize.query(
-      `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE()
-         AND TABLE_NAME = 'ecom_orders'
-         AND COLUMN_NAME = 'stock_restored'`
-    );
-    const exists = Number(rows?.[0]?.n || 0) > 0;
-    if (!exists) {
-      await sequelize.query(
-        `ALTER TABLE ecom_orders ADD COLUMN stock_restored TINYINT(1) NOT NULL DEFAULT 0`
-      );
-    }
-    stockRestoredColumnReady = true;
-  } catch (e) {
-    console.warn("[mpWebhook] migración stock_restored falló:", e?.message);
-  }
-}
-
 function reqId() {
   return crypto.randomBytes(8).toString("hex");
 }
@@ -366,106 +341,11 @@ async function updatePaymentAndOrder({ paymentRow, mp, merchantOrderId, localPay
     orderPaymentStatus,
   });
 
-  // ---- (post-update) Restauración de stock para pagos no aprobados ----
-  // Idempotente: usamos la columna `stock_restored` como flag — sólo
-  // restauramos si stock_restored = 0 y luego lo seteamos en 1.
-  // Esto cubre rejected / cancelled / refunded / chargeback. Para refunded /
-  // chargeback el stock vuelve disponible para vender (ya nadie está pagándolo).
-  const STATUSES_RESTORE_STOCK = new Set([
-    "rejected",
-    "cancelled",
-    "refunded",
-    "chargeback",
-  ]);
-
-  if (STATUSES_RESTORE_STOCK.has(toStr(localPayStatus).toLowerCase())) {
-    try {
-      await restoreOrderStock({ order_id, rid, t });
-    } catch (e) {
-      log(rid, "restoreOrderStock falló", { order_id, error: e?.message || e });
-    }
-  }
-}
-
-/**
- * Restaura el stock de una orden cuando el pago NO fue aprobado.
- * Idempotente: el flag `stock_restored` evita doble restauración.
- *
- * Pasos:
- *  1) SELECT FOR UPDATE de ecom_orders por order_id.
- *  2) Si stock_restored = 1 → skip silencioso.
- *  3) Resolver warehouse desde branch_id (mismo branch que se usó al
- *     descontar — pickup_branch_id para pickup, branch_id para delivery).
- *  4) Por cada ecom_order_items con producto track_stock=true,
- *     sumar la qty al stock_balances correspondiente.
- *  5) Marcar stock_restored = 1.
- */
-async function restoreOrderStock({ order_id, rid, t }) {
-  const [orderRows] = await sequelize.query(
-    `SELECT id, branch_id, fulfillment_type, stock_restored
-       FROM ecom_orders
-      WHERE id = :id
-      FOR UPDATE`,
-    { replacements: { id: order_id }, transaction: t }
-  );
-  const order = orderRows?.[0];
-  if (!order) {
-    log(rid, "restoreOrderStock: orden no encontrada", { order_id });
-    return;
-  }
-  if (Number(order.stock_restored) === 1) {
-    log(rid, "restoreOrderStock: ya restaurado, skip", { order_id });
-    return;
-  }
-
-  // Para pickup el stock se descontó en la sucursal de retiro
-  // (branch_id_for_order ya guardado en ecom_orders.branch_id).
-  const stock_branch_id = Number(order.branch_id) || 0;
-  if (!stock_branch_id) {
-    log(rid, "restoreOrderStock: sin branch_id, skip", { order_id });
-    return;
-  }
-
-  const [whRows] = await sequelize.query(
-    `SELECT id FROM warehouses WHERE branch_id = :bid AND is_active = 1 ORDER BY id ASC LIMIT 1`,
-    { replacements: { bid: stock_branch_id }, transaction: t }
-  );
-  const warehouse_id = whRows?.[0]?.id ? Number(whRows[0].id) : 0;
-  if (!warehouse_id) {
-    log(rid, "restoreOrderStock: sin warehouse, skip", { order_id, branch_id: stock_branch_id });
-    return;
-  }
-
-  // Sólo productos con track_stock = true (mismo filtro del checkout)
-  const [items] = await sequelize.query(
-    `SELECT oi.product_id, oi.qty
-       FROM ecom_order_items oi
-       JOIN products p ON p.id = oi.product_id
-      WHERE oi.order_id = :id AND p.track_stock = 1`,
-    { replacements: { id: order_id }, transaction: t }
-  );
-
-  for (const it of items || []) {
-    const pid = Number(it.product_id);
-    const qty = Number(it.qty);
-    if (!pid || !(qty > 0)) continue;
-
-    await sequelize.query(
-      `UPDATE stock_balances SET qty = qty + :qty WHERE warehouse_id = :wid AND product_id = :pid`,
-      { replacements: { qty, wid: warehouse_id, pid }, transaction: t }
-    );
-  }
-
-  await sequelize.query(
-    `UPDATE ecom_orders SET stock_restored = 1, updated_at = CURRENT_TIMESTAMP WHERE id = :id`,
-    { replacements: { id: order_id }, transaction: t }
-  );
-
-  log(rid, "stock restaurado", {
-    order_id,
-    warehouse_id,
-    items_count: items?.length || 0,
-  });
+  // NOTA: ya no restauramos stock acá. Como ecomCheckout no descuenta
+  // al crear la orden (lo hace el admin al "Concretar pedido" desde
+  // back office), no hay nada que restaurar si MP rechaza/cancela.
+  // Si el admin ya concretó y después MP rechaza, el operador debe
+  // hacer la nota de crédito manualmente.
 }
 
 async function mercadopagoWebhook(req, res) {
@@ -525,10 +405,6 @@ async function mercadopagoWebhook(req, res) {
   if (!topic || !id) {
     return res.status(200).json({ ok: true, rid, ignored: true });
   }
-
-  // Asegurar columna stock_restored antes de cualquier transacción
-  // (idempotente — sólo corre la primera vez por proceso).
-  await ensureStockRestoredColumn();
 
   try {
     let mpPayment = null;

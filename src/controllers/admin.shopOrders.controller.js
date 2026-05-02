@@ -406,6 +406,98 @@ async function getOrderById(req, res) {
  *   queremos preservar la historia del pedido. Si hay que reabrir, mejor un
  *   endpoint distinto.
  */
+// Migración idempotente: stock_committed indica si el stock real ya fue
+// descontado para esta orden. ecomCheckout NO descuenta al crear; el
+// descuento ocurre cuando el operador "concreta" la compra desde admin.
+let stockCommittedColumnReady = false;
+async function ensureStockCommittedColumn() {
+  if (stockCommittedColumnReady) return;
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'ecom_orders'
+         AND COLUMN_NAME = 'stock_committed'`
+    );
+    const exists = Number(rows?.[0]?.n || 0) > 0;
+    if (!exists) {
+      await sequelize.query(
+        `ALTER TABLE ecom_orders ADD COLUMN stock_committed TINYINT(1) NOT NULL DEFAULT 0`
+      );
+    }
+    stockCommittedColumnReady = true;
+  } catch (e) {
+    console.warn("[admin.shopOrders] migración stock_committed falló:", e?.message);
+  }
+}
+
+/**
+ * Descuento de stock idempotente al concretar el pedido.
+ * - Toma el branch_id de la orden y resuelve el warehouse activo.
+ * - Solo productos con track_stock = 1.
+ * - Marca stock_committed = 1 para evitar doble descuento.
+ * - Si la orden ya tenía stock_committed = 1, no toca nada.
+ */
+async function commitOrderStock({ order_id, t }) {
+  const [orderRows] = await sequelize.query(
+    `SELECT id, branch_id, stock_committed
+       FROM ecom_orders
+      WHERE id = :id
+      FOR UPDATE`,
+    { replacements: { id: order_id }, transaction: t }
+  );
+  const order = orderRows?.[0];
+  if (!order) return { ok: false, reason: "not_found" };
+  if (Number(order.stock_committed) === 1) return { ok: true, reason: "already_committed" };
+
+  const branch_id = Number(order.branch_id) || 0;
+  if (!branch_id) {
+    await sequelize.query(
+      `UPDATE ecom_orders SET stock_committed = 1, updated_at = CURRENT_TIMESTAMP WHERE id = :id`,
+      { replacements: { id: order_id }, transaction: t }
+    );
+    return { ok: true, reason: "no_branch" };
+  }
+
+  const [whRows] = await sequelize.query(
+    `SELECT id FROM warehouses WHERE branch_id = :bid AND is_active = 1 ORDER BY id ASC LIMIT 1`,
+    { replacements: { bid: branch_id }, transaction: t }
+  );
+  const warehouse_id = whRows?.[0]?.id ? Number(whRows[0].id) : 0;
+  if (!warehouse_id) {
+    await sequelize.query(
+      `UPDATE ecom_orders SET stock_committed = 1, updated_at = CURRENT_TIMESTAMP WHERE id = :id`,
+      { replacements: { id: order_id }, transaction: t }
+    );
+    return { ok: true, reason: "no_warehouse" };
+  }
+
+  const [items] = await sequelize.query(
+    `SELECT oi.product_id, oi.qty, p.name AS product_name
+       FROM ecom_order_items oi
+       JOIN products p ON p.id = oi.product_id
+      WHERE oi.order_id = :id AND p.track_stock = 1`,
+    { replacements: { id: order_id }, transaction: t }
+  );
+
+  for (const it of items || []) {
+    const pid = Number(it.product_id);
+    const qty = Number(it.qty);
+    if (!pid || !(qty > 0)) continue;
+    await sequelize.query(
+      `UPDATE stock_balances SET qty = qty - :qty WHERE warehouse_id = :wid AND product_id = :pid`,
+      { replacements: { qty, wid: warehouse_id, pid }, transaction: t }
+    );
+  }
+
+  await sequelize.query(
+    `UPDATE ecom_orders SET stock_committed = 1, updated_at = CURRENT_TIMESTAMP WHERE id = :id`,
+    { replacements: { id: order_id }, transaction: t }
+  );
+
+  return { ok: true, reason: "committed", items_count: items?.length || 0, warehouse_id };
+}
+
 async function updateStatus(req, res) {
   try {
     const orderId = toInt(req.params.id, 0);
@@ -422,9 +514,11 @@ async function updateStatus(req, res) {
       });
     }
 
+    await ensureStockCommittedColumn();
+
     // Verificamos que el pedido exista
     const [rows] = await sequelize.query(
-      `SELECT id, status FROM ecom_orders WHERE id = :id LIMIT 1`,
+      `SELECT id, status, stock_committed FROM ecom_orders WHERE id = :id LIMIT 1`,
       { replacements: { id: orderId } }
     );
     const current = rows?.[0];
@@ -441,17 +535,27 @@ async function updateStatus(req, res) {
     };
     const tsCol = tsColMap[next] || null;
 
-    // Construir UPDATE dinámico
-    let setClause = `status = :status, updated_at = CURRENT_TIMESTAMP`;
-    if (tsCol) {
-      // COALESCE: solo setea si estaba NULL (preserva el primer marcado).
-      setClause += `, ${tsCol} = COALESCE(${tsCol}, CURRENT_TIMESTAMP)`;
-    }
+    // ¿Esta transición concreta la compra (descuento real de stock)?
+    // Cuando pasa a "processing" o "ready" o "delivered" por primera vez
+    // (stock_committed === 0), descontamos stock dentro de la TX.
+    const COMMITS_STOCK = new Set(["processing", "ready", "delivered"]);
+    const willCommitStock = COMMITS_STOCK.has(next) && Number(current.stock_committed) === 0;
 
-    await sequelize.query(
-      `UPDATE ecom_orders SET ${setClause} WHERE id = :id`,
-      { replacements: { status: next, id: orderId } }
-    );
+    let commitResult = null;
+    await sequelize.transaction(async (t) => {
+      if (willCommitStock) {
+        commitResult = await commitOrderStock({ order_id: orderId, t });
+      }
+
+      let setClause = `status = :status, updated_at = CURRENT_TIMESTAMP`;
+      if (tsCol) {
+        setClause += `, ${tsCol} = COALESCE(${tsCol}, CURRENT_TIMESTAMP)`;
+      }
+      await sequelize.query(
+        `UPDATE ecom_orders SET ${setClause} WHERE id = :id`,
+        { replacements: { status: next, id: orderId }, transaction: t }
+      );
+    });
 
     // Devolvemos el order actualizado para que el admin refresque su UI.
     const [updatedRows] = await sequelize.query(
@@ -459,11 +563,18 @@ async function updateStatus(req, res) {
       { replacements: { id: orderId } }
     );
 
+    // Disparar alerta Telegram "compra concretada" post-commit (fire-and-forget).
+    if (willCommitStock && commitResult?.reason === "committed") {
+      notifyShopOrderConfirmed({ order_id: orderId, new_status: next })
+        .catch((e) => console.warn("[admin.shopOrders] notify falló:", e?.message));
+    }
+
     return res.json({
       ok: true,
       order: updatedRows?.[0] || null,
       previous_status: current.status,
       new_status: next,
+      stock_commit: commitResult,
     });
   } catch (e) {
     console.error("❌ updateStatus error:", e);
@@ -472,6 +583,95 @@ async function updateStatus(req, res) {
       message: "Error actualizando estado.",
       detail: e?.message || String(e),
     });
+  }
+}
+
+/**
+ * Telegram: "Compra concretada" — se dispara cuando el operador marca
+ * un pedido como processing/ready/delivered por primera vez (descuento
+ * real de stock). Fire-and-forget.
+ */
+async function notifyShopOrderConfirmed({ order_id, new_status }) {
+  try {
+    const tg = require("../services/telegramNotifier.service");
+
+    const [orderRows] = await sequelize.query(
+      `SELECT o.id, o.public_code, o.fulfillment_type, o.branch_id, o.total,
+              o.ship_address1, o.ship_city, o.ship_province,
+              o.ship_name, o.ship_phone,
+              b.name AS branch_name
+         FROM ecom_orders o
+         LEFT JOIN branches b ON b.id = o.branch_id
+        WHERE o.id = :id LIMIT 1`,
+      { replacements: { id: order_id } }
+    );
+    const order = orderRows?.[0];
+    if (!order) return;
+
+    let buyer_name = null, buyer_email = null, buyer_phone = null, method_code = null;
+    try {
+      const [payRows] = await sequelize.query(
+        `SELECT external_payload, method
+           FROM ecom_payments WHERE order_id = :id ORDER BY id DESC LIMIT 1`,
+        { replacements: { id: order_id } }
+      );
+      const raw = payRows?.[0]?.external_payload;
+      method_code = payRows?.[0]?.method || null;
+      if (raw) {
+        const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+        buyer_name = payload?.buyer?.name || null;
+        buyer_email = payload?.buyer?.email || null;
+        buyer_phone = payload?.buyer?.phone || null;
+      }
+    } catch (_) {}
+
+    const [items] = await sequelize.query(
+      `SELECT oi.qty, p.name AS product_name
+         FROM ecom_order_items oi
+         LEFT JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = :id`,
+      { replacements: { id: order_id } }
+    );
+
+    const fmtMoney = (n) =>
+      `$ ${new Intl.NumberFormat("es-AR").format(Math.round(Number(n) || 0))}`;
+
+    const itemsSummary = (items || [])
+      .slice(0, 5)
+      .map((x) => `• ${x.qty}× ${x.product_name || "Producto"}`)
+      .join("\n");
+    const moreCount = (items?.length || 0) > 5 ? `\n• +${items.length - 5} más…` : "";
+
+    const isPickup = String(order.fulfillment_type) === "pickup";
+
+    const lines = [
+      { k: "Pedido", v: order.public_code || `#${order.id}` },
+      { k: "Cliente", v: buyer_name || order.ship_name || "—" },
+      buyer_email ? { k: "Email", v: buyer_email } : null,
+      { k: "Teléfono", v: buyer_phone || order.ship_phone || "—" },
+      { k: "Total", v: fmtMoney(order.total) },
+      {
+        k: "Tipo",
+        v: isPickup
+          ? `Retiro en sucursal${order.branch_name ? ` — ${order.branch_name}` : ""}`
+          : `Envío — ${[order.ship_address1, order.ship_city, order.ship_province].filter(Boolean).join(", ") || "—"}`,
+      },
+      method_code ? { k: "Pago", v: method_code } : null,
+      `\n<b>Productos:</b>\n${itemsSummary}${moreCount}`,
+    ].filter(Boolean);
+
+    await tg.sendAlert({
+      code: "shop_order_confirmed",
+      toggleKey: "alert_shop_order_confirmed",
+      title: `Compra concretada — stock descontado (${new_status})`,
+      lines,
+      severity: "low",
+      reference_type: "ecom_order",
+      reference_id: order.id,
+      ref: order.public_code || null,
+    });
+  } catch (e) {
+    console.warn("[admin.shopOrders] notifyShopOrderConfirmed falló:", e?.message || e);
   }
 }
 

@@ -741,39 +741,16 @@ async function checkout(req, res) {
         );
       }
 
-      // ---- (D') Descontar stock — FIX #3 (2026-04-22) ----
-      if (stock_warehouse_id && stockNeeds.length) {
-        let __tg = null;
-        try { __tg = require("../services/stockNotifyHelper"); } catch (_) {}
-        for (const sn of stockNeeds) {
-          // Capturar prev antes del UPDATE para alertas de stock.
-          let __prevQty = 0;
-          try {
-            const [r] = await sequelize.query(
-              `SELECT qty FROM stock_balances WHERE warehouse_id = :wid AND product_id = :pid`,
-              { replacements: { wid: stock_warehouse_id, pid: sn.product_id }, transaction: t }
-            );
-            __prevQty = Number(r?.[0]?.qty || 0);
-          } catch (_) {}
-
-          await sequelize.query(
-            `UPDATE stock_balances SET qty = qty - :qty WHERE warehouse_id = :wid AND product_id = :pid`,
-            { replacements: { qty: sn.qty, wid: stock_warehouse_id, pid: sn.product_id }, transaction: t }
-          );
-
-          // Alertas Telegram (fire-and-forget post-commit).
-          if (__tg?.trackStockChangeRaw) {
-            await __tg.trackStockChangeRaw({
-              warehouse_id: stock_warehouse_id,
-              product_id: sn.product_id,
-              prev: __prevQty,
-              qty: -Number(sn.qty || 0),
-              t,
-              source: "ecom_checkout",
-            });
-          }
-        }
-      }
+      // ---- (D') Stock: NO se descuenta al crear el pedido ----
+      // El cliente reserva online; el stock_balances queda intacto hasta
+      // que el operador "concrete" la compra desde el back office
+      // (admin.shopOrders.controller → confirmOrder), recién ahí se
+      // descuenta. Esto evita perder stock por checkouts abandonados o
+      // pagos rechazados, y obliga a una validación humana antes de
+      // mover inventario real.
+      //
+      // La validación de stock SÍ se hace en fase B' arriba (FOR UPDATE)
+      // para que un usuario nunca pueda reservar más de lo disponible.
 
       // ---- (E) Insert payment (NO MP) ----
       if (provider !== "mercadopago") {
@@ -953,13 +930,12 @@ async function checkout(req, res) {
       });
     }
 
-    // Notificación a Telegram al crear la orden.
-    //   - MercadoPago (cualquier fulfillment): NO se notifica acá. Esperamos
-    //     a que MP confirme via webhook → ahí dispara shop_payment_confirmed.
-    //     Esto evita avisos prematuros si el cliente abandona el checkout.
-    //   - Pickup + transferencia/efectivo/seller → "Nueva reserva".
-    //   - Delivery + transferencia/efectivo/seller → "Nueva compra".
-    if (result?.order?.id && provider !== "mercadopago") {
+    // Notificación a Telegram al crear la orden — dispara SIEMPRE.
+    // El operador necesita saber que un cliente reservó/compró, sin
+    // importar el medio de pago. Si después MP confirma, dispara también
+    // shop_payment_confirmed desde el webhook. Si el admin "concreta" el
+    // pedido desde back office, dispara shop_order_confirmed.
+    if (result?.order?.id) {
       notifyShopOrderCreated({
         order: result.order,
         fulfillment_type,
@@ -1031,12 +1007,32 @@ async function notifyShopOrderCreated({
       } catch (_) {}
     }
 
-    const itemsCount = (items || []).reduce(
-      (acc, x) => acc + Number(x?.qty || 0),
-      0
-    );
+    // Resolver nombres de productos para el mensaje (los items que viene
+    // en el closure traen product_id pero no name). Hacemos un join ad-hoc.
+    let itemsWithNames = [];
+    try {
+      const productIds = (items || []).map((x) => Number(x?.product_id || 0)).filter((n) => n > 0);
+      if (productIds.length) {
+        const [rows] = await sequelize.query(
+          `SELECT id, name FROM products WHERE id IN (:ids)`,
+          { replacements: { ids: productIds } }
+        );
+        const nameById = new Map(rows.map((r) => [Number(r.id), String(r.name || "")]));
+        itemsWithNames = (items || []).map((x) => ({
+          qty: Number(x?.qty || 0),
+          name: nameById.get(Number(x?.product_id)) || `Producto #${x?.product_id}`,
+        }));
+      }
+    } catch (_) {}
+
     const fmtMoney = (n) =>
       `$ ${new Intl.NumberFormat("es-AR").format(Math.round(Number(n) || 0))}`;
+
+    const itemsSummary = itemsWithNames
+      .slice(0, 5)
+      .map((x) => `• ${x.qty}× ${x.name}`)
+      .join("\n");
+    const moreCount = itemsWithNames.length > 5 ? `\n• +${itemsWithNames.length - 5} más…` : "";
 
     const lines = [
       { k: "Pedido", v: order.public_code || `#${order.id}` },
@@ -1044,7 +1040,6 @@ async function notifyShopOrderCreated({
       { k: "Email", v: buyer_email || "—" },
       { k: "Teléfono", v: buyer_phone || "—" },
       { k: "Total", v: fmtMoney(order.total) },
-      { k: "Items", v: String(itemsCount) },
     ];
 
     if (isReservation) {
@@ -1054,11 +1049,7 @@ async function notifyShopOrderCreated({
       });
     } else {
       lines.push({ k: "Tipo", v: "Envío a domicilio" });
-      const addr = [
-        shipping?.address1,
-        shipping?.city,
-        shipping?.province,
-      ]
+      const addr = [shipping?.address1, shipping?.city, shipping?.province]
         .filter(Boolean)
         .join(", ");
       if (addr) lines.push({ k: "Dirección", v: addr });
@@ -1066,17 +1057,27 @@ async function notifyShopOrderCreated({
 
     if (method_code) {
       lines.push({
-        k: "Pago",
-        v: `${method_code}${provider ? ` (${provider})` : ""}`,
+        k: "Medio de pago",
+        v: `${method_code}${provider && provider !== method_code ? ` (${provider})` : ""}`,
       });
     }
+
+    if (itemsSummary) {
+      lines.push(`\n<b>Productos:</b>\n${itemsSummary}${moreCount}`);
+    }
+
+    // Para MP el evento dice "Reserva" porque el pago aún no se confirmó.
+    // Cuando llega el webhook de MP aprobado, dispara otra alerta
+    // shop_payment_confirmed que es la "compra real".
+    const isPendingPayment = String(provider || "").toLowerCase() === "mercadopago";
+    const titleSuffix = isPendingPayment ? " (pendiente de pago)" : "";
 
     await tg.sendAlert({
       code: isReservation ? "shop_new_reservation" : "shop_new_order",
       toggleKey: isReservation
         ? "alert_shop_new_reservation"
         : "alert_shop_new_order",
-      title: isReservation ? "Nueva reserva" : "Nueva compra",
+      title: (isReservation ? "Nueva reserva" : "Nueva compra") + titleSuffix,
       lines,
       severity: "low",
       reference_type: "ecom_order",
