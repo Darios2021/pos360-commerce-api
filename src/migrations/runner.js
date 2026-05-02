@@ -177,6 +177,38 @@ async function tableExists(sequelize, table) {
 }
 
 /**
+ * Define el orden visual de los métodos principales en el selector POS:
+ *   1. Mercado Pago (kind=QR / MERCADOPAGO)  → sort_order=10
+ *   2. Efectivo (kind=CASH)                  → sort_order=20
+ *   El resto (tarjetas, crédito SJT) mantiene su sort_order actual
+ *   (default 100) y aparece después.
+ *
+ * Idempotente: corre cada vez que arranca el server y solo actualiza
+ * los valores que ya están en su lugar. Si el operador cambia el
+ * sort_order desde el admin, este seed lo va a pisar al próximo boot
+ * — si querés overridear, ajustá los números acá.
+ */
+async function ensurePosMethodsOrder(sequelize) {
+  try {
+    await sequelize.query(`
+      UPDATE payment_methods
+         SET sort_order = 10, updated_at = CURRENT_TIMESTAMP
+       WHERE UPPER(kind) IN ('QR', 'MERCADOPAGO', 'MERCADO_PAGO')
+         AND sort_order <> 10
+    `);
+    await sequelize.query(`
+      UPDATE payment_methods
+         SET sort_order = 20, updated_at = CURRENT_TIMESTAMP
+       WHERE UPPER(kind) = 'CASH'
+         AND sort_order <> 20
+    `);
+    console.log("ℹ️  [seed] sort_order normalizado: MP=10, CASH=20");
+  } catch (e) {
+    console.warn("⚠️  [seed] ensurePosMethodsOrder falló:", e.message);
+  }
+}
+
+/**
  * Asegura que exista un método de pago "Efectivo" activo.
  * - Si hay un row con kind=CASH activo → no hace nada.
  * - Si hay un row con kind=CASH inactivo → lo activa.
@@ -233,7 +265,7 @@ async function ensureCashPaymentMethod(sequelize) {
       VALUES
         ('cash', 'Efectivo', 'Efectivo', 'CASH', 'cash',
          1, 1, 1, 1,
-         10, 0,
+         20, 0,
          0, 0, 0,
          1, 1, 1,
          'CASH', 0,
@@ -291,6 +323,7 @@ async function runStartupMigrations(sequelize) {
 
   // Data seeds idempotentes
   await ensureCashPaymentMethod(sequelize);
+  await ensurePosMethodsOrder(sequelize);
 }
 
 module.exports = { runStartupMigrations };
