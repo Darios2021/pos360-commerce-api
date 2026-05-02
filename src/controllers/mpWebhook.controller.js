@@ -478,6 +478,11 @@ async function mercadopagoWebhook(req, res) {
       }).catch((e) =>
         log(rid, "notifyShopPaymentConfirmed falló", { error: e?.message || e })
       );
+
+      // Notificación in-app al cliente: "tu pago se acreditó"
+      notifyCustomerPaymentApproved(out.order_id).catch((e) =>
+        log(rid, "notifyCustomerPaymentApproved falló", { error: e?.message || e })
+      );
     }
 
     return res.status(200).json(out);
@@ -614,6 +619,33 @@ async function notifyShopPaymentConfirmed({ order_id, mpPayment, rid }) {
       "[mpWebhook] notifyShopPaymentConfirmed falló:",
       e?.message || e
     );
+  }
+}
+
+/**
+ * Notificación in-app al cliente cuando MP aprueba el pago.
+ */
+async function notifyCustomerPaymentApproved(order_id) {
+  try {
+    const customerNotifs = require("../services/customerNotifications.service");
+    const [rows] = await sequelize.query(
+      `SELECT id, customer_id, public_code FROM ecom_orders WHERE id = :id LIMIT 1`,
+      { replacements: { id: order_id } }
+    );
+    const order = rows?.[0];
+    if (!order || !order.customer_id) return;
+    const code = order.public_code || `#${order.id}`;
+    await customerNotifs.create({
+      customer_id: order.customer_id,
+      type: "payment_approved",
+      title: "¡Pago aprobado!",
+      body: `Recibimos tu pago del pedido ${code}. Ya estamos preparando todo.`,
+      ref_type: "ecom_order",
+      ref_id: order.id,
+      link: `/shop/account/orders`,
+    });
+  } catch (e) {
+    console.warn("[mpWebhook] notifyCustomerPaymentApproved falló:", e?.message);
   }
 }
 

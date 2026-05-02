@@ -222,6 +222,9 @@ const publicProductSocialRoutes = loadRoute("./public.productSocial.routes", { o
 // ✅ videos feed global (GET /public/videos/feed)
 const publicVideosFeedRoutes = loadRoute("./publicVideosFeed.routes", { optional: true });
 
+// ✅ Notificaciones del cliente (centro de notificaciones in-app)
+const publicNotificationsRoutes = loadRoute("./public.notifications.routes", { optional: true });
+
 // ✅ THEME (public)
 const publicThemeRoutes = loadRoute("./publicTheme.routes", { optional: true });
 
@@ -310,6 +313,9 @@ safeUse("/public", publicShopAuthRoutes);
 // ✅ MY ACCOUNT
 // Monta /api/v1/public/account/* (orders + favorites)
 if (publicAccountRoutes) safeUse("/public/account", publicAccountRoutes);
+
+// ✅ NOTIFICATIONS — centro de notificaciones del cliente
+if (publicNotificationsRoutes) safeUse("/public", publicNotificationsRoutes);
 
 // Videos públicos por producto
 safeUse("/public", publicProductVideosRoutes);

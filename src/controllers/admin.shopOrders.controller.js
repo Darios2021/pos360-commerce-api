@@ -610,6 +610,13 @@ async function updateStatus(req, res) {
         actor,
         cancel_reason: next === "cancelled" ? cancelReason : null,
       }).catch((e) => console.warn("[admin.shopOrders] notify falló:", e?.message));
+
+      // Notificación in-app para el cliente del pedido
+      notifyCustomerOrderStatusChanged({
+        order_id: orderId,
+        new_status: next,
+        cancel_reason: next === "cancelled" ? cancelReason : null,
+      }).catch((e) => console.warn("[admin.shopOrders] customer notify falló:", e?.message));
     }
 
     return res.json({
@@ -825,8 +832,69 @@ function formatPaymentLabel(method_code, fulfillment_type) {
   }
 }
 
+/**
+ * Notificación in-app para el cliente cuando cambia el estado del pedido.
+ * Mensaje amigable (sin jerga interna). Fire-and-forget.
+ */
+async function notifyCustomerOrderStatusChanged({ order_id, new_status, cancel_reason }) {
+  try {
+    const customerNotifs = require("../services/customerNotifications.service");
+    const [orderRows] = await sequelize.query(
+      `SELECT id, customer_id, public_code, fulfillment_type, branch_id
+         FROM ecom_orders WHERE id = :id LIMIT 1`,
+      { replacements: { id: order_id } }
+    );
+    const order = orderRows?.[0];
+    if (!order || !order.customer_id) return;
+
+    const status = String(new_status || "").toLowerCase();
+    const code = order.public_code || `#${order.id}`;
+    let title = "";
+    let body = "";
+
+    switch (status) {
+      case "processing":
+        title = "Tu pedido está en preparación";
+        body = `Estamos preparando tu pedido ${code}. Te avisamos cuando esté listo.`;
+        break;
+      case "ready":
+        title = "Tu pedido está listo";
+        body = order.fulfillment_type === "pickup"
+          ? `Pasá a retirar tu pedido ${code} por la sucursal.`
+          : `Tu pedido ${code} está listo para ser despachado.`;
+        break;
+      case "delivered":
+        title = "¡Pedido entregado!";
+        body = `Recibimos la entrega de tu pedido ${code}. Gracias por tu compra.`;
+        break;
+      case "cancelled":
+        title = "Tu pedido fue cancelado";
+        body = cancel_reason
+          ? `Cancelamos el pedido ${code}. Motivo: ${cancel_reason}`
+          : `Cancelamos tu pedido ${code}. Si tenés dudas, contactanos.`;
+        break;
+      default:
+        title = `Estado del pedido actualizado`;
+        body = `El pedido ${code} está en estado: ${new_status}`;
+    }
+
+    await customerNotifs.create({
+      customer_id: order.customer_id,
+      type: `order_${status}`,
+      title,
+      body,
+      ref_type: "ecom_order",
+      ref_id: order.id,
+      link: `/shop/account/orders`,
+    });
+  } catch (e) {
+    console.warn("[admin.shopOrders] notifyCustomerOrderStatusChanged falló:", e?.message);
+  }
+}
+
 module.exports = {
   listOrders,
   getOrderById,
   updateStatus,
+  notifyCustomerOrderStatusChanged,
 };
