@@ -195,9 +195,13 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
   const base = String(publicBaseUrl || "").replace(/\/$/, "");
   if (!base) throw new Error("PUBLIC_BASE_URL_MISSING");
 
+  // Las 3 back_urls apuntan a /shop/checkout/success — el SPA sólo
+  // tiene esa ruta. La página detecta el status real via los query
+  // params que MP appendea (collection_status, payment_id, etc.) y
+  // muestra la UI correcta (aprobado / pendiente / rechazado).
   const success = `${base}/shop/checkout/success?order=${order.public_code}`;
-  const pending = `${base}/shop/checkout/pending?order=${order.public_code}`;
-  const failure = `${base}/shop/checkout/failure?order=${order.public_code}`;
+  const pending = `${base}/shop/checkout/success?order=${order.public_code}&mp_state=pending`;
+  const failure = `${base}/shop/checkout/success?order=${order.public_code}&mp_state=failure`;
 
   const mpItems = (items || []).map((it) => ({
     title: String(it.product_name || `Producto #${it.product_id}`),
@@ -223,7 +227,11 @@ async function createMpPreference({ accessToken, publicBaseUrl, notificationUrl,
     },
     items: mpItems,
     back_urls: { success, pending, failure },
-    auto_return: "approved",
+    // "all" en lugar de "approved" para que MP también redirija cuando
+    // el pago queda pending/rejected. Si dejamos "approved" y el cliente
+    // abandona o el pago queda pending, MP usa el store_url configurado
+    // en la app (que apunta a /shop) y se pierde el contexto del pedido.
+    auto_return: "all",
     notification_url: notificationUrl || `${base}/api/v1/webhooks/mercadopago`,
   };
 
