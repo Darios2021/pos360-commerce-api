@@ -604,7 +604,7 @@ async function notifyShopPaymentConfirmed({ order_id, mpPayment, rid }) {
     await tg.sendAlert({
       code: "shop_payment_confirmed",
       toggleKey: "alert_shop_payment_confirmed",
-      title: "Compra confirmada (MercadoPago)",
+      title: "✅ Pago de tienda confirmado (Mercado Pago)",
       lines,
       severity: "low",
       reference_type: "ecom_order",

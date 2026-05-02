@@ -670,7 +670,7 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
     await tg.sendAlert({
       code: "shop_order_confirmed",
       toggleKey: "alert_shop_order_confirmed",
-      title: `Compra concretada — stock descontado (${new_status})`,
+      title: `📦 Pedido de tienda concretado (${new_status}) — stock descontado`,
       lines,
       severity: "low",
       reference_type: "ecom_order",

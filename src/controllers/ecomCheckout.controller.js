@@ -1074,18 +1074,20 @@ async function notifyShopOrderCreated({
     const adminUrl = `${adminBase.replace(/\/$/, "")}/app/admin/shop/orders/${order.id}`;
     lines.push(`\n<a href="${adminUrl}">🔧 Gestionar pedido en backoffice</a>`);
 
-    // Para MP el evento dice "Reserva" porque el pago aún no se confirmó.
-    // Cuando llega el webhook de MP aprobado, dispara otra alerta
-    // shop_payment_confirmed que es la "compra real".
+    // Para MP el evento aclara que está pendiente de pago: la
+    // "compra real" llega cuando el webhook MP aprueba.
     const isPendingPayment = String(provider || "").toLowerCase() === "mercadopago";
-    const titleSuffix = isPendingPayment ? " (pendiente de pago)" : "";
+    const titleSuffix = isPendingPayment ? " — pendiente de Mercado Pago" : "";
 
     await tg.sendAlert({
       code: isReservation ? "shop_new_reservation" : "shop_new_order",
       toggleKey: isReservation
         ? "alert_shop_new_reservation"
         : "alert_shop_new_order",
-      title: (isReservation ? "Nueva reserva" : "Nueva compra") + titleSuffix,
+      title:
+        (isReservation
+          ? "🛍️ Reserva desde tienda online"
+          : "🛍️ Compra desde tienda online") + titleSuffix,
       lines,
       severity: "low",
       reference_type: "ecom_order",
