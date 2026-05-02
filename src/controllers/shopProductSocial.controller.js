@@ -126,6 +126,15 @@ async function createQuestion(req, res, next) {
       }
     );
 
+    // Aviso por Telegram al admin (fire-and-forget) — así sabe que
+    // tiene una pregunta nueva esperando respuesta.
+    notifyAdminNewQuestion({
+      question_id: Number(insertedId || 0),
+      product_id: productId,
+      customer,
+      text,
+    }).catch((e) => console.warn("[shopProductSocial] notifyAdmin falló:", e?.message));
+
     return res.status(201).json({
       ok: true,
       question: {
@@ -368,6 +377,50 @@ async function createReview(req, res, next) {
     });
   } catch (e) {
     next(e);
+  }
+}
+
+/**
+ * Avisa al admin via Telegram cuando un cliente hace una pregunta
+ * nueva en un producto. Fire-and-forget. Toggle:
+ * alert_shop_new_question (default ON via service).
+ */
+async function notifyAdminNewQuestion({ question_id, product_id, customer, text }) {
+  try {
+    const tg = require("../services/telegramNotifier.service");
+    const [rows] = await db.sequelize.query(
+      `SELECT name FROM products WHERE id = :id LIMIT 1`,
+      { replacements: { id: product_id } }
+    );
+    const productName = rows?.[0]?.name || `Producto #${product_id}`;
+    const buyerName = [customer?.first_name, customer?.last_name].filter(Boolean).join(" ").trim()
+      || customer?.email || "Cliente";
+
+    const adminBase =
+      String(process.env.ADMIN_BASE_URL || "").trim() ||
+      String(process.env.PUBLIC_BASE_URL || "").trim() ||
+      "https://sanjuantecnologia.com";
+    const adminUrl = `${adminBase.replace(/\/$/, "")}/app/admin/shop/qa`;
+
+    const lines = [
+      { k: "Producto", v: productName },
+      { k: "Cliente", v: buyerName },
+      customer?.email ? { k: "Email", v: customer.email } : null,
+      `\n<b>Pregunta:</b>\n${String(text || "").slice(0, 400)}`,
+      `\n<a href="${adminUrl}">📝 Responder en backoffice</a>`,
+    ].filter(Boolean);
+
+    await tg.sendAlert({
+      code: "shop_new_question",
+      toggleKey: "alert_shop_new_question",
+      title: "❓ Nueva pregunta en producto",
+      lines,
+      severity: "low",
+      reference_type: "product_question",
+      reference_id: question_id,
+    });
+  } catch (e) {
+    console.warn("[shopProductSocial] notifyAdminNewQuestion:", e?.message);
   }
 }
 

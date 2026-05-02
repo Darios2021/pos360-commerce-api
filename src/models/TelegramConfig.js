@@ -32,6 +32,7 @@ module.exports = (sequelize, DataTypes) => {
       alert_shop_payment_confirmed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_shop_order_confirmed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_shop_order_status_changed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+      alert_shop_new_question: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_transfer_dispatched: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_transfer_pending: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       alert_transfer_received: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },

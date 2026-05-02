@@ -146,9 +146,65 @@ async function answerQuestion(req, res, next) {
       { replacements: { id, answer, uid: adminUserId } }
     );
 
+    // Notificación in-app al cliente que hizo la pregunta (fire-and-forget).
+    notifyCustomerQuestionAnswered(id, answer).catch((e) =>
+      console.warn("[admin.shopQA] notifyCustomerQuestionAnswered falló:", e?.message)
+    );
+
     return res.json({ ok: true });
   } catch (e) {
     next(e);
+  }
+}
+
+/**
+ * Notifica al cliente que su pregunta fue respondida. Genera una entrada
+ * en customer_notifications que aparece en la campanita del shop.
+ */
+async function notifyCustomerQuestionAnswered(questionId, answerText) {
+  try {
+    const customerNotifs = require("../services/customerNotifications.service");
+    const buildSlug = (() => {
+      try {
+        // Reusar el helper del frontend no se puede; replicamos slug simple.
+        return (name, id) => {
+          const base = String(name || "")
+            .toLowerCase()
+            .normalize("NFD").replace(/[̀-ͯ]/g, "")
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "");
+          return base ? `${base}-${id}` : String(id);
+        };
+      } catch { return (_, id) => String(id); }
+    })();
+
+    const [rows] = await db.sequelize.query(
+      `SELECT q.id AS question_id, q.customer_id, q.text AS question_text,
+              p.id AS product_id, p.name AS product_name
+         FROM product_questions q
+         LEFT JOIN products p ON p.id = q.product_id
+        WHERE q.id = :id LIMIT 1`,
+      { replacements: { id: questionId } }
+    );
+    const r = rows?.[0];
+    if (!r || !r.customer_id) return;
+
+    const productName = String(r.product_name || "tu producto").trim();
+    const slug = buildSlug(productName, r.product_id);
+    const link = `/shop/product/${slug}`;
+    const shortAnswer = String(answerText || "").trim().slice(0, 220);
+
+    await customerNotifs.create({
+      customer_id: r.customer_id,
+      type: "qa_answered",
+      title: `Te respondieron en ${productName}`,
+      body: shortAnswer,
+      ref_type: "product_question",
+      ref_id: r.question_id,
+      link,
+    });
+  } catch (e) {
+    console.warn("[admin.shopQA] notifyCustomerQuestionAnswered:", e?.message);
   }
 }
 
@@ -186,6 +242,13 @@ async function patchQuestion(req, res, next) {
       `UPDATE product_questions SET ${fields.join(", ")} WHERE id = :id`,
       { replacements: repl }
     );
+
+    // Si en este PATCH se setea answer (no vacío), también notificamos.
+    if (repl.ans) {
+      notifyCustomerQuestionAnswered(id, repl.ans).catch((e) =>
+        console.warn("[admin.shopQA] notifyCustomerQuestionAnswered (patch) falló:", e?.message)
+      );
+    }
 
     return res.json({ ok: true });
   } catch (e) {
