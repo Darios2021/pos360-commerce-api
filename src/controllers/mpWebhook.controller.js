@@ -585,11 +585,9 @@ async function notifyShopPaymentConfirmed({ order_id, mpPayment, rid }) {
       if (addr) lines.push({ k: "Dirección", v: addr });
     }
 
-    if (method_code) {
-      lines.push({ k: "Pago", v: `${method_code} (mercadopago)` });
-    } else {
-      lines.push({ k: "Pago", v: "mercadopago" });
-    }
+    // En el webhook MP, el método siempre es Mercado Pago aunque el
+    // method_code pueda venir como "credit_card" / "debit_card" desde MP.
+    lines.push({ k: "Medio de pago", v: "Mercado Pago" });
     if (mpPayment?.id) {
       lines.push({ k: "MP ID", v: String(mpPayment.id) });
     }

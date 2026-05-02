@@ -662,7 +662,7 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
           ? `Retiro en sucursal${order.branch_name ? ` — ${order.branch_name}` : ""}`
           : `Envío — ${[order.ship_address1, order.ship_city, order.ship_province].filter(Boolean).join(", ") || "—"}`,
       },
-      method_code ? { k: "Pago", v: method_code } : null,
+      method_code ? { k: "Medio de pago", v: formatPaymentLabel(method_code, order.fulfillment_type) } : null,
       `\n<b>Productos:</b>\n${itemsSummary}${moreCount}`,
       `\n<a href="${adminUrl}">🔧 Gestionar pedido en backoffice</a>`,
     ].filter(Boolean);
@@ -679,6 +679,30 @@ async function notifyShopOrderConfirmed({ order_id, new_status }) {
     });
   } catch (e) {
     console.warn("[admin.shopOrders] notifyShopOrderConfirmed falló:", e?.message || e);
+  }
+}
+
+/**
+ * Convierte method_code en una etiqueta humana en español, contextualizada
+ * según fulfillment_type (cash + pickup → "Efectivo (paga en sucursal al
+ * retirar)" vs cash + delivery → "Efectivo (paga al recibir el envío)").
+ */
+function formatPaymentLabel(method_code, fulfillment_type) {
+  const code = String(method_code || "").toLowerCase();
+  const isPickup = String(fulfillment_type || "") === "pickup";
+  switch (code) {
+    case "cash":
+      return isPickup
+        ? "Efectivo (paga en sucursal al retirar)"
+        : "Efectivo (paga al recibir el envío)";
+    case "transfer": return "Transferencia bancaria";
+    case "mercadopago":
+    case "mercado_pago": return "Mercado Pago";
+    case "credit_sjt": return "Crédito San Juan Tecnología (gestiona en sucursal)";
+    case "seller":
+    case "agree": return "Acuerda con el vendedor";
+    case "": return "";
+    default: return method_code;
   }
 }
 

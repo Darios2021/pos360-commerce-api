@@ -1055,11 +1055,9 @@ async function notifyShopOrderCreated({
       if (addr) lines.push({ k: "Dirección", v: addr });
     }
 
-    if (method_code) {
-      lines.push({
-        k: "Medio de pago",
-        v: `${method_code}${provider && provider !== method_code ? ` (${provider})` : ""}`,
-      });
+    const paymentLabel = formatPaymentLabel(method_code, fulfillment_type);
+    if (paymentLabel) {
+      lines.push({ k: "Medio de pago", v: paymentLabel });
     }
 
     if (itemsSummary) {
@@ -1099,6 +1097,37 @@ async function notifyShopOrderCreated({
       "[ecomCheckout] notifyShopOrderCreated falló:",
       e?.message || e
     );
+  }
+}
+
+/**
+ * Convierte method_code (cash/transfer/mercadopago/credit_sjt/seller)
+ * en una etiqueta humana en español, contextualizada según fulfillment.
+ * Ejemplo: cash + pickup → "Efectivo (paga en sucursal al retirar)".
+ */
+function formatPaymentLabel(method_code, fulfillment_type) {
+  const code = String(method_code || "").toLowerCase();
+  const isPickup = String(fulfillment_type || "") === "pickup";
+
+  switch (code) {
+    case "cash":
+      return isPickup
+        ? "Efectivo (paga en sucursal al retirar)"
+        : "Efectivo (paga al recibir el envío)";
+    case "transfer":
+      return "Transferencia bancaria";
+    case "mercadopago":
+    case "mercado_pago":
+      return "Mercado Pago";
+    case "credit_sjt":
+      return "Crédito San Juan Tecnología (gestiona en sucursal)";
+    case "seller":
+    case "agree":
+      return "Acuerda con el vendedor";
+    case "":
+      return "";
+    default:
+      return method_code;
   }
 }
 
