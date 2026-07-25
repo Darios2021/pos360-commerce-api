@@ -28,6 +28,7 @@ const {
   StockBalance,
 } = require("../models");
 const access = require("../utils/accessScope");
+const emailSvc = require("../services/messaging/email.service");
 
 function toInt(v, d = 0) {
   const n = parseInt(String(v ?? ""), 10);
@@ -1717,6 +1718,121 @@ async function deleteSale(req, res, next) {
   }
 }
 
+
+// ── Envío del comprobante por mail ────────────────────────────────────────
+// Opcional: el cajero decide si mandarlo. El PDF lo arma el navegador (mismo
+// ticket que se imprime) y viaja en base64; acá se valida y se despacha con el
+// layout de marca de la tienda (logo + datos de contacto).
+const MAX_RECEIPT_BYTES = 5 * 1024 * 1024;
+
+async function emailSaleReceipt(req, res, next) {
+  try {
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ ok: false, message: "ID inválido" });
+
+    const saleBranchAs = findAssocAlias(Sale, Branch);
+    const include = [];
+    if (Branch && saleBranchAs) {
+      include.push({ model: Branch, as: saleBranchAs, required: false, attributes: pickBranchAttributes() });
+    }
+
+    const sale = await Sale.findByPk(id, { include });
+    if (!sale) return res.status(404).json({ ok: false, message: "Venta no encontrada" });
+
+    // Mismo criterio de acceso que el detalle: fuera de super_admin, solo
+    // ventas de la propia sucursal.
+    if (!access.isSuperAdmin(req)) {
+      const branch_id = getAuthBranchId(req);
+      if (!branch_id) {
+        return res.status(400).json({
+          ok: false,
+          code: "BRANCH_REQUIRED",
+          message: "No se pudo determinar la sucursal del usuario (branch_id).",
+        });
+      }
+      if (toInt(sale.branch_id, 0) !== toInt(branch_id, 0)) {
+        return res.status(403).json({
+          ok: false,
+          code: "CROSS_BRANCH_SALE",
+          message: "No podés enviar el comprobante de una venta de otra sucursal.",
+        });
+      }
+    }
+
+    const b = req.body || {};
+    const to = String(b.to || "").trim();
+    if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      return res.status(400).json({
+        ok: false,
+        code: "INVALID_EMAIL",
+        message: "El destinatario no es un email válido.",
+      });
+    }
+
+    const base64 = String(b.pdf_base64 || "").replace(/^data:[^;]+;base64,/, "");
+    if (!base64) {
+      return res.status(400).json({ ok: false, code: "MISSING_PDF", message: "Falta el comprobante." });
+    }
+    const pdf = Buffer.from(base64, "base64");
+    if (!pdf.length || pdf.length > MAX_RECEIPT_BYTES) {
+      return res.status(400).json({
+        ok: false,
+        code: "INVALID_PDF",
+        message: "El comprobante está vacío o supera el tamaño máximo permitido.",
+      });
+    }
+
+    const number = sale.sale_number || sale.id;
+    const cliente = String(sale.customer_name || "").trim();
+    const branch = saleBranchAs ? sale[saleBranchAs] : null;
+
+    // Datos de la sucursal que hizo la venta: el layout general trae los datos
+    // del comercio, pero el comprobante tiene que decir DONDE se compró.
+    const branchBits = [branch?.name, branch?.address, branch?.phone ? `Tel: ${branch.phone}` : ""]
+      .map((x) => String(x || "").trim())
+      .filter(Boolean);
+
+    const body =
+      String(b.message || "").trim().replace(/\n/g, "<br />") ||
+      [
+        cliente ? `Hola ${cliente},` : "Hola,",
+        "<br /><br />",
+        `Te enviamos el comprobante de tu compra <strong>N° ${number}</strong> en el archivo adjunto.`,
+        branchBits.length
+          ? `<br /><br /><strong>Sucursal</strong><br />${branchBits.join("<br />")}`
+          : "",
+        "<br /><br />¡Gracias por tu compra!",
+      ].join("");
+
+    const result = await emailSvc.sendEmail({
+      to,
+      toName: cliente || undefined,
+      subject: String(b.subject || "").trim() || `Comprobante de compra N° ${number}`,
+      body,
+      attachments: [
+        {
+          filename: String(b.filename || "").trim() || `comprobante-${number}.pdf`,
+          content: pdf,
+          contentType: "application/pdf",
+        },
+      ],
+    });
+
+    if (!result?.ok) {
+      return res.status(502).json({
+        ok: false,
+        code: result?.code || "EMAIL_FAILED",
+        message: result?.error_message || "No se pudo enviar el correo.",
+      });
+    }
+
+    return res.json({ ok: true, data: { to, message_id: result.message_id || null } });
+  } catch (e) {
+    console.error("[posSales.emailSaleReceipt]", e);
+    return next ? next(e) : res.status(500).json({ ok: false, message: e.message });
+  }
+}
+
 module.exports = {
   listSales,
   statsSales,
@@ -1726,4 +1842,5 @@ module.exports = {
   deleteSale,
   createRefund,
   createExchange,
+  emailSaleReceipt,
 };

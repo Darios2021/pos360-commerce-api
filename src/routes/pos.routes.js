@@ -148,6 +148,8 @@ router.get("/sales/stats", safeFn("statsSales", statsSales));
 router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));
 
+router.post("/sales/:id/email", safeFn("posSalesController.emailSaleReceipt", posSalesController.emailSaleReceipt));
+
 router.post("/sales/:id/refunds", safeFn("createRefund", createRefund));
 router.post("/sales/:id/exchanges", safeFn("createExchange", createExchange));
 
