@@ -74,6 +74,18 @@ try {
   Customer = null;
 }
 
+// ===== PRESUPUESTADOR =====
+let Budget = null;
+let BudgetItem = null;
+try {
+  Budget = require("./Budget")(sequelize, DataTypes);
+  BudgetItem = require("./BudgetItem")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ Budget no cargado:", e?.message);
+  Budget = null;
+  BudgetItem = null;
+}
+
 // ===== CRM: plantillas + log de mensajes =====
 let MessageTemplate = null;
 try {
@@ -265,6 +277,18 @@ function safeBelongsToMany(model, target, opts) {
 // ==========================================
 // ASOCIACIONES
 // ==========================================
+
+// Presupuestos: cabecera ↔ renglones ↔ cliente
+if (Budget && BudgetItem) {
+  safeHasMany(Budget, BudgetItem, { as: "items", foreignKey: "budget_id", onDelete: "CASCADE" });
+  safeBelongsTo(BudgetItem, Budget, { as: "budget", foreignKey: "budget_id" });
+  safeBelongsTo(BudgetItem, Product, { as: "product", foreignKey: "product_id" });
+  if (Customer) {
+    safeBelongsTo(Budget, Customer, { as: "customer", foreignKey: "customer_id" });
+  }
+  safeBelongsTo(Budget, User, { as: "user", foreignKey: "user_id" });
+  safeBelongsTo(Budget, Branch, { as: "branch", foreignKey: "branch_id" });
+}
 
 // Auth: Users ↔ Roles
 safeBelongsToMany(User, Role, {
@@ -629,6 +653,10 @@ const models = {
   ShopLink,
   EcomCustomer,
   Customer,
+
+  // Presupuestador
+  Budget,
+  BudgetItem,
 
   // CRM
   MessageTemplate,

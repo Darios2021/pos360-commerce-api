@@ -117,6 +117,41 @@ const columnSteps = [
     column: "processing_at",
     def:    "TIMESTAMP NULL DEFAULT NULL COMMENT 'Cuándo el pedido empezó a prepararse'",
   },
+
+  // ── Presupuestos ─────────────────────────────────────────────────────────
+  // Especificaciones tecnicas del renglon. Se precargan con la descripcion
+  // del producto al agregarlo y quedan congeladas: si despues cambia la ficha
+  // del catalogo, el presupuesto ya emitido no se mueve (misma regla que el
+  // costo).
+  {
+    id:     "budget_items__specs",
+    table:  "budget_items",
+    column: "specs",
+    def:    "TEXT NULL COMMENT 'Especificaciones tecnicas congeladas del renglon'",
+  },
+  // Que lista de precios se uso como base del renglon (sale/list/reseller/cost).
+  // Se guarda para poder mostrarla y cambiarla despues renglon por renglon.
+  {
+    id:     "budget_items__price_source",
+    table:  "budget_items",
+    column: "price_source",
+    def:    "VARCHAR(20) NULL COMMENT 'Lista de precios usada como base: sale|list|reseller|cost'",
+  },
+  // Trazabilidad de la cotizacion usada al presupuestar en USD. exchange_rate
+  // ya existia; guardamos ademas de donde salio y de cuando, para que el
+  // documento sea auditable y reimprimible con los mismos numeros.
+  {
+    id:     "budgets__fx_source",
+    table:  "budgets",
+    column: "fx_source",
+    def:    "VARCHAR(120) NULL COMMENT 'Fuente de la cotizacion aplicada'",
+  },
+  {
+    id:     "budgets__fx_date",
+    table:  "budgets",
+    column: "fx_date",
+    def:    "DATETIME NULL COMMENT 'Fecha de la cotizacion aplicada'",
+  },
 ];
 
 // Tablas a crear si no existen
@@ -141,6 +176,79 @@ const tableSteps = [
         CONSTRAINT fk_pki_component FOREIGN KEY (component_id) REFERENCES products (id) ON DELETE RESTRICT ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         COMMENT='Componentes de un kit/combo de productos';
+    `,
+  },
+
+  // ── Presupuestador ────────────────────────────────────────────────────────
+  // Cabecera del presupuesto. El cliente puede venir de customers (FK) o
+  // quedar congelado en los campos customer_* (presupuesto a nombre suelto).
+  {
+    id:     "budgets",
+    table:  "budgets",
+    sql: `
+      CREATE TABLE IF NOT EXISTS budgets (
+        id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        number           INT UNSIGNED NOT NULL COMMENT 'Numero visible del presupuesto (correlativo)',
+        branch_id        BIGINT UNSIGNED NULL COMMENT 'Sucursal que lo emite',
+        user_id          BIGINT UNSIGNED NULL COMMENT 'Usuario que lo creo',
+        customer_id      BIGINT UNSIGNED NULL COMMENT 'FK customers (opcional)',
+        customer_name    VARCHAR(180) NOT NULL DEFAULT 'Consumidor Final',
+        customer_email   VARCHAR(180) NULL,
+        customer_phone   VARCHAR(60) NULL,
+        customer_address VARCHAR(255) NULL,
+        customer_cuit    VARCHAR(20) NULL,
+        status           ENUM('generado','en_proceso','entregado','vendido','no_venta') NOT NULL DEFAULT 'generado',
+        currency         ENUM('ARS','USD') NOT NULL DEFAULT 'ARS',
+        exchange_rate    DECIMAL(12,2) NOT NULL DEFAULT 1.00 COMMENT 'Cotizacion USD->ARS congelada al emitir',
+        valid_until      DATE NULL COMMENT 'Vencimiento (por defecto +10 dias)',
+        notes            TEXT NULL COMMENT 'Observaciones al pie',
+        show_cost        TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'Mostrar columnas costo/margen en pantalla',
+        subtotal         DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        vat_21           DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        vat_105          DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        total            DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        sale_id          BIGINT UNSIGNED NULL COMMENT 'Venta generada si se concreto',
+        created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_budget_number (number),
+        KEY ix_budget_customer (customer_id),
+        KEY ix_budget_branch (branch_id),
+        KEY ix_budget_status (status),
+        KEY ix_budget_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Cabecera de presupuestos';
+    `,
+  },
+  // Renglones. product_id NULL = renglon libre de texto.
+  // El costo se congela al agregar: si despues cambia el precio del producto,
+  // el presupuesto ya emitido no se mueve.
+  {
+    id:     "budget_items",
+    table:  "budget_items",
+    sql: `
+      CREATE TABLE IF NOT EXISTS budget_items (
+        id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        budget_id     BIGINT UNSIGNED NOT NULL,
+        product_id    BIGINT UNSIGNED NULL COMMENT 'NULL = renglon libre',
+        sku           VARCHAR(80) NULL COMMENT 'Codigo congelado',
+        description   VARCHAR(500) NOT NULL DEFAULT '',
+        image_url     VARCHAR(500) NULL COMMENT 'Miniatura congelada',
+        qty           DECIMAL(12,3) NOT NULL DEFAULT 1.000,
+        cost          DECIMAL(14,4) NOT NULL DEFAULT 0.0000 COMMENT 'Costo real sin IVA',
+        margin_pct    DECIMAL(7,2) NOT NULL DEFAULT 0.00 COMMENT 'Margen aplicado en %',
+        vat_rate      DECIMAL(5,2) NOT NULL DEFAULT 21.00 COMMENT 'Alicuota IVA de la linea',
+        unit_price    DECIMAL(14,4) NOT NULL DEFAULT 0.0000 COMMENT 'cost * (1 + margin/100), sin IVA',
+        line_total    DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'unit_price * qty, sin IVA',
+        sort_order    INT UNSIGNED NOT NULL DEFAULT 0,
+        created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY ix_bi_budget (budget_id),
+        KEY ix_bi_product (product_id),
+        CONSTRAINT fk_bi_budget FOREIGN KEY (budget_id) REFERENCES budgets (id) ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Renglones de presupuesto';
     `,
   },
 ];

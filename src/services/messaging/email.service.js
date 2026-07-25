@@ -181,6 +181,9 @@ async function sendEmail({
   useLayout = true, previewText,
   signature = null, promoBlocks = null, includeLocation = true,
   isBulk = false,
+  // Adjuntos en formato nodemailer: [{ filename, content, contentType,
+  // encoding }]. Lo usa el presupuestador para mandar el PDF.
+  attachments = null,
 }) {
   if (!isConfigured()) {
     return {
@@ -240,6 +243,7 @@ async function sendEmail({
       headers,
       ...(html ? { html } : {}),
       ...(text ? { text } : {}),
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
       replyTo: replyTo || process.env.SMTP_REPLY_TO || undefined,
     });
 

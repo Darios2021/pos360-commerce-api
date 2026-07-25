@@ -254,6 +254,7 @@ const stockTransferRoutes = loadRoute("./stockTransfer.routes", { optional: fals
 const dashboardRoutes = loadRoute("./dashboard.routes", { optional: false });
 const analyticsRoutes = loadRoute("./analytics.routes", { optional: true });
 const customersRoutes = loadRoute("./customers.routes", { optional: true });
+const budgetsRoutes = loadRoute("./budgets.routes", { optional: true });
 const messagingRoutes = loadRoute("./messaging.routes", { optional: true });
 const posRoutes = loadRoute("./pos.routes", { optional: false });
 const meRoutes = loadRoute("./me.routes", { optional: false });
@@ -386,6 +387,9 @@ if (reportsRoutes) {
 safeUse("/admin/users", requireAuth, attachAccessContext, adminUsersRoutes);
 if (customersRoutes) {
   safeUse("/admin/customers", requireAuth, attachAccessContext, customersRoutes);
+}
+if (budgetsRoutes) {
+  safeUse("/admin/budgets", requireAuth, attachAccessContext, budgetsRoutes);
 }
 if (messagingRoutes) {
   safeUse("/admin/messaging", requireAuth, attachAccessContext, messagingRoutes);
