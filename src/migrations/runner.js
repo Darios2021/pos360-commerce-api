@@ -152,6 +152,35 @@ const columnSteps = [
     column: "fx_date",
     def:    "DATETIME NULL COMMENT 'Fecha de la cotizacion aplicada'",
   },
+  // Descuento: no se carga a mano, sale de los renglones con margen negativo.
+  // Se guarda calculado para que el documento lo muestre al cliente sin que el
+  // front tenga que rehacer la cuenta.
+  {
+    id:     "budgets__subtotal_gross",
+    table:  "budgets",
+    column: "subtotal_gross",
+    def:    "DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Subtotal antes de descuento'",
+  },
+  {
+    id:     "budgets__discount",
+    table:  "budgets",
+    column: "discount",
+    def:    "DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Descuento total (renglones con margen negativo)'",
+  },
+  // Vendedor y local congelados: el documento tiene que seguir diciendo quien
+  // lo hizo y desde donde aunque despues cambien el usuario o la sucursal.
+  {
+    id:     "budgets__user_name",
+    table:  "budgets",
+    column: "user_name",
+    def:    "VARCHAR(180) NULL COMMENT 'Vendedor que emitio el presupuesto (snapshot)'",
+  },
+  {
+    id:     "budgets__branch_code",
+    table:  "budgets",
+    column: "branch_code",
+    def:    "VARCHAR(10) NULL COMMENT 'Numero de local para la numeracion 001-00035 (snapshot)'",
+  },
 ];
 
 // Tablas a crear si no existen

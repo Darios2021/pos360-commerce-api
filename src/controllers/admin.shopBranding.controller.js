@@ -30,7 +30,29 @@ const EXTENDED_COLUMNS = [
   // Decoración estacional sobre el logo (gorrito argentino, navidad, etc.)
   // Acepta GIF/PNG/MP4. Si está NULL, no se muestra nada.
   ["holiday_overlay_url", "VARCHAR(512) NULL"],
+  // Datos fiscales del emisor. Van en el encabezado del presupuesto, debajo
+  // de la dirección: es lo que el cliente necesita para cargarlo en su
+  // contabilidad. No los toma de FiscalConfig porque eso es la config de AFIP
+  // por sucursal, y esto es el dato que se imprime.
+  ["tax_id",              "VARCHAR(20) NULL"],
+  ["iibb",                "VARCHAR(30) NULL"],
+  // Condiciones de pago, entrega y garantía con las que arranca cada
+  // presupuesto nuevo. Se editan después dentro del presupuesto.
+  ["budget_notes_default", "TEXT NULL"],
 ];
+
+// Texto con el que arranca cada presupuesto nuevo. Se siembra una sola vez, al
+// crear la columna: a partir de ahí manda lo que se cargue en Ajustes.
+const BUDGET_NOTES_SEED = [
+  "Condiciones de Pago",
+  "     Tarjetas bancarias: Hasta 6 cuotas sin interés.",
+  "     Contado efectivo / Transferencia: 20% de descuento sobre el total.",
+  "Plazo de Entrega e Instalación",
+  "     Coordinación: La fecha de instalación se definirá de común acuerdo con el cliente.",
+  "Garantía",
+  "     SOBRE LA INSTALACION: 30 días de cobertura directa.",
+  "     SOBRE LOS EQUIPOS INSTALADOS: POR FALLA DE FABRICA 1 año de garantía oficial del fabricante.",
+].join("\n");
 
 let _extendedColumnsEnsured = false;
 async function ensureExtendedColumns() {
@@ -38,6 +60,13 @@ async function ensureExtendedColumns() {
   for (const [col, def] of EXTENDED_COLUMNS) {
     try {
       await sequelize.query(`ALTER TABLE shop_branding ADD COLUMN ${col} ${def}`);
+      // La columna es nueva: si es la de observaciones, la dejamos usable.
+      if (col === "budget_notes_default") {
+        await sequelize.query(
+          `UPDATE shop_branding SET budget_notes_default=? WHERE budget_notes_default IS NULL`,
+          { replacements: [BUDGET_NOTES_SEED] }
+        );
+      }
     } catch (e) {
       const msg = String(e?.message || "");
       // 1060 = Duplicate column name (ya existe → OK)
@@ -97,6 +126,7 @@ async function updateBranding(req, res, next) {
     const SETTABLE = [
       "name", "address", "maps_url", "phone_display", "whatsapp_display",
       "business_hours", "tagline", "accent_color", "bg_color", "footer_note",
+      "tax_id", "iibb", "budget_notes_default",
     ];
 
     const sets = [];
@@ -380,6 +410,9 @@ async function deleteSocialIcon(req, res, next) {
 }
 
 module.exports = {
+  // Lo usa el presupuestador para asegurarse de que las columnas del emisor
+  // (CUIT, Ing. Brutos, observaciones) existan antes de leerlas.
+  ensureRow,
   getBranding,
   updateBranding,
   uploadLogo,

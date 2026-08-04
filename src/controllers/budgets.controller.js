@@ -17,13 +17,18 @@
 "use strict";
 
 const { Op } = require("sequelize");
-const { sequelize, Budget, BudgetItem, Product, Customer } = require("../models");
+const { sequelize, Budget, BudgetItem, Product, Customer, User, Branch } = require("../models");
 const emailSvc = require("../services/messaging/email.service");
+const access = require("../utils/accessScope");
 
 const VALID_STATUS = ["generado", "en_proceso", "entregado", "vendido", "no_venta"];
 const VALID_CURRENCY = ["ARS", "USD"];
 // Alícuotas que maneja el documento. Cualquier otra se normaliza a 0.
 const VALID_VAT = [0, 10.5, 21];
+
+// Vigencia por defecto del presupuesto, en días. Se puede pisar al crearlo
+// (valid_days) y cambiar después la fecha a mano (valid_until).
+const DEFAULT_VALID_DAYS = 15;
 
 function toNum(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
@@ -115,6 +120,11 @@ function computeItem(raw) {
 }
 
 // Recalcula totales de cabecera a partir de los renglones ya guardados.
+//
+// El descuento no es un campo que se cargue: se hace poniendo margen negativo
+// en el renglón. Acá se reconstruye cuánto se bonificó (base sin descontar
+// menos lo que se cobra) para poder mostrarlo abajo, junto a los totales, que
+// es donde el cliente lo busca.
 async function recalcTotals(budgetId, t) {
   const items = await BudgetItem.findAll({
     where: { budget_id: budgetId },
@@ -122,6 +132,7 @@ async function recalcTotals(budgetId, t) {
   });
 
   let subtotal = 0;
+  let gross = 0;
   let vat21 = 0;
   let vat105 = 0;
 
@@ -129,15 +140,21 @@ async function recalcTotals(budgetId, t) {
     const line = toNum(it.line_total, 0);
     const rate = toNum(it.vat_rate, 0);
     subtotal += line;
+    // Solo los renglones bonificados suman a la base: con margen positivo el
+    // precio de lista ES el que se está cobrando.
+    gross += toNum(it.margin_pct, 0) < 0 ? toNum(it.cost, 0) * toNum(it.qty, 0) : line;
     if (Math.abs(rate - 21) < 0.01) vat21 += line * 0.21;
     else if (Math.abs(rate - 10.5) < 0.01) vat105 += line * 0.105;
   }
 
   subtotal = round2(subtotal);
+  gross = round2(gross);
   vat21 = round2(vat21);
   vat105 = round2(vat105);
 
   const totals = {
+    subtotal_gross: gross,
+    discount: round2(Math.max(0, gross - subtotal)),
     subtotal,
     vat_21: vat21,
     vat_105: vat105,
@@ -146,6 +163,60 @@ async function recalcTotals(budgetId, t) {
 
   await Budget.update(totals, { where: { id: budgetId }, transaction: t });
   return totals;
+}
+
+// Número del documento: local + correlativo ("001-00035"). Tiene que dar
+// igual que budgetNumber() del front, que es el que arma el PDF.
+function docNumberOf(budget) {
+  const raw = s(budget?.branch_code || budget?.branch?.code);
+  const digits = raw.replace(/\D/g, "");
+  const local = String(digits || budget?.branch_id || 1).padStart(3, "0").slice(-3);
+  return `${local}-${String(toInt(budget?.number, 0)).padStart(5, "0")}`;
+}
+
+// Nombre visible del vendedor. El usuario puede no tener nombre y apellido
+// cargados, así que se cae a username y por último al email.
+function displayNameOf(u) {
+  if (!u) return "";
+  const full = [s(u.first_name), s(u.last_name)].filter(Boolean).join(" ");
+  return full || s(u.username) || s(u.email) || "";
+}
+
+// Datos del emisor que van en la cabecera del documento. Viven en
+// shop_branding (Ajustes > Contacto del negocio); si la tabla o las columnas
+// todavía no existen, el presupuesto se emite igual sin ellos.
+async function shopSettings() {
+  try {
+    // El branding se encarga de que las columnas existan (y de sembrar las
+    // observaciones la primera vez). Si falla, seguimos: son datos opcionales.
+    try {
+      await require("./admin.shopBranding.controller").ensureRow();
+    } catch (_) { /* el presupuesto se emite igual */ }
+
+    const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
+    return rows?.[0] || {};
+  } catch (e) {
+    console.warn("[budgets] shop_branding no disponible:", e?.message || e);
+    return {};
+  }
+}
+
+// Asociaciones que necesita el documento: vendedor y local. Se incluyen para
+// los presupuestos viejos, que no tienen el snapshot cargado.
+function docIncludes() {
+  const inc = [];
+  if (User) {
+    inc.push({
+      model: User,
+      as: "user",
+      required: false,
+      attributes: ["id", "first_name", "last_name", "username", "email"],
+    });
+  }
+  if (Branch) {
+    inc.push({ model: Branch, as: "branch", required: false, attributes: ["id", "code", "name"] });
+  }
+  return inc;
 }
 
 async function loadFull(id) {
@@ -157,11 +228,21 @@ async function loadFull(id) {
         separate: true,
         order: [["sort_order", "ASC"], ["id", "ASC"]],
       },
+      ...docIncludes(),
     ],
   });
 }
 
 // ── Cabecera ──────────────────────────────────────────────────────────────
+
+// Qué presupuestos puede ver quien pregunta. Un cajero/vendedor ve solo los
+// suyos; admin y super_admin ven todos. No se filtra por sucursal: los
+// presupuestos viejos no la tienen cargada y desaparecerían de la lista.
+function ownerFilter(req) {
+  const scope = access.getAccessScope(req);
+  if (scope.kind !== "user") return null;
+  return scope.userId || -1;
+}
 
 exports.list = async (req, res) => {
   if (!Budget) return unavailable(res);
@@ -176,13 +257,25 @@ exports.list = async (req, res) => {
     if (q) {
       const like = { [Op.like]: `%${q}%` };
       where[Op.or] = [{ customer_name: like }, { customer_cuit: like }];
-      // Si buscó un número, que también matchee el correlativo.
-      const asNum = toInt(q, NaN);
+      // Si buscó un número, que también matchee el correlativo. El documento se
+      // muestra como "001-00035": si lo pega entero, vale la parte de la derecha.
+      // El patrón es estricto para que un CUIT no se lea como número de documento.
+      const docParts = s(q).match(/^(\d{1,4})-(\d{1,8})$/);
+      const asNum = toInt(docParts ? docParts[2] : q, NaN);
       if (Number.isFinite(asNum)) where[Op.or].push({ number: asNum });
+    }
+
+    // Un cajero queda restringido a los propios. Un admin puede pedirlo con
+    // ?mine=1 para ver solo los que hizo él.
+    const owner = ownerFilter(req);
+    if (owner !== null) where.user_id = owner;
+    else if (["1", "true"].includes(s(req.query.mine))) {
+      where.user_id = toInt(req.user?.id, 0) || -1;
     }
 
     const { rows, count } = await Budget.findAndCountAll({
       where,
+      include: docIncludes(),
       order: [["id", "DESC"]],
       limit,
       offset: (page - 1) * limit,
@@ -202,8 +295,25 @@ exports.list = async (req, res) => {
 exports.getById = async (req, res) => {
   if (!Budget) return unavailable(res);
   try {
-    const budget = await loadFull(toInt(req.params.id, 0));
+    const id = toInt(req.params.id, 0);
+    let budget = await loadFull(id);
     if (!budget) return notFound(res);
+
+    // Los presupuestos anteriores al descuento no tienen la base calculada.
+    // Se recalcula la primera vez que se abren, así uno viejo hecho con margen
+    // negativo también muestra la bonificación. Idempotente.
+    if (toNum(budget.subtotal_gross, 0) === 0 && toNum(budget.subtotal, 0) > 0) {
+      const t = await sequelize.transaction();
+      try {
+        await recalcTotals(id, t);
+        await t.commit();
+        budget = await loadFull(id);
+      } catch (e) {
+        await t.rollback();
+        console.warn("[budgets.getById] no se pudo recalcular:", e?.message || e);
+      }
+    }
+
     return res.json({ ok: true, data: budget });
   } catch (e) {
     console.error("[budgets.getById]", e);
@@ -220,7 +330,13 @@ exports.getById = async (req, res) => {
 exports.stats = async (req, res) => {
   if (!Budget) return unavailable(res);
   try {
+    // Las tarjetas tienen que hablar del mismo universo que la tabla de abajo:
+    // si el usuario solo ve sus presupuestos, los totales también son los suyos.
+    const owner = ownerFilter(req);
+    const scopeWhere = owner !== null ? { user_id: owner } : {};
+
     const rows = await Budget.findAll({
+      where: scopeWhere,
       attributes: [
         "status",
         [sequelize.fn("COUNT", sequelize.col("id")), "cnt"],
@@ -244,6 +360,7 @@ exports.stats = async (req, res) => {
     // Vencidos: pasaron de fecha y siguen abiertos (ni vendidos ni descartados).
     const expired = await Budget.count({
       where: {
+        ...scopeWhere,
         valid_until: { [Op.lt]: new Date() },
         status: { [Op.notIn]: ["vendido", "no_venta"] },
       },
@@ -280,9 +397,34 @@ exports.create = async (req, res) => {
     const last = await Budget.max("number", { transaction: t });
     const number = (toInt(last, 0) || 0) + 1;
 
-    // Vencimiento por defecto: 10 días, igual que el documento en papel.
+    // Vencimiento por defecto: 15 días. Se puede mover después desde el editor.
+    const validDays = toInt(b.valid_days, DEFAULT_VALID_DAYS);
     const validUntil = new Date();
-    validUntil.setDate(validUntil.getDate() + toInt(b.valid_days, 10));
+    validUntil.setDate(validUntil.getDate() + (validDays > 0 ? validDays : DEFAULT_VALID_DAYS));
+
+    // Vendedor y local: se congelan al emitir.
+    const userId = toInt(req.user?.id, 0) || null;
+    const branchId = toInt(req.user?.branch_id ?? b.branch_id, 0) || null;
+
+    let userName = "";
+    if (userId && User) {
+      const u = await User.findByPk(userId, {
+        attributes: ["id", "first_name", "last_name", "username", "email"],
+        transaction: t,
+      });
+      userName = displayNameOf(u);
+    }
+
+    let branchCode = "";
+    if (branchId && Branch) {
+      const br = await Branch.findByPk(branchId, { attributes: ["id", "code"], transaction: t });
+      branchCode = s(br?.code);
+    }
+
+    // Observaciones al pie: arrancan con las condiciones de siempre (pago,
+    // entrega, garantía) y se editan renglón por renglón en cada presupuesto.
+    const settings = await shopSettings();
+    const defaultNotes = s(settings.budget_notes_default);
 
     let customerSnapshot = {
       customer_name: s(b.customer_name) || "Consumidor Final",
@@ -310,15 +452,17 @@ exports.create = async (req, res) => {
     const budget = await Budget.create(
       {
         number,
-        branch_id: toInt(req.user?.branch_id ?? b.branch_id, 0) || null,
-        user_id: toInt(req.user?.id, 0) || null,
+        branch_id: branchId,
+        branch_code: branchCode || null,
+        user_id: userId,
+        user_name: userName || null,
         customer_id: customerId,
         ...customerSnapshot,
         status: VALID_STATUS.includes(s(b.status)) ? s(b.status) : "generado",
         currency: VALID_CURRENCY.includes(s(b.currency)) ? s(b.currency) : "ARS",
         exchange_rate: toNum(b.exchange_rate, 1) || 1,
         valid_until: validUntil,
-        notes: s(b.notes) || null,
+        notes: s(b.notes) || defaultNotes || null,
         show_cost: b.show_cost === undefined ? true : !!b.show_cost,
       },
       { transaction: t }
@@ -437,7 +581,8 @@ exports.sendByEmail = async (req, res) => {
       });
     }
 
-    const subject = s(b.subject) || `Presupuesto #${budget.number}`;
+    const docNumber = docNumberOf(budget);
+    const subject = s(b.subject) || `Presupuesto ${docNumber}`;
     const message = s(b.message);
     const cliente = s(budget.customer_name) || "";
 
@@ -446,7 +591,7 @@ exports.sendByEmail = async (req, res) => {
       : [
           cliente ? `Hola ${cliente},` : "Hola,",
           "<br /><br />",
-          `Te enviamos el presupuesto <strong>#${budget.number}</strong> en el archivo adjunto.`,
+          `Te enviamos el presupuesto <strong>${docNumber}</strong> en el archivo adjunto.`,
           budget.valid_until
             ? `<br />Tiene validez hasta el ${new Date(budget.valid_until).toLocaleDateString("es-AR")}.`
             : "",
@@ -460,7 +605,7 @@ exports.sendByEmail = async (req, res) => {
       body,
       attachments: [
         {
-          filename: s(b.filename) || `presupuesto-${budget.number}.pdf`,
+          filename: s(b.filename) || `presupuesto-${docNumber}.pdf`,
           content: pdf,
           contentType: "application/pdf",
         },

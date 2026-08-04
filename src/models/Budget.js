@@ -27,6 +27,12 @@ module.exports = (sequelize, DataTypes) => {
       branch_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
       user_id:   { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
 
+      // Vendedor y local congelados al emitir: el documento dice quién lo hizo
+      // y desde qué local, aunque después cambie el usuario o la sucursal.
+      // branch_code es el "número de local" que abre la numeración (001-00035).
+      user_name:   { type: DataTypes.STRING(180), allowNull: true },
+      branch_code: { type: DataTypes.STRING(10),  allowNull: true },
+
       // Cliente: FK opcional + snapshot
       customer_id:      { type: DataTypes.BIGINT.UNSIGNED, allowNull: true },
       customer_name:    { type: DataTypes.STRING(180), allowNull: false, defaultValue: "Consumidor Final" },
@@ -54,6 +60,12 @@ module.exports = (sequelize, DataTypes) => {
       show_cost: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
       // Totales denormalizados: se recalculan en cada guardado de renglones.
+      // El descuento no se carga a mano: sale de los renglones con margen
+      // negativo. subtotal_gross es lo que valdrían esos renglones sin el
+      // descuento, así el documento puede mostrarle al cliente cuánto se le hizo.
+      subtotal_gross: { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: "0.00" },
+      discount:       { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: "0.00" },
+
       subtotal: { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: "0.00" },
       vat_21:   { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: "0.00" },
       vat_105:  { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: "0.00" },
