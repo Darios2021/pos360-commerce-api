@@ -211,7 +211,12 @@ function findAssocAlias(sourceModel, targetModel) {
     const assocs = sourceModel?.associations || {};
     for (const [alias, a] of Object.entries(assocs)) {
       if (!a) continue;
-      if (a.target === targetModel) return alias;
+      // OJO: no comparar por identidad (a.target === modelo). Los modelos que se
+      // importan de ../models son Proxies que resuelven contra el tenant en curso, y
+      // a.target es el modelo real: la comparacion siempre da false, el include no se
+      // arma y la venta vuelve SIN items. Se compara por nombre, que atraviesa el
+      // Proxy sin problema.
+      if (a.target?.name && a.target.name === targetModel?.name) return alias;
     }
     return null;
   } catch {

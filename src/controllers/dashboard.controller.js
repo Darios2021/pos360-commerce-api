@@ -190,7 +190,12 @@ function findAssocAs(fromModel, toModel) {
     const assocs = fromModel?.associations || {};
     for (const key of Object.keys(assocs)) {
       const a = assocs[key];
-      if (a?.target === toModel) return a.as || key;
+      // OJO: no comparar por identidad (a.target === modelo). Los modelos que se
+      // importan de ../models son Proxies que resuelven contra el tenant en curso, y
+      // a.target es el modelo real: la comparacion siempre da false, el include no se
+      // arma y la venta vuelve SIN items. Se compara por nombre, que atraviesa el
+      // Proxy sin problema.
+      if (a?.target?.name && a.target.name === toModel?.name) return a.as || key;
     }
   } catch {}
   return null;
