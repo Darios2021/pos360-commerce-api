@@ -9,6 +9,12 @@ const { QueryTypes } = require("sequelize");
 // Columnas a agregar si no existen
 const columnSteps = [
   {
+    id:     "sales__idempotency_key",
+    table:  "sales",
+    column: "idempotency_key",
+    def:    "VARCHAR(64) NULL COMMENT 'Clave del intento de cobro: evita registrar dos veces la misma venta'",
+  },
+  {
     id:     "cash_registers__closing_declared",
     table:  "cash_registers",
     column: "closing_declared",
@@ -419,6 +425,30 @@ async function ensureCashPaymentMethod(sequelize) {
   }
 }
 
+// Indices a crear si no existen. Son aparte de las columnas porque MySQL no
+// tiene CREATE INDEX IF NOT EXISTS y hay que preguntarle a INFORMATION_SCHEMA.
+const indexSteps = [
+  {
+    id:     "sales__uq_idempotency",
+    table:  "sales",
+    index:  "uq_sales_idempotency",
+    sql:    "ALTER TABLE `sales` ADD UNIQUE KEY `uq_sales_idempotency` (`idempotency_key`)",
+    // Sin este indice, dos cobros simultaneos con la misma clave pueden pasar
+    // los dos el SELECT previo y crear dos ventas. Con el, el segundo choca y
+    // el controller devuelve la venta del primero.
+  },
+];
+
+async function indexExists(sequelize, table, index) {
+  const filas = await sequelize.query(
+    `SELECT 1 FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND INDEX_NAME = :index
+      LIMIT 1`,
+    { replacements: { table, index }, type: QueryTypes.SELECT }
+  );
+  return Array.isArray(filas) && filas.length > 0;
+}
+
 async function runStartupMigrations(sequelize) {
   // Tablas nuevas primero (las columnas pueden depender de FKs)
   for (const step of tableSteps) {
@@ -452,6 +482,25 @@ async function runStartupMigrations(sequelize) {
       // errno 1060 = Duplicate column name (race condition entre instancias)
       if (e?.original?.errno === 1060 || e?.message?.includes("Duplicate column")) {
         console.log(`ℹ️  [migration] ${step.id} — columna ya existe (race), skip`);
+      } else {
+        console.warn(`⚠️  [migration] ${step.id} falló:`, e.message);
+      }
+    }
+  }
+
+  // Indices
+  for (const step of indexSteps) {
+    try {
+      if (await indexExists(sequelize, step.table, step.index)) {
+        console.log(`ℹ️  [migration] ${step.id} — indice ya existe, skip`);
+        continue;
+      }
+      await sequelize.query(step.sql, { type: QueryTypes.RAW });
+      console.log(`✅ [migration] ${step.id} — indice creado`);
+    } catch (e) {
+      // 1061 = Duplicate key name (carrera entre instancias)
+      if (e?.original?.errno === 1061 || /Duplicate key name/i.test(e?.message || "")) {
+        console.log(`ℹ️  [migration] ${step.id} — indice ya existe (race), skip`);
       } else {
         console.warn(`⚠️  [migration] ${step.id} falló:`, e.message);
       }

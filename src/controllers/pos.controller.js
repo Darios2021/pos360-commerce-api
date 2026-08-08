@@ -2,6 +2,7 @@
 // src/controllers/pos.controller.js
 
 const { literal, Op } = require("sequelize");
+const idem = require("../utils/idempotencia");
 const {
   sequelize,
   Sale,
@@ -1474,6 +1475,22 @@ async function listSuggestionsForPos(req, res) {
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
 
+  // Antes de cualquier otra cosa: si este intento ya se registro, se devuelve
+  // la venta que existe. El cajero que reintenta despues de un timeout no puede
+  // terminar con dos ventas y el stock descontado dos veces.
+  const claveIdem = idem.leerClave(req);
+  if (claveIdem) {
+    try {
+      const previa = await idem.buscarVentaPrevia(sequelize, claveIdem);
+      if (previa) {
+        logPos(req, "info", "createSale idempotente", { sale_id: previa.id, clave: claveIdem });
+        return res.json(idem.respuestaRepetida(previa));
+      }
+    } catch (e) {
+      logPos(req, "warn", "createSale no pudo consultar la clave", { err: e.message });
+    }
+  }
+
   let t;
   let fiscalSnapshot = null;
   let currentCashRegister = null;
@@ -1944,6 +1961,20 @@ async function createSale(req, res) {
 
     console.log("[POS][createSale][fiscalDocument]", fiscalDocument?.toJSON?.() || fiscalDocument || null);
 
+    // La clave se sella aparte y no por el modelo: si una base todavia no tiene
+    // la columna, el INSERT de la venta no se puede caer por eso. Va dentro de
+    // la misma transaccion, asi que o quedan venta y clave, o no queda ninguna.
+    if (claveIdem) {
+      try {
+        await sequelize.query(
+          `UPDATE sales SET idempotency_key = :clave WHERE id = :id`,
+          { replacements: { clave: claveIdem, id: sale.id }, transaction: t }
+        );
+      } catch (e) {
+        logPos(req, "warn", "createSale no pudo sellar la clave", { err: e.message });
+      }
+    }
+
     await t.commit();
 
     logPos(req, "info", "createSale done", {
@@ -2030,6 +2061,16 @@ async function createSale(req, res) {
         },
       },
     };
+
+    if (idem.esClaveDuplicada(e)) {
+      try {
+        const previa = await idem.buscarVentaPrevia(sequelize, claveIdem);
+        if (previa) {
+          logPos(req, "info", "createSale carrera idempotente", { sale_id: previa.id });
+          return res.json(idem.respuestaRepetida(previa));
+        }
+      } catch {}
+    }
 
     console.error("[POS][createSale][ERROR]", {
       rid: req._rid,
