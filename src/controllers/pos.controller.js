@@ -721,7 +721,9 @@ async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
       installments,
       reference,
       note,
-      paid_at
+      paid_at,
+      created_at,
+      updated_at
     )
     VALUES (
       :sale_id,
@@ -745,6 +747,8 @@ async function insertPaymentRow({ saleId, paymentResolved, transaction }) {
       :installments,
       :reference,
       :note,
+      NOW(),
+      NOW(),
       NOW()
     )
     `,
