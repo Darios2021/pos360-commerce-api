@@ -536,6 +536,51 @@ module.exports = {
       it.stock_by_branch = stockMap[pid] || [];
     }
 
+    // ── is_kit + cantidad de componentes ────────────────────────────────────
+    // La VIEW v_public_catalog es legacy y no trae is_kit, igual que en
+    // getProduct. Sin esto el listado no puede distinguir un kit de un
+    // producto suelto y la card no muestra su badge. Se resuelve con una
+    // consulta extra sobre los ids de la pagina, sin tocar la vista.
+    if (productIds.length) {
+      try {
+        const [kitRows] = await sequelize.query(
+          `
+          SELECT
+            p.id                        AS product_id,
+            p.is_kit                    AS is_kit,
+            COUNT(pki.id)               AS kit_count
+          FROM products p
+          LEFT JOIN product_kit_items pki ON pki.kit_id = p.id
+          WHERE p.id IN (:ids)
+          GROUP BY p.id, p.is_kit
+          `,
+          { replacements: { ids: productIds } }
+        );
+
+        const kitMap = {};
+        for (const r of kitRows || []) {
+          kitMap[Number(r.product_id)] = {
+            is_kit: Number(r.is_kit || 0) === 1 ? 1 : 0,
+            kit_count: Number(r.kit_count || 0),
+          };
+        }
+
+        for (const it of items) {
+          const pid = Number(it.product_id || it.id || 0);
+          const k = kitMap[pid];
+          it.is_kit = k ? k.is_kit : 0;
+          it.kit_items_count = k ? k.kit_count : 0;
+        }
+      } catch (e) {
+        // Si la tabla o la columna todavia no existen, el listado sigue
+        // andando: simplemente ningun item queda marcado como kit.
+        for (const it of items) {
+          it.is_kit = 0;
+          it.kit_items_count = 0;
+        }
+      }
+    }
+
     return {
       items,
       page: pg,
