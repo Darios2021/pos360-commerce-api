@@ -1332,7 +1332,18 @@ async function create(req, res, next) {
 
       await p.update({ code, sku: skuFinal }, { transaction: t });
 
-      const bids = !admin ? [payload.branch_id] : bodyBranchIds.length ? bodyBranchIds : [payload.branch_id];
+      // El producto queda dado de alta en TODAS las sucursales activas, tenga o
+      // no stock en ellas: la tienda lista por la sucursal del visitante
+      // (v_public_catalog sale de product_branches) y un alta solo donde se
+      // cargo stock lo dejaba invisible en las demas (paso con Rivadavia, que
+      // es la sucursal por defecto de la tienda). El stock sigue yendo solo a
+      // donde se asigna.
+      const elegidas = !admin ? [payload.branch_id] : bodyBranchIds.length ? bodyBranchIds : [payload.branch_id];
+      const [activas] = await sequelize.query(
+        `SELECT id FROM branches WHERE is_active = 1`,
+        { transaction: t }
+      );
+      const bids = Array.from(new Set([...elegidas, ...(activas || []).map((b) => toInt(b.id, 0))].filter(Boolean)));
       await upsertProductBranches({ productId: p.id, branchIds: bids, transaction: t });
 
       // Si es kit, persistir componentes
