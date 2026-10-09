@@ -12,6 +12,17 @@ const {
 } = require("../services/paymentMethod.service");
 const access = require("../utils/accessScope");
 
+// Codigo de un medio dado de baja que no se pudo borrar. Los codigos que carga
+// el usuario pasan por cleanCode, que saca los "_" del principio: este prefijo
+// no choca nunca con uno real.
+const PREFIJO_BAJA = "__baja_";
+
+function esErrorDeFk(err) {
+  if (err?.name === "SequelizeForeignKeyConstraintError") return true;
+  const errno = err?.original?.errno ?? err?.parent?.errno;
+  return errno === 1451 || errno === 1452;
+}
+
 function toInt(v, def = 0) {
   const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : def;
@@ -129,6 +140,9 @@ async function adminList(req, res) {
       where.branch_id = ctxBranchId;
     }
     if (activeOnly) where.is_active = true;
+    // Los dados de baja con ventas encima quedan en la base con el codigo
+    // "__baja_<id>__<codigo>" (ver adminDelete): no se listan.
+    where[Op.and] = [{ code: { [Op.notLike]: `${PREFIJO_BAJA}%` } }];
     if (q) {
       where[Op.or] = [
         { code: { [Op.like]: `%${q}%` } },
@@ -240,6 +254,28 @@ async function adminCreate(req, res) {
         });
       }
       payload.branch_id = ctxBranchId;
+    }
+
+    // Mismo codigo en la misma sucursal pero desactivado: se reactiva con los
+    // datos nuevos en vez de rechazar el alta con "ya existe" sin que el
+    // usuario lo vea en la lista activa.
+    const previo = payload.code
+      ? await PaymentMethod.findOne({ where: { code: payload.code, branch_id: payload.branch_id || null } })
+      : null;
+    if (previo && !previo.is_active) {
+      await previo.update({ ...payload, is_active: true });
+      return res.status(200).json({
+        ok: true,
+        data: toPublicDto(previo),
+        message: "Medio de pago reactivado",
+      });
+    }
+    if (previo) {
+      return res.status(400).json({
+        ok: false,
+        code: "PAYMENT_METHOD_CODE_DUPLICATE",
+        message: `Ya existe el medio de pago "${previo.display_name || previo.name}" con el codigo ${payload.code}.`,
+      });
     }
 
     await ensureUniqueCode({
@@ -373,7 +409,16 @@ async function adminDelete(req, res) {
       });
     }
 
-    await row.destroy();
+    try {
+      await row.destroy();
+    } catch (err) {
+      if (!esErrorDeFk(err)) throw err;
+      // Tiene ventas o cobros que lo referencian: no se puede borrar sin
+      // romper el historial. Se da de baja y se libera el codigo, para que se
+      // pueda volver a crear uno con el mismo nombre.
+      const codigo = `${PREFIJO_BAJA}${row.id}__${row.code}`.slice(0, 80);
+      await row.update({ is_active: false, is_default: false, code: codigo });
+    }
 
     return res.json({
       ok: true,
