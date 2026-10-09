@@ -369,7 +369,12 @@ async function openCashRegister({
   // Política: un usuario solo puede tener UNA caja abierta a la vez
   // (independiente de la branch). Evita "cajas zombies" al cambiar de sucursal.
   await assertUserHasNoOtherCashRegisterOpen({ user_id: userId, transaction });
-  await assertNoOtherCashRegisterOpen({ branch_id: branchId, transaction });
+  // Varias cajas por sucursal, una por usuario (pedido del usuario,
+  // 2026-10-09): dos cajeros pueden vender a la vez en la misma sucursal.
+  // Cada venta va a la caja de su usuario (getCurrentOpenCashRegister por
+  // user_id), asi que no se mezclan. El POS avisa que hay otra abierta
+  // (branch_open_registers de /current); ya no se traba la apertura.
+  // assertNoOtherCashRegisterOpen queda para quien lo quiera usar.
 
   const cashRegister = await CashRegister.create(
     {
