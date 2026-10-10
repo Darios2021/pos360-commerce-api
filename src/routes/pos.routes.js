@@ -144,6 +144,7 @@ router.post("/sales/backoffice", safeFn("posSalesController.createSale", posSale
 // ---- SALES MODULE
 router.get("/sales", safeFn("listSales", listSales));
 router.get("/sales/stats", safeFn("statsSales", statsSales));
+router.get("/sales/facets", safeFn("facetsSales", posSalesController.facetsSales));
 
 router.get("/sales/:id", safeFn("getSaleById", getSaleById));
 router.delete("/sales/:id", safeFn("deleteSale", deleteSale));

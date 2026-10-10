@@ -90,6 +90,18 @@ function normalizePayMethod(v) {
   return x;
 }
 
+// Un mismo medio guardado con dos códigos: el POS graba Mercado Pago como QR o
+// MERCADOPAGO. Filtrar por uno solo deja afuera la mayoría de los cobros.
+function payMethodCodes(pm) {
+  const x = normalizePayMethod(pm);
+  if (!x) return [];
+  if (x === "MERCADOPAGO" || x === "QR") return ["MERCADOPAGO", "QR"];
+  return [x];
+}
+function payMethodInSql(pm) {
+  return payMethodCodes(pm).map((c) => sequelize.escape(c)).join(", ");
+}
+
 function allowedSalePayMethodsSet() {
   return new Set(["CASH", "TRANSFER", "CARD", "QR", "MERCADOPAGO", "CREDIT_SJT", "OTHER"]);
 }
@@ -345,6 +357,13 @@ function buildWhereFromQuery(req) {
       { customer_doc: { [Op.like]: `%${q}%` } },
     ];
 
+    const itemsTableQ = getTableName(SaleItem, "sale_items");
+    const likeQ = sequelize.escape(`%${q}%`);
+    where[Op.or].push(literal(`EXISTS (
+      SELECT 1 FROM ${itemsTableQ} siq
+      WHERE siq.sale_id = Sale.id AND (siq.product_name_snapshot LIKE ${likeQ} OR siq.product_sku_snapshot LIKE ${likeQ})
+    )`));
+
     if (Number.isFinite(qNum)) {
       where[Op.or].push({ id: toInt(qNum, 0) });
       where[Op.or].push({ total: qNum });
@@ -368,7 +387,7 @@ function injectExistsFiltersIntoWhere(where, req) {
     ands.push(
       literal(`EXISTS (
         SELECT 1 FROM ${payTable} p2
-        WHERE p2.sale_id = Sale.id AND UPPER(p2.method) = ${sequelize.escape(pay_method)}
+        WHERE p2.sale_id = Sale.id AND UPPER(p2.method) IN (${payMethodInSql(pay_method)})
       )`)
     );
   }
@@ -490,88 +509,149 @@ async function listSales(req, res, next) {
   }
 }
 
+// ============================
+// Condiciones SQL de ventas (alias s). La usan stats y facets: el número que
+// muestra una opción del panel y lo que devuelve el listado salen de acá.
+// `except` saca un criterio, para contar cada grupo contra los demás.
+// ============================
+function salesSqlConds(req, where, except = "") {
+  const payTable = getTableName(Payment, "payments");
+  const itemsTable = getTableName(SaleItem, "sale_items");
+  const conds = [];
+  const repl = {};
+
+  // La sucursal solo se suelta para quien puede elegirla (super admin)
+  if (where.branch_id && !(except === "branch" && access.isSuperAdmin(req))) {
+    conds.push("s.branch_id = :branch_id");
+    repl.branch_id = where.branch_id;
+  }
+  if (where.status && except !== "status") {
+    conds.push("s.status = :status");
+    repl.status = where.status;
+  }
+
+  if (where.sold_at?.[Op.between]) {
+    conds.push("s.sold_at BETWEEN :from AND :to");
+    repl.from = where.sold_at[Op.between][0];
+    repl.to = where.sold_at[Op.between][1];
+  } else if (where.sold_at?.[Op.gte]) {
+    conds.push("s.sold_at >= :from");
+    repl.from = where.sold_at[Op.gte];
+  } else if (where.sold_at?.[Op.lte]) {
+    conds.push("s.sold_at <= :to");
+    repl.to = where.sold_at[Op.lte];
+  }
+
+  const q = String(req.query.q || "").trim();
+  if (q) {
+    repl.qLike = `%${q}%`;
+    // Mismo criterio que el listado: un número también busca por ID y por total
+    const qNum = toFloat(q, NaN);
+    if (Number.isFinite(qNum)) { repl.qId = toInt(qNum, 0); repl.qNum = qNum; }
+    conds.push(`(s.customer_name LIKE :qLike OR s.sale_number LIKE :qLike OR s.customer_phone LIKE :qLike OR s.customer_doc LIKE :qLike
+      ${Number.isFinite(qNum) ? "OR s.id = :qId OR s.total = :qNum OR s.paid_total = :qNum" : ""}
+      OR EXISTS (SELECT 1 FROM ${itemsTable} siq WHERE siq.sale_id = s.id AND (siq.product_name_snapshot LIKE :qLike OR siq.product_sku_snapshot LIKE :qLike)))`);
+  }
+
+  const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
+  if (seller_id > 0 && except !== "seller") {
+    conds.push("s.user_id = :seller_id");
+    repl.seller_id = seller_id;
+  }
+
+  const customer = req.query.customer;
+  if (customer != null && String(customer).trim()) {
+    repl.cLike = `%${String(customer).trim()}%`;
+    conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
+  }
+
+  const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
+  if (pay_method && except !== "pay_method") {
+    repl.pay_methods = payMethodCodes(pay_method);
+    conds.push(`EXISTS (SELECT 1 FROM ${payTable} p2 WHERE p2.sale_id = s.id AND UPPER(p2.method) IN (:pay_methods))`);
+  }
+
+  const product = readProductFilter(req);
+  if (product) {
+    const pNum = toInt(product, 0);
+    if (pNum > 0) {
+      conds.push(`EXISTS (SELECT 1 FROM ${itemsTable} si2 WHERE si2.sale_id = s.id AND si2.product_id = :product_id)`);
+      repl.product_id = pNum;
+    } else {
+      conds.push(`EXISTS (
+        SELECT 1 FROM ${itemsTable} si2
+        WHERE si2.sale_id = s.id AND (
+          si2.product_name_snapshot LIKE :pLike OR
+          si2.product_sku_snapshot LIKE :pLike OR
+          si2.product_barcode_snapshot LIKE :pLike
+        )
+      )`);
+      repl.pLike = `%${product}%`;
+    }
+  }
+
+  return { conds, repl };
+}
+
+// ============================
+// GET /api/v1/pos/sales/facets
+// Cantidad de ventas por opción de cada grupo del panel de filtros, contada
+// con los demás filtros aplicados (menos el del propio grupo).
+// ============================
+async function facetsSales(req, res, next) {
+  try {
+    const base = buildWhereFromQuery(req);
+    if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
+
+    const salesTable = getTableName(Sale, "sales");
+    const payTable = getTableName(Payment, "payments");
+    const branchTable = getTableName(Branch, "branches");
+    const userTable = getTableName(User, "users");
+    const run = async (except, sqlFn) => {
+      const { conds, repl } = salesSqlConds(req, base.where, except);
+      const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+      const [rows] = await sequelize.query(sqlFn(whereSql), { replacements: repl });
+      return rows || [];
+    };
+
+    const [estados, sucursales, medios, cajeros] = await Promise.all([
+      run("status", (w) => `SELECT s.status AS k, COUNT(*) AS n FROM ${salesTable} s ${w} GROUP BY s.status`),
+      run("branch", (w) => `SELECT s.branch_id AS k, MAX(b.name) AS label, COUNT(*) AS n
+        FROM ${salesTable} s LEFT JOIN ${branchTable} b ON b.id = s.branch_id ${w} GROUP BY s.branch_id`),
+      run("pay_method", (w) => `SELECT CASE WHEN UPPER(p.method) IN ('QR','MERCADOPAGO') THEN 'MERCADOPAGO' ELSE UPPER(p.method) END AS k,
+          COUNT(DISTINCT s.id) AS n
+        FROM ${payTable} p INNER JOIN ${salesTable} s ON s.id = p.sale_id ${w} GROUP BY k`),
+      run("seller", (w) => `SELECT s.user_id AS k,
+          MAX(TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,'')))) AS label,
+          MAX(u.username) AS username, COUNT(*) AS n
+        FROM ${salesTable} s LEFT JOIN ${userTable} u ON u.id = s.user_id ${w} GROUP BY s.user_id ORDER BY n DESC`),
+    ]);
+
+    const n = (r) => toInt(r.n, 0);
+    return res.json({
+      ok: true,
+      data: {
+        status: estados.map((r) => ({ value: String(r.k || ""), count: n(r) })),
+        branch: sucursales.map((r) => ({ value: toInt(r.k, 0), label: r.label || `Sucursal #${r.k}`, count: n(r) })),
+        pay_method: medios.map((r) => ({ value: String(r.k || "OTHER"), count: n(r) })),
+        seller: cajeros.map((r) => ({ value: toInt(r.k, 0), label: String(r.label || "").trim() || r.username || `Usuario #${r.k}`, count: n(r) })),
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
 async function statsSales(req, res, next) {
   try {
     const base = buildWhereFromQuery(req);
     if (!base.ok) return res.status(400).json({ ok: false, code: base.code, message: base.message });
 
-    const where = base.where;
-
     const salesTable = getTableName(Sale, "sales");
     const payTable = getTableName(Payment, "payments");
     const refundsTable = getTableName(SaleRefund, "sale_refunds");
-    const itemsTable = getTableName(SaleItem, "sale_items");
 
-    const conds = [];
-    const repl = {};
-
-    if (where.branch_id) {
-      conds.push("s.branch_id = :branch_id");
-      repl.branch_id = where.branch_id;
-    }
-    if (where.status) {
-      conds.push("s.status = :status");
-      repl.status = where.status;
-    }
-
-    if (where.sold_at?.[Op.between]) {
-      conds.push("s.sold_at BETWEEN :from AND :to");
-      repl.from = where.sold_at[Op.between][0];
-      repl.to = where.sold_at[Op.between][1];
-    } else if (where.sold_at?.[Op.gte]) {
-      conds.push("s.sold_at >= :from");
-      repl.from = where.sold_at[Op.gte];
-    } else if (where.sold_at?.[Op.lte]) {
-      conds.push("s.sold_at <= :to");
-      repl.to = where.sold_at[Op.lte];
-    }
-
-    const q = String(req.query.q || "").trim();
-    if (q) {
-      repl.qLike = `%${q}%`;
-      conds.push(
-        "(s.customer_name LIKE :qLike OR s.sale_number LIKE :qLike OR s.customer_phone LIKE :qLike OR s.customer_doc LIKE :qLike)"
-      );
-    }
-
-    const seller_id = toInt(req.query.seller_id ?? req.query.user_id ?? req.query.sellerId ?? req.query.seller, 0);
-    if (seller_id > 0) {
-      conds.push("s.user_id = :seller_id");
-      repl.seller_id = seller_id;
-    }
-
-    const customer = req.query.customer;
-    if (customer != null && String(customer).trim()) {
-      const cStr = String(customer).trim();
-      repl.cLike = `%${cStr}%`;
-      conds.push("(s.customer_name LIKE :cLike OR s.customer_doc LIKE :cLike OR s.customer_phone LIKE :cLike)");
-    }
-
-    const pay_method = normalizePayMethod(req.query.pay_method || req.query.method || "");
-    if (pay_method) {
-      repl.pay_method = pay_method;
-      conds.push(`EXISTS (SELECT 1 FROM ${payTable} p2 WHERE p2.sale_id = s.id AND UPPER(p2.method) = :pay_method)`);
-    }
-
-    const product = readProductFilter(req);
-    if (product) {
-      const pNum = toInt(product, 0);
-      if (pNum > 0) {
-        conds.push(`EXISTS (SELECT 1 FROM ${itemsTable} si2 WHERE si2.sale_id = s.id AND si2.product_id = :product_id)`);
-        repl.product_id = pNum;
-      } else {
-        conds.push(`EXISTS (
-          SELECT 1 FROM ${itemsTable} si2
-          WHERE si2.sale_id = s.id AND (
-            si2.product_name_snapshot LIKE :pLike OR
-            si2.product_sku_snapshot LIKE :pLike OR
-            si2.product_barcode_snapshot LIKE :pLike
-          )
-        )`);
-        repl.pLike = `%${product}%`;
-      }
-    }
-
+    const { conds, repl } = salesSqlConds(req, base.where);
     const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
     const refundsJoin = `
@@ -1841,6 +1921,7 @@ async function emailSaleReceipt(req, res, next) {
 module.exports = {
   listSales,
   statsSales,
+  facetsSales,
   getSaleById,
   listRefundsBySale,
   listExchangesBySale,
