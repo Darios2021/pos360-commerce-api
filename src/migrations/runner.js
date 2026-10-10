@@ -330,6 +330,16 @@ columnSteps.push(
   { id: "products__min_stock",     table: "products", column: "min_stock",     def: "DECIMAL(12,3) NULL COMMENT 'Stock minimo: por debajo, aviso de stock bajo'" },
 );
 
+// ── Alta de producto: costo en dólares y precio instalador ──────────────
+// cost_currency = 'USD' → `cost` está en dólares y la lista se calcula con la
+// cotización guardada en fx_rate (dólar oficial venta, la misma fuente que
+// usan los presupuestos).
+columnSteps.push(
+  { id: "products__cost_currency",   table: "products", column: "cost_currency",   def: "VARCHAR(3) NULL COMMENT 'Moneda del costo: NULL o ARS = pesos, USD = dolares'" },
+  { id: "products__fx_rate",         table: "products", column: "fx_rate",         def: "DECIMAL(12,4) NULL COMMENT 'Cotizacion usada para calcular la lista desde un costo en dolares'" },
+  { id: "products__price_installer", table: "products", column: "price_installer", def: "DECIMAL(12,2) NULL COMMENT 'Precio para instaladores'" },
+);
+
 async function columnExists(sequelize, table, column) {
   try {
     const rows = await sequelize.query(
