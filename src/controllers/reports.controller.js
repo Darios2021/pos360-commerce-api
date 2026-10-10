@@ -363,6 +363,41 @@ async function getGananciaReport(req, res, next) {
       { replacements: { from, to, branchId } }
     );
 
+    // Por operación: la ganancia de cada venta. El neto sin IVA se calcula por
+    // línea porque cada producto tiene su alícuota.
+    let ventas = [];
+    if (String(req.query.por || "") === "venta") {
+      const [rv] = await sequelize.query(
+        `
+        SELECT
+          si.sale_id,
+          SUM(si.quantity) AS qty,
+          SUM(si.line_total) AS vendido,
+          SUM(si.line_total / (1 + COALESCE(p.tax_rate, 21) / 100)) AS neto,
+          SUM(si.quantity * COALESCE(si.unit_cost, ${costoActual})) AS costo,
+          SUM(CASE WHEN si.unit_cost IS NULL THEN si.quantity ELSE 0 END) AS qty_estimada,
+          SUM(CASE WHEN COALESCE(si.unit_cost, ${costoActual}) <= 0 THEN si.quantity ELSE 0 END) AS qty_sin_costo
+        FROM sale_items si
+        JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN products p ON p.id = si.product_id
+        WHERE s.status = 'PAID'
+          AND s.sold_at >= :from AND s.sold_at < :to
+          ${branchId ? "AND s.branch_id = :branchId" : ""}
+        GROUP BY si.sale_id
+        `,
+        { replacements: { from, to, branchId } }
+      );
+      ventas = rv.map((r) => ({
+        sale_id: Number(r.sale_id),
+        qty: Number(r.qty) || 0,
+        vendido: money(r.vendido),
+        neto: money(r.neto),
+        costo: money(r.costo),
+        qty_estimada: Number(r.qty_estimada) || 0,
+        qty_sin_costo: Number(r.qty_sin_costo) || 0,
+      }));
+    }
+
     const filas = rows.map((r) => ({
       branch_id: Number(r.branch_id) || null,
       branch_name: r.branch_name || "",
@@ -385,6 +420,7 @@ async function getGananciaReport(req, res, next) {
       data: {
         period: { from, to, branch_id: branchId || null },
         rows: filas,
+        ventas,
       },
     });
   } catch (e) {
