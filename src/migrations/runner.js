@@ -298,6 +298,38 @@ const tableSteps = [
   },
 ];
 
+// ── Alta de producto: proveedor, compra, unidad y stock mínimo ──────────
+// Del formulario de artículos del sistema anterior. El stock mínimo es por
+// producto (como allá): alimenta el aviso de stock bajo.
+tableSteps.push({
+  id:    "suppliers",
+  table: "suppliers",
+  sql: `
+    CREATE TABLE IF NOT EXISTS suppliers (
+      id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name        VARCHAR(160) NOT NULL COMMENT 'Razon social o nombre del proveedor',
+      tax_id      VARCHAR(20) NULL COMMENT 'CUIT',
+      phone       VARCHAR(40) NULL,
+      email       VARCHAR(160) NULL,
+      is_active   TINYINT(1) NOT NULL DEFAULT 1,
+      created_by  BIGINT UNSIGNED NULL,
+      created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY ix_suppliers_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Proveedores de mercaderia';
+  `,
+});
+columnSteps.push(
+  { id: "products__supplier_id",   table: "products", column: "supplier_id",   def: "BIGINT UNSIGNED NULL COMMENT 'Proveedor habitual (suppliers.id)'" },
+  { id: "products__supplier_code", table: "products", column: "supplier_code", def: "VARCHAR(64) NULL COMMENT 'Codigo del articulo en el catalogo del proveedor'" },
+  { id: "products__unit",          table: "products", column: "unit",          def: "VARCHAR(20) NULL COMMENT 'Unidad de medida: unidad, metro, caja, kg, litro, par'" },
+  { id: "products__location",      table: "products", column: "location",      def: "VARCHAR(60) NULL COMMENT 'Ubicacion fisica (estante, deposito)'" },
+  { id: "products__purchase_date", table: "products", column: "purchase_date", def: "DATE NULL COMMENT 'Fecha de la ultima compra'" },
+  { id: "products__min_stock",     table: "products", column: "min_stock",     def: "DECIMAL(12,3) NULL COMMENT 'Stock minimo: por debajo, aviso de stock bajo'" },
+);
+
 async function columnExists(sequelize, table, column) {
   try {
     const rows = await sequelize.query(
