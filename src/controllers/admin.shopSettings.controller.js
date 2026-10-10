@@ -21,6 +21,9 @@ const ALLOWED_KEYS = new Set([
   "payments",
   "notify",
   "fiscal",
+  // Parámetros de precios del negocio (IIBB, recargo sobre la ganancia y
+  // reparto franquicia/local). Los usan el reporte de ganancia y el alta.
+  "precios",
 ]);
 
 function cleanKey(k) {
@@ -42,6 +45,8 @@ function safeJson(v) {
 
 function getDefaultValueByKey(key) {
   switch (key) {
+    case "precios":
+      return { iibb: 3.5, recargo: 11, franquicia: 60 };
     case "fiscal":
       return {
         enabled: false,

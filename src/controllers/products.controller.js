@@ -1966,6 +1966,44 @@ async function getStats(req, res, next) {
 // con la cotización del día: costo × cotización × (1 + %) × (1 + IVA).
 // Contado y revendedor no se tocan: se cargan a mano.
 // ============================
+// =====================
+// POST /api/v1/products/costs
+// Carga de costos en lote (pantalla "Costos faltantes"): sólo toca costo,
+// moneda y cotización de cada producto. Body: { items: [{ id, cost,
+// cost_currency: null|"USD", fx_rate }] }
+// =====================
+async function setCosts(req, res, next) {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 500) : [];
+    const limpios = [];
+    for (const it of items) {
+      const id = toInt(it?.id, 0);
+      const cost = toFloat(it?.cost, NaN);
+      if (!id || !Number.isFinite(cost) || cost <= 0) continue;
+      const usd = String(it?.cost_currency || "").toUpperCase() === "USD";
+      const fx = toFloat(it?.fx_rate, NaN);
+      if (usd && !(fx > 0)) {
+        return res.status(400).json({ ok: false, code: "FX_REQUIRED", message: "Falta la cotización para los costos en dólares." });
+      }
+      limpios.push({ id, cost: Math.round(cost * 100) / 100, cost_currency: usd ? "USD" : null, fx_rate: usd ? fx : null });
+    }
+    if (!limpios.length) {
+      return res.status(400).json({ ok: false, code: "VALIDATION", message: "No hay costos para guardar." });
+    }
+    await sequelize.transaction(async (t) => {
+      for (const it of limpios) {
+        await sequelize.query(
+          `UPDATE products SET cost = :cost, cost_currency = :cost_currency, fx_rate = COALESCE(:fx_rate, fx_rate) WHERE id = :id`,
+          { replacements: it, transaction: t }
+        );
+      }
+    });
+    return res.json({ ok: true, data: { updated: limpios.length } });
+  } catch (e) {
+    next(e);
+  }
+}
+
 async function repriceUsd(req, res, next) {
   try {
     const rate = toFloat(req.body?.rate, NaN);
@@ -2082,5 +2120,6 @@ module.exports = {
   getStats,
   pauseAllPromos,
   repriceUsd,
+  setCosts,
   resumeAllPromos,
 };
