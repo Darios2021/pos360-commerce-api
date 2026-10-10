@@ -405,6 +405,10 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkNumber("price_reseller", payload.price_reseller, { min: 0, allowNull: true });
   checkNumber("cost", payload.cost, { min: 0, allowNull: true });
   checkNumber("markup_pct", payload.markup_pct, { min: 0, allowNull: true });
+  checkNumber("min_stock", payload.min_stock, { min: 0, allowNull: true });
+  checkString("supplier_code", payload.supplier_code, { required: false, max: 64 });
+  checkString("unit", payload.unit, { required: false, max: 20 });
+  checkString("location", payload.location, { required: false, max: 60 });
 
   if (payload.price_list !== undefined && payload.price_discount !== undefined) {
     const pl = payload.price_list === null ? null : toFloat(payload.price_list, NaN);
@@ -484,6 +488,12 @@ function pickBody(body = {}) {
     "price_discount",
     "price_reseller",
     "markup_pct",
+    "supplier_id",
+    "supplier_code",
+    "unit",
+    "location",
+    "purchase_date",
+    "min_stock",
     "tax_rate",
     "branch_id",
     // Promo
@@ -516,6 +526,19 @@ function pickBody(body = {}) {
 
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
+  // Compra y stock: vacío = NULL
+  for (const k of ["supplier_code", "unit", "location"]) {
+    if (k in out) out[k] = out[k] == null || String(out[k]).trim() === "" ? null : String(out[k]).trim();
+  }
+  if ("supplier_id" in out) out.supplier_id = toInt(out.supplier_id, 0) || null;
+  if ("purchase_date" in out) {
+    const d = String(out.purchase_date || "").slice(0, 10);
+    out.purchase_date = /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+  }
+  if ("min_stock" in out) {
+    const m = out.min_stock === "" || out.min_stock == null ? null : toFloat(out.min_stock, NaN);
+    out.min_stock = Number.isFinite(m) ? m : null;
+  }
   // % de ganancia: vacío = la lista se cargó a mano
   if ("markup_pct" in out) {
     const m = out.markup_pct === "" || out.markup_pct == null ? null : toFloat(out.markup_pct, NaN);

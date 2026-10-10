@@ -131,6 +131,11 @@ router.get("/next-code", allowAdminOrPermission("products.read"), productsCtrl.g
 // ✅ Stats agregadas (mismos filtros base que list)
 router.get("/stats", allowAdminOrPermission("products.read"), productsCtrl.getStats);
 
+// Proveedores (antes de las rutas /:id)
+const suppliersCtrl = require("../controllers/suppliers.controller.js");
+router.get("/suppliers", allowAdminOrPermission("products.read"), suppliersCtrl.list);
+router.post("/suppliers", requireProductsOperate, suppliersCtrl.create);
+
 // ✅ Bulk promo: pausar / reactivar todas
 router.post("/promos/pause-all",  requireProductsOperate, productsCtrl.pauseAllPromos);
 router.post("/promos/resume-all", requireProductsOperate, productsCtrl.resumeAllPromos);

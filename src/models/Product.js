@@ -63,6 +63,13 @@ module.exports = (sequelize, DataTypes) => {
       price_reseller: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
       // % de ganancia sobre el costo con el que se calculó la lista (NULL = lista a mano)
       markup_pct: { type: DataTypes.DECIMAL(7, 2), allowNull: true, defaultValue: null },
+      // Compra y stock (formulario de artículos del sistema anterior)
+      supplier_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: true, defaultValue: null },
+      supplier_code: { type: DataTypes.STRING(64), allowNull: true, defaultValue: null },
+      unit: { type: DataTypes.STRING(20), allowNull: true, defaultValue: null },
+      location: { type: DataTypes.STRING(60), allowNull: true, defaultValue: null },
+      purchase_date: { type: DataTypes.DATEONLY, allowNull: true, defaultValue: null },
+      min_stock: { type: DataTypes.DECIMAL(12, 3), allowNull: true, defaultValue: null },
 
       // Promo por tiempo (precio fijo dentro de una ventana)
       promo_price: { type: DataTypes.DECIMAL(12, 2), allowNull: true, defaultValue: null },
