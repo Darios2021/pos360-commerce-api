@@ -135,6 +135,8 @@ router.get("/stats", allowAdminOrPermission("products.read"), productsCtrl.getSt
 const suppliersCtrl = require("../controllers/suppliers.controller.js");
 router.get("/suppliers", allowAdminOrPermission("products.read"), suppliersCtrl.list);
 router.post("/suppliers", requireProductsOperate, suppliersCtrl.create);
+router.get("/suppliers/:id", allowAdminOrPermission("products.read"), suppliersCtrl.getOne);
+router.put("/suppliers/:id", requireProductsOperate, suppliersCtrl.update);
 
 // ✅ Bulk promo: pausar / reactivar todas
 router.post("/promos/pause-all",  requireProductsOperate, productsCtrl.pauseAllPromos);
