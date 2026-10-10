@@ -1833,6 +1833,16 @@ async function getStats(req, res, next) {
 
     const imagesExists = `EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id LIMIT 1)`;
 
+    // Stock bajo: el mismo criterio que el filtro stock=low del listado (1 a 3 unidades)
+    const scoped = !superAdmin || branchIdQuery > 0;
+    const sbScope = scoped
+      ? "JOIN warehouses w ON w.id = sb.warehouse_id WHERE sb.product_id = p.id AND w.branch_id = :stockBranchId"
+      : "WHERE sb.product_id = p.id";
+    const lowExists = `EXISTS (SELECT 1 FROM stock_balances sb ${sbScope} AND sb.qty > 0 AND sb.qty <= 3)`;
+    // Unidades y valor del inventario a precio de venta (contado; si no hay, lista)
+    const unitsExpr = `(SELECT COALESCE(SUM(sb.qty),0) FROM stock_balances sb ${sbScope} AND sb.qty BETWEEN 1 AND 999999)`;
+    const unitPrice = `COALESCE(NULLIF(p.price_discount,0), NULLIF(p.price_list,0), p.price, 0)`;
+
     const [[row]] = await sequelize.query(
       `
       SELECT
@@ -1849,7 +1859,11 @@ async function getStats(req, res, next) {
               WHEN p.is_promo = 1
                AND (p.promo_starts_at IS NULL OR p.promo_starts_at <= NOW())
                AND (p.promo_ends_at   IS NULL OR p.promo_ends_at   >= NOW())
-              THEN 1 ELSE 0 END) AS promo_active
+              THEN 1 ELSE 0 END) AS promo_active,
+        SUM(CASE WHEN ${lowExists} THEN 1 ELSE 0 END) AS low_stock,
+        SUM(CASE WHEN ${stockExists} AND NOT ${lowExists} THEN 1 ELSE 0 END) AS ok_stock,
+        COALESCE(SUM(${unitsExpr}),0) AS stock_units,
+        COALESCE(SUM(${unitsExpr} * ${unitPrice}),0) AS stock_value
       FROM products p
       ${joinPb}
       ${whereClause}
@@ -1870,6 +1884,10 @@ async function getStats(req, res, next) {
         with_images: toInt(row?.with_images, 0),
         without_images: toInt(row?.without_images, 0),
         promo_active: toInt(row?.promo_active, 0),
+        low_stock: toInt(row?.low_stock, 0),
+        ok_stock: toInt(row?.ok_stock, 0),
+        stock_units: Number(row?.stock_units || 0),
+        stock_value: Number(row?.stock_value || 0),
       },
     });
   } catch (e) {
