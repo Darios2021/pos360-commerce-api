@@ -403,6 +403,8 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkNumber("price_list", payload.price_list, { min: 0, allowNull: true });
   checkNumber("price_discount", payload.price_discount, { min: 0, allowNull: true });
   checkNumber("price_reseller", payload.price_reseller, { min: 0, allowNull: true });
+  checkNumber("cost", payload.cost, { min: 0, allowNull: true });
+  checkNumber("markup_pct", payload.markup_pct, { min: 0, allowNull: true });
 
   if (payload.price_list !== undefined && payload.price_discount !== undefined) {
     const pl = payload.price_list === null ? null : toFloat(payload.price_list, NaN);
@@ -481,6 +483,7 @@ function pickBody(body = {}) {
     "price_list",
     "price_discount",
     "price_reseller",
+    "markup_pct",
     "tax_rate",
     "branch_id",
     // Promo
@@ -513,6 +516,11 @@ function pickBody(body = {}) {
 
   const nums = ["warranty_months", "cost", "price", "price_list", "price_discount", "price_reseller", "tax_rate"];
   for (const n of nums) if (out[n] != null) out[n] = toFloat(out[n], 0);
+  // % de ganancia: vacío = la lista se cargó a mano
+  if ("markup_pct" in out) {
+    const m = out.markup_pct === "" || out.markup_pct == null ? null : toFloat(out.markup_pct, NaN);
+    out.markup_pct = Number.isFinite(m) ? m : null;
+  }
 
   // ── Promo: normalización ────────────────────────────────────────────────
   // Cadenas vacías → null para que la DB las acepte como NULL

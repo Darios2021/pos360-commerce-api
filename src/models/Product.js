@@ -61,6 +61,8 @@ module.exports = (sequelize, DataTypes) => {
       price_list: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
       price_discount: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
       price_reseller: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: "0.00" },
+      // % de ganancia sobre el costo con el que se calculó la lista (NULL = lista a mano)
+      markup_pct: { type: DataTypes.DECIMAL(7, 2), allowNull: true, defaultValue: null },
 
       // Promo por tiempo (precio fijo dentro de una ventana)
       promo_price: { type: DataTypes.DECIMAL(12, 2), allowNull: true, defaultValue: null },
