@@ -340,6 +340,17 @@ columnSteps.push(
   { id: "products__price_installer", table: "products", column: "price_installer", def: "DECIMAL(12,2) NULL COMMENT 'Precio para instaladores'" },
 );
 
+// Costo del producto al momento de la venta, en pesos (USD × cotización del
+// producto). Lo usa el reporte "Ganancia y reparto": si mañana cambia el
+// costo, lo vendido antes no cambia con él. NULL = venta anterior a la
+// columna (el reporte la estima con el costo actual).
+columnSteps.push({
+  id:     "sale_items__unit_cost",
+  table:  "sale_items",
+  column: "unit_cost",
+  def:    "DECIMAL(12,2) NULL COMMENT 'Costo unitario en pesos al momento de la venta'",
+});
+
 async function columnExists(sequelize, table, column) {
   try {
     const rows = await sequelize.query(
