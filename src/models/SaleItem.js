@@ -53,6 +53,12 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 0,
       },
 
+      // Costo unitario en pesos al momento de la venta (reporte de ganancia).
+      unit_cost: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: true,
+      },
+
       product_name_snapshot: {
         type: DataTypes.STRING(200),
         allowNull: true,

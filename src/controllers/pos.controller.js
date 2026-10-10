@@ -1476,6 +1476,19 @@ async function listSuggestionsForPos(req, res) {
 /* =========================
    POST /pos/sales
 ========================= */
+// Costo del producto en pesos al momento de vender (USD × su cotización).
+// Queda en sale_items.unit_cost para el reporte de ganancia; null si el
+// producto no tiene costo cargado.
+function costoEnPesos(p) {
+  const c = Number(p?.cost || 0);
+  if (!(c > 0)) return null;
+  if (String(p?.cost_currency || "").toUpperCase() === "USD") {
+    const fx = Number(p?.fx_rate || 0);
+    return fx > 0 ? Math.round(c * fx * 100) / 100 : null;
+  }
+  return Math.round(c * 100) / 100;
+}
+
 async function createSale(req, res) {
   req._rid = req._rid || rid(req);
 
@@ -1875,6 +1888,7 @@ async function createSale(req, res) {
           product_name_snapshot: p.name,
           product_sku_snapshot: p.sku,
           product_barcode_snapshot: p.barcode,
+          unit_cost: costoEnPesos(p),
         },
         { transaction: t }
       );
@@ -2766,6 +2780,7 @@ async function createSaleExchange(req, res) {
           product_name_snapshot: p.name,
           product_sku_snapshot: p.sku,
           product_barcode_snapshot: p.barcode,
+          unit_cost: costoEnPesos(p),
         },
         { transaction: t }
       );
