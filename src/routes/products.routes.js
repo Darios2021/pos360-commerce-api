@@ -139,6 +139,7 @@ router.post("/suppliers", requireProductsOperate, suppliersCtrl.create);
 // ✅ Bulk promo: pausar / reactivar todas
 router.post("/promos/pause-all",  requireProductsOperate, productsCtrl.pauseAllPromos);
 router.post("/promos/resume-all", requireProductsOperate, productsCtrl.resumeAllPromos);
+router.post("/usd-reprice", requireProductsOperate, productsCtrl.repriceUsd);
 
 // ✅ Listado
 router.get("/", allowAdminOrPermission("products.read"), productsCtrl.list);

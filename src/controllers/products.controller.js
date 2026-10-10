@@ -406,6 +406,8 @@ function validateProductPayload(payload, { isPatch = false } = {}) {
   checkNumber("cost", payload.cost, { min: 0, allowNull: true });
   checkNumber("markup_pct", payload.markup_pct, { min: 0, allowNull: true });
   checkNumber("min_stock", payload.min_stock, { min: 0, allowNull: true });
+  checkNumber("fx_rate", payload.fx_rate, { min: 0, allowNull: true });
+  checkNumber("price_installer", payload.price_installer, { min: 0, allowNull: true });
   checkString("supplier_code", payload.supplier_code, { required: false, max: 64 });
   checkString("unit", payload.unit, { required: false, max: 20 });
   checkString("location", payload.location, { required: false, max: 60 });
@@ -494,6 +496,9 @@ function pickBody(body = {}) {
     "location",
     "purchase_date",
     "min_stock",
+    "cost_currency",
+    "fx_rate",
+    "price_installer",
     "tax_rate",
     "branch_id",
     // Promo
@@ -538,6 +543,14 @@ function pickBody(body = {}) {
   if ("min_stock" in out) {
     const m = out.min_stock === "" || out.min_stock == null ? null : toFloat(out.min_stock, NaN);
     out.min_stock = Number.isFinite(m) ? m : null;
+  }
+  // Moneda del costo: solo USD se guarda; cualquier otra cosa = pesos (NULL)
+  if ("cost_currency" in out) out.cost_currency = String(out.cost_currency || "").toUpperCase() === "USD" ? "USD" : null;
+  for (const k of ["fx_rate", "price_installer"]) {
+    if (k in out) {
+      const v = out[k] === "" || out[k] == null ? null : toFloat(out[k], NaN);
+      out[k] = Number.isFinite(v) && v > 0 ? v : null;
+    }
   }
   // % de ganancia: vacío = la lista se cargó a mano
   if ("markup_pct" in out) {
@@ -1932,6 +1945,32 @@ async function getStats(req, res, next) {
 // POST /api/v1/products/promos/resume-all  → is_promo=1 a los que tienen
 //   configuración (promo_price>0, o promo_qty_threshold/discount, o ventana).
 // =====================
+// ============================
+// POST /products/usd-reprice  { rate }
+// Recalcula la lista de los productos con costo en dólares y % de ganancia,
+// con la cotización del día: costo × cotización × (1 + %) × (1 + IVA).
+// Contado y revendedor no se tocan: se cargan a mano.
+// ============================
+async function repriceUsd(req, res, next) {
+  try {
+    const rate = toFloat(req.body?.rate, NaN);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return res.status(400).json({ ok: false, code: "RATE_REQUIRED", message: "Falta una cotización válida." });
+    }
+    const [, meta] = await sequelize.query(
+      `UPDATE products
+          SET price_list = ROUND(cost * :rate * (1 + markup_pct / 100) * (1 + COALESCE(tax_rate, 0) / 100)),
+              fx_rate = :rate
+        WHERE cost_currency = 'USD' AND markup_pct IS NOT NULL AND cost > 0`,
+      { replacements: { rate } }
+    );
+    const affected = toInt(meta?.affectedRows ?? meta?.rowCount ?? 0, 0);
+    return res.json({ ok: true, data: { updated: affected, rate } });
+  } catch (e) {
+    next(e);
+  }
+}
+
 async function pauseAllPromos(req, res, next) {
   try {
     const [rowsBefore] = await sequelize.query(
@@ -2027,5 +2066,6 @@ module.exports = {
   getNextCode,
   getStats,
   pauseAllPromos,
+  repriceUsd,
   resumeAllPromos,
 };

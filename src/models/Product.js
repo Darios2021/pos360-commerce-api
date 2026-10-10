@@ -70,6 +70,10 @@ module.exports = (sequelize, DataTypes) => {
       location: { type: DataTypes.STRING(60), allowNull: true, defaultValue: null },
       purchase_date: { type: DataTypes.DATEONLY, allowNull: true, defaultValue: null },
       min_stock: { type: DataTypes.DECIMAL(12, 3), allowNull: true, defaultValue: null },
+      // Costo en dólares y precio instalador
+      cost_currency: { type: DataTypes.STRING(3), allowNull: true, defaultValue: null },
+      fx_rate: { type: DataTypes.DECIMAL(12, 4), allowNull: true, defaultValue: null },
+      price_installer: { type: DataTypes.DECIMAL(12, 2), allowNull: true, defaultValue: null },
 
       // Promo por tiempo (precio fijo dentro de una ventana)
       promo_price: { type: DataTypes.DECIMAL(12, 2), allowNull: true, defaultValue: null },
