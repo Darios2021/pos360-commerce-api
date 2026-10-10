@@ -189,6 +189,16 @@ const columnSteps = [
   },
 ];
 
+// ── Alta de producto: costo + % de ganancia → lista calculada ───────────
+// Se guarda el porcentaje para que al editar se vea con qué ganancia se
+// calculó la lista. NULL = la lista se cargó a mano.
+columnSteps.push({
+  id:     "products__markup_pct",
+  table:  "products",
+  column: "markup_pct",
+  def:    "DECIMAL(7,2) NULL COMMENT 'Porcentaje de ganancia sobre el costo con el que se calculo la lista'",
+});
+
 // Tablas a crear si no existen
 const tableSteps = [
   {
