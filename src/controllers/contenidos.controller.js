@@ -66,5 +66,7 @@ module.exports = {
   // Título y descripción del video (sólo se reenvían esos dos campos).
   editar: (req, res) => reenviar(req, res, "PATCH", `/piezas/${id(req)}`, { titulo: req.body?.titulo, descripcion: req.body?.descripcion }),
   borrar: (req, res) => reenviar(req, res, "DELETE", `/piezas/${id(req)}`),
+  // Corta un video en cola o dibujándose (no gasta más servidor ni voz).
+  cancelar: (req, res) => reenviar(req, res, "POST", `/piezas/${id(req)}/cancelar`),
   publicar: (req, res) => reenviar(req, res, "POST", `/piezas/${id(req)}/publicaciones`, req.body),
 };
