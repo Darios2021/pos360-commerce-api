@@ -125,6 +125,11 @@ async function list(req, res, next) {
       where.customer_type = customer_type;
     }
     if (acceptsPromos != null) where.accepts_promos = acceptsPromos;
+    // Mayoristas: la marca vive en las etiquetas (`tags`, "mayorista"). La usa
+    // el buscador de clientes del POS para traerlos sin escribir el nombre.
+    if (toBool(req.query.mayorista, false)) {
+      where.tags = { [Op.like]: "%mayorista%" };
+    }
 
     const { rows, count } = await Customer.findAndCountAll({
       where,
