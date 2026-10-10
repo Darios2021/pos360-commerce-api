@@ -862,6 +862,8 @@ async function list(req, res, next) {
     const stockMode = String(req.query.stock || req.query.stockFilter || "").toLowerCase().trim();
     const wantWithStock = stockMode === "with" || inStock || sellable;
     const wantWithoutStock = stockMode === "without";
+    // "low": con stock, pero 3 unidades o menos (el mismo umbral del tablero)
+    const wantLowStock = stockMode === "low";
 
     // ✅ FIX: parse opcional (NO convertir "" => 0)
     function hasQueryKey(key) {
@@ -978,6 +980,20 @@ async function list(req, res, next) {
         )`);
       } else {
         whereSql.push(`NOT EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = p.id AND sb.qty > 0)`);
+      }
+    } else if (wantLowStock) {
+      if (!superAdmin || branchIdQuery > 0) {
+        repl.stockBranchId = toInt(branchIdScope, 0);
+        whereSql.push(`EXISTS (
+          SELECT 1
+          FROM stock_balances sb
+          JOIN warehouses w ON w.id = sb.warehouse_id
+          WHERE sb.product_id = p.id
+            AND w.branch_id = :stockBranchId
+            AND sb.qty > 0 AND sb.qty <= 3
+        )`);
+      } else {
+        whereSql.push(`EXISTS (SELECT 1 FROM stock_balances sb WHERE sb.product_id = p.id AND sb.qty > 0 AND sb.qty <= 3)`);
       }
     }
 
