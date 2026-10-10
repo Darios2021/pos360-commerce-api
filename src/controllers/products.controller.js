@@ -945,6 +945,8 @@ async function list(req, res, next) {
       : null;
 
     const pricePresence = String(req.query.price_presence || req.query.pricePresence || "").toLowerCase().trim();
+    // Con o sin costo cargado (Productos › filtro "Sin costo").
+    const costPresence = String(req.query.cost_presence || "").toLowerCase().trim();
 
     const imagesMode = String(req.query.images || req.query.imagesFilter || "").toLowerCase().trim();
     const hasImages = imagesMode === "with" || String(req.query.has_images || "").toLowerCase() === "true";
@@ -1069,6 +1071,8 @@ async function list(req, res, next) {
     // ✅ Precio lista filtros (FIXED)
     if (pricePresence === "with") whereSql.push(`COALESCE(p.price_list,0) > 0`);
     if (pricePresence === "without") whereSql.push(`COALESCE(p.price_list,0) <= 0`);
+    if (costPresence === "with") whereSql.push(`COALESCE(p.cost,0) > 0`);
+    if (costPresence === "without") whereSql.push(`COALESCE(p.cost,0) <= 0`);
 
     if (priceMin != null) {
       repl.priceMin = priceMin;
@@ -1912,6 +1916,8 @@ async function getStats(req, res, next) {
         SUM(CASE WHEN NOT ${stockExists} THEN 1 ELSE 0 END) AS without_stock,
         SUM(CASE WHEN COALESCE(p.price_list,0) > 0 THEN 1 ELSE 0 END) AS with_price,
         SUM(CASE WHEN COALESCE(p.price_list,0) <= 0 THEN 1 ELSE 0 END) AS without_price,
+        SUM(CASE WHEN COALESCE(p.cost,0) > 0 THEN 1 ELSE 0 END) AS with_cost,
+        SUM(CASE WHEN COALESCE(p.cost,0) <= 0 THEN 1 ELSE 0 END) AS without_cost,
         SUM(CASE WHEN ${imagesExists} THEN 1 ELSE 0 END) AS with_images,
         SUM(CASE WHEN NOT ${imagesExists} THEN 1 ELSE 0 END) AS without_images,
         SUM(CASE
@@ -1940,6 +1946,8 @@ async function getStats(req, res, next) {
         without_stock: toInt(row?.without_stock, 0),
         with_price: toInt(row?.with_price, 0),
         without_price: toInt(row?.without_price, 0),
+        with_cost: toInt(row?.with_cost, 0),
+        without_cost: toInt(row?.without_cost, 0),
         with_images: toInt(row?.with_images, 0),
         without_images: toInt(row?.without_images, 0),
         promo_active: toInt(row?.promo_active, 0),
