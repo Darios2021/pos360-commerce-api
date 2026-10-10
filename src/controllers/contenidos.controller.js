@@ -54,8 +54,50 @@ const q = (req, claves) => {
 };
 const id = (req) => encodeURIComponent(String(req.params.id || "").replace(/[^a-z0-9]/gi, ""));
 
+// Redes conectadas (Meta) de la cuenta del comercio. La cuenta sale de /fuente
+// del servicio; los tokens van directo al servicio, que los guarda cifrados, y
+// nunca vuelven: GET sólo dice qué destinos están conectados y si hay ensayo.
+let cuentaCache = { valor: "", vence: 0 };
+async function cuentaDelComercio() {
+  if (cuentaCache.valor && Date.now() < cuentaCache.vence) return cuentaCache.valor;
+  const r = await fetch(`${BASE()}/fuente`, { headers: { Authorization: `Bearer ${CLAVE()}` }, signal: AbortSignal.timeout(15000) });
+  if (!r.ok) throw new Error(`fuente ${r.status}`);
+  const f = await r.json();
+  cuentaCache = { valor: String(f?.cuenta || ""), vence: Date.now() + 10 * 60 * 1000 };
+  return cuentaCache.valor;
+}
+async function redes(req, res, metodo, cuerpo) {
+  if (!BASE() || !CLAVE()) return noConfigurado(res);
+  let cuenta;
+  try { cuenta = await cuentaDelComercio(); } catch {
+    return res.status(502).json({ ok: false, code: "CONTENIDOS_SIN_RESPUESTA", message: "El servicio de contenidos no respondió." });
+  }
+  if (!cuenta) return res.status(409).json({ ok: false, code: "CONTENIDOS_SIN_CUENTA", message: "El servicio no informa la cuenta del comercio." });
+  return reenviar(req, res, metodo, `/cuentas/${encodeURIComponent(cuenta)}/meta`, cuerpo);
+}
+// Sólo se reenvían las llaves que entiende el servicio.
+function credenciales(body) {
+  const b = body || {};
+  const par = (o, k1) => (o && typeof o === "object" ? { [k1]: String(o[k1] || "").trim(), token: String(o.token || "").trim() } : undefined);
+  const out = {};
+  if (typeof b.ensayo === "boolean") out.ensayo = b.ensayo;
+  if (b.instagram) out.instagram = par(b.instagram, "ig_usuario_id");
+  if (b.facebook) out.facebook = par(b.facebook, "pagina_id");
+  if (b.whatsapp) out.whatsapp = par(b.whatsapp, "numero_id");
+  return out;
+}
+// Cambiar credenciales o salir del ensayo: sólo super admin.
+function soloSuperAdmin(req, res, next) {
+  const roles = req.access?.roles || [];
+  if (req.access?.is_super_admin || roles.includes("super_admin")) return next();
+  return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Sólo super administradores." });
+}
+
 module.exports = {
   soloAdmin,
+  soloSuperAdmin,
+  redes: (req, res) => redes(req, res, "GET"),
+  guardarRedes: (req, res) => redes(req, res, "PUT", credenciales(req.body)),
   fuente: (req, res) => reenviar(req, res, "GET", "/fuente"),
   productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
   voces: (req, res) => reenviar(req, res, "GET", "/voces"),
