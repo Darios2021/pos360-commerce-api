@@ -15,6 +15,7 @@ const {
   User,
 } = require("../models");
 const access = require("../utils/accessScope");
+const { sequelize } = require("../models");
 
 function toInt(v, def = null) {
   const n = Number(v);
@@ -293,6 +294,99 @@ async function getSalesReport(req, res, next) {
   }
 }
 
+// =====================================================================
+// GET /reports/ganancia
+// Ganancia y reparto: por producto y sucursal, lo vendido (line_total) y su
+// costo. El costo es el guardado en la venta (sale_items.unit_cost); para
+// ventas anteriores a esa columna se estima con el costo actual del producto
+// (USD × cotización), y se avisa cuántas unidades son estimadas. Los
+// porcentajes (IIBB, recargo, reparto) los aplica la pantalla: son parámetros
+// del negocio, no datos. Sólo admin de sucursal o super admin.
+// Parámetros: date_from, date_to (YYYY-MM-DD, hora de Argentina), branch_id?
+// =====================================================================
+function diaAR(s, sumarDia = false) {
+  const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00-03:00`);
+  if (sumarDia) d.setUTCDate(d.getUTCDate() + 1);
+  return d;
+}
+
+async function getGananciaReport(req, res, next) {
+  try {
+    const superAdmin = access.isSuperAdmin(req);
+    const branchAdmin = access.isBranchAdmin(req);
+    if (!superAdmin && !branchAdmin) {
+      return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Sólo administradores." });
+    }
+
+    const hoy = new Date().toISOString().slice(0, 10);
+    const from = diaAR(req.query.date_from) || diaAR(`${hoy.slice(0, 8)}01`);
+    const to = diaAR(req.query.date_to || hoy, true);
+
+    let branchId = toInt(req.query.branch_id, null);
+    if (!superAdmin) {
+      branchId = access.getBranchId(req);
+      if (!branchId) {
+        return res.status(400).json({ ok: false, code: "BRANCH_REQUIRED", message: "No se pudo determinar la sucursal del usuario." });
+      }
+    }
+
+    const costoActual = "CASE WHEN UPPER(COALESCE(p.cost_currency,'')) = 'USD' THEN COALESCE(p.cost,0) * COALESCE(p.fx_rate,0) ELSE COALESCE(p.cost,0) END";
+    const [rows] = await sequelize.query(
+      `
+      SELECT
+        s.branch_id,
+        b.name AS branch_name,
+        si.product_id,
+        MAX(si.product_name_snapshot) AS name,
+        MAX(si.product_sku_snapshot) AS sku,
+        MAX(COALESCE(p.tax_rate, 21)) AS tax_rate,
+        SUM(si.quantity) AS qty,
+        SUM(si.line_total) AS vendido,
+        SUM(si.quantity * COALESCE(si.unit_cost, ${costoActual})) AS costo,
+        SUM(CASE WHEN si.unit_cost IS NULL THEN si.quantity ELSE 0 END) AS qty_estimada,
+        SUM(CASE WHEN COALESCE(si.unit_cost, ${costoActual}) <= 0 THEN si.quantity ELSE 0 END) AS qty_sin_costo
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+      LEFT JOIN products p ON p.id = si.product_id
+      LEFT JOIN branches b ON b.id = s.branch_id
+      WHERE s.status = 'PAID'
+        AND s.sold_at >= :from AND s.sold_at < :to
+        ${branchId ? "AND s.branch_id = :branchId" : ""}
+      GROUP BY s.branch_id, b.name, si.product_id
+      ORDER BY vendido DESC
+      `,
+      { replacements: { from, to, branchId } }
+    );
+
+    const filas = rows.map((r) => ({
+      branch_id: Number(r.branch_id) || null,
+      branch_name: r.branch_name || "",
+      product_id: Number(r.product_id) || null,
+      name: r.name || "",
+      sku: r.sku || "",
+      tax_rate: Number(r.tax_rate) || 0,
+      qty: Number(r.qty) || 0,
+      vendido: money(r.vendido),
+      costo: money(r.costo),
+      qty_estimada: Number(r.qty_estimada) || 0,
+      qty_sin_costo: Number(r.qty_sin_costo) || 0,
+    }));
+
+    return res.json({
+      ok: true,
+      data: {
+        period: { from, to, branch_id: branchId || null },
+        rows: filas,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
 module.exports = {
   getSalesReport,
+  getGananciaReport,
 };
