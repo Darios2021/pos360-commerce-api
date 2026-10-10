@@ -17,14 +17,17 @@ function noConfigurado(res) {
   return res.status(503).json({ ok: false, code: "CONTENIDOS_NO_CONFIGURADO", message: "Falta configurar el servicio de contenidos." });
 }
 
+// Quién hace la acción, para la auditoría del servicio (altas y bajas de videos).
+const usuarioDe = (req) => String(req?.user?.email || req?.user?.username || req?.user?.sub || "").slice(0, 80);
+
 // Reenvía al servicio y devuelve su respuesta tal cual (estado y cuerpo).
-async function reenviar(res, metodo, ruta, cuerpo) {
+async function reenviar(req, res, metodo, ruta, cuerpo) {
   if (!BASE() || !CLAVE()) return noConfigurado(res);
   let r;
   try {
     r = await fetch(`${BASE()}${ruta}`, {
       method: metodo,
-      headers: { Authorization: `Bearer ${CLAVE()}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${CLAVE()}`, "Content-Type": "application/json", "X-Usuario": usuarioDe(req) },
       body: cuerpo ? JSON.stringify(cuerpo) : undefined,
       signal: AbortSignal.timeout(60000),
     });
@@ -53,12 +56,12 @@ const id = (req) => encodeURIComponent(String(req.params.id || "").replace(/[^a-
 
 module.exports = {
   soloAdmin,
-  fuente: (req, res) => reenviar(res, "GET", "/fuente"),
-  productos: (req, res) => reenviar(res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
-  guion: (req, res) => reenviar(res, "POST", "/guion", req.body),
-  listar: (req, res) => reenviar(res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
-  crear: (req, res) => reenviar(res, "POST", "/piezas", req.body),
-  ver: (req, res) => reenviar(res, "GET", `/piezas/${id(req)}`),
-  borrar: (req, res) => reenviar(res, "DELETE", `/piezas/${id(req)}`),
-  publicar: (req, res) => reenviar(res, "POST", `/piezas/${id(req)}/publicaciones`, req.body),
+  fuente: (req, res) => reenviar(req, res, "GET", "/fuente"),
+  productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
+  guion: (req, res) => reenviar(req, res, "POST", "/guion", req.body),
+  listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
+  crear: (req, res) => reenviar(req, res, "POST", "/piezas", req.body),
+  ver: (req, res) => reenviar(req, res, "GET", `/piezas/${id(req)}`),
+  borrar: (req, res) => reenviar(req, res, "DELETE", `/piezas/${id(req)}`),
+  publicar: (req, res) => reenviar(req, res, "POST", `/piezas/${id(req)}/publicaciones`, req.body),
 };
