@@ -58,6 +58,7 @@ module.exports = {
   soloAdmin,
   fuente: (req, res) => reenviar(req, res, "GET", "/fuente"),
   productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
+  voces: (req, res) => reenviar(req, res, "GET", "/voces"),
   guion: (req, res) => reenviar(req, res, "POST", "/guion", req.body),
   listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
   crear: (req, res) => reenviar(req, res, "POST", "/piezas", req.body),

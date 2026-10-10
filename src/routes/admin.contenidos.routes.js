@@ -8,6 +8,7 @@ router.use(ctrl.soloAdmin);
 
 router.get("/fuente", ctrl.fuente);
 router.get("/productos", ctrl.productos);
+router.get("/voces", ctrl.voces);
 router.post("/guion", ctrl.guion);
 router.get("/piezas", ctrl.listar);
 router.post("/piezas", ctrl.crear);
