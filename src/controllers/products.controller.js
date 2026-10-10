@@ -154,6 +154,18 @@ function codeFromId(id) {
   return `P${String(n).padStart(9, "0")}`;
 }
 
+// Código de barras interno: EAN-13 del rango de uso interno (prefijo 2) con
+// el id del producto, como el código P000000876. Se genera sólo cuando el
+// producto no trae el de fábrica.
+function barcodeFromId(id) {
+  const n = toInt(id, 0);
+  if (!n) return null;
+  const base = `2${String(n).padStart(11, "0")}`;
+  let suma = 0;
+  for (let i = 0; i < 12; i++) suma += Number(base[i]) * (i % 2 ? 3 : 1);
+  return base + String((10 - (suma % 10)) % 10);
+}
+
 // =====================
 // Includes (ALINEADO A DB REAL)
 // =====================
@@ -753,6 +765,7 @@ async function getNextCode(req, res, next) {
       data: {
         next_id: nextId,
         code: codeFromId(nextId),
+        barcode: barcodeFromId(nextId),
         note: "Código aproximado (puede variar por concurrencia).",
       },
     });
@@ -1390,7 +1403,9 @@ async function create(req, res, next) {
       const code = codeFromId(p.id);
       const skuFinal = isNonEmptyStr(payload.sku) ? payload.sku.trim() : code;
 
-      await p.update({ code, sku: skuFinal }, { transaction: t });
+      const barcodeFinal = isNonEmptyStr(payload.barcode) ? payload.barcode.trim() : barcodeFromId(p.id);
+
+      await p.update({ code, sku: skuFinal, barcode: barcodeFinal }, { transaction: t });
 
       // El producto queda dado de alta en TODAS las sucursales activas, tenga o
       // no stock en ellas: la tienda lista por la sucursal del visitante
