@@ -296,6 +296,8 @@ const adminFiscalRoutes = loadRoute("./admin.fiscal.routes", { optional: true })
 
 // ✅ NUEVO: telegram admin (notificaciones)
 const adminTelegramRoutes = loadRoute("./admin.telegram.routes", { optional: true });
+// Gestión de contenidos: puente al servicio de videos (contenido.cingulado.org)
+const adminContenidosRoutes = loadRoute("./admin.contenidos.routes", { optional: true });
 
 // ✅ NUEVO: bloques promocionales del CRM email
 const adminEmailPromoBlocksRoutes = loadRoute("./admin.emailPromoBlocks.routes", { optional: true });
@@ -418,6 +420,9 @@ if (adminShopLinksRoutes) {
 // ✅ NUEVO: telegram admin
 if (adminTelegramRoutes) {
   safeUse("/admin/telegram", requireAuth, attachAccessContext, adminTelegramRoutes);
+}
+if (adminContenidosRoutes) {
+  safeUse("/admin/contenidos", requireAuth, attachAccessContext, adminContenidosRoutes);
 }
 
 // ✅ NUEVO: bloques promocionales CRM
