@@ -457,16 +457,18 @@ async function salesDeep(req, res, next) {
       [{}]
     ).then(r => r);
 
-    // Heatmap hora x día de semana (0=Lun..6=Dom)
+    // Heatmap hora x día de semana (0=Lun..6=Dom), en hora de San Juan:
+    // sold_at se guarda en UTC y una venta de las 22 h caía a la 1 del día
+    // siguiente.
     const heatmapRows = await q(
       `SELECT
-        HOUR(s.sold_at) AS h,
-        WEEKDAY(s.sold_at) AS dow,
+        HOUR(CONVERT_TZ(s.sold_at, '+00:00', '-03:00')) AS h,
+        WEEKDAY(CONVERT_TZ(s.sold_at, '+00:00', '-03:00')) AS dow,
         COUNT(*) AS cnt,
         COALESCE(SUM(s.total),0) AS sum_total
       FROM sales s
       WHERE s.status='PAID' ${dateCond} ${branchCond}
-      GROUP BY HOUR(s.sold_at), WEEKDAY(s.sold_at)
+      GROUP BY h, dow
       ORDER BY dow ASC, h ASC`,
       rep
     );
@@ -537,14 +539,15 @@ async function salesDeep(req, res, next) {
     );
 
     // Ticket promedio por dia de semana
+    // 0 = lunes (WEEKDAY), en hora de San Juan.
     const avgTicketByDow = await q(
       `SELECT
-        WEEKDAY(s.sold_at) AS dow,
+        WEEKDAY(CONVERT_TZ(s.sold_at, '+00:00', '-03:00')) AS dow,
         COALESCE(AVG(s.total),0) AS avg_ticket,
         COUNT(*) AS cnt
       FROM sales s
       WHERE s.status='PAID' ${dateCond} ${branchCond}
-      GROUP BY WEEKDAY(s.sold_at)
+      GROUP BY dow
       ORDER BY dow ASC`,
       rep
     );

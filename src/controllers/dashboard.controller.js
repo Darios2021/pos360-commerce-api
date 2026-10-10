@@ -852,14 +852,14 @@ async function overview(req, res, next) {
     // ===== Analytics: ventas por hora del día (período)
     const salesByHourRows = await sequelize.query(
       `
-      SELECT HOUR(s.sold_at) AS h,
+      SELECT HOUR(CONVERT_TZ(s.sold_at, '+00:00', '-03:00')) AS h,
         COUNT(*) AS cnt,
         COALESCE(SUM(s.total),0) AS sum_total
       FROM sales s
       WHERE s.status='PAID'
         ${whereBetweenRange}
         ${whereBranchRange}
-      GROUP BY HOUR(s.sold_at)
+      GROUP BY h
       `,
       { type: QueryTypes.SELECT, replacements: { from: range.from, to: range.to, branchId: scope.branchId || null, userId: scope.userId || null } }
     ).catch(() => []);
