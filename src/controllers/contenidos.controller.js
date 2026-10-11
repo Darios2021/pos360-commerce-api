@@ -190,6 +190,52 @@ async function recursos(req, res) {
   });
 }
 
+// Productos para el creador por campañas: el catálogo del servicio (sale de la tienda
+// pública) más lo que sólo sabe el POS, para proponer productos por campaña:
+//   vendidos30d  unidades vendidas en 30 días (ventas cobradas, todas las sucursales)
+//   alta         fecha de alta del producto (ISO)
+// Las ventas se agregan una vez cada 5 minutos: el catálogo se pide de a páginas.
+let ventasCache = { valor: null, vence: 0 };
+async function datosDelPos(ids) {
+  const { sequelize } = require("../models");
+  if (!ventasCache.valor || Date.now() >= ventasCache.vence) {
+    const [filas] = await sequelize.query(
+      `SELECT si.product_id AS id, SUM(si.quantity) AS qty
+         FROM sale_items si JOIN sales s ON s.id = si.sale_id
+        WHERE s.status = 'PAID' AND s.sold_at >= :desde
+        GROUP BY si.product_id`,
+      { replacements: { desde: new Date(Date.now() - 30 * 864e5) } }
+    );
+    ventasCache = { valor: new Map(filas.map((f) => [String(f.id), Math.round(Number(f.qty) || 0)])), vence: Date.now() + 5 * 60 * 1000 };
+  }
+  const numericos = ids.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const altas = new Map();
+  if (numericos.length) {
+    const [filas] = await sequelize.query("SELECT id, created_at FROM products WHERE id IN (:ids)", { replacements: { ids: numericos } });
+    for (const f of filas) altas.set(String(f.id), f.created_at ? new Date(f.created_at).toISOString() : null);
+  }
+  return { ventas: ventasCache.valor, altas };
+}
+async function productos(req, res) {
+  if (!BASE() || !CLAVE()) return noConfigurado(res);
+  let r;
+  try {
+    r = await fetch(`${BASE()}/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`, { headers: { Authorization: `Bearer ${CLAVE()}` }, signal: AbortSignal.timeout(60000) });
+  } catch {
+    return res.status(502).json({ ok: false, code: "CONTENIDOS_SIN_RESPUESTA", message: "El servicio de contenidos no respondió." });
+  }
+  const texto = await r.text();
+  let cuerpo = null;
+  if (r.ok) { try { cuerpo = JSON.parse(texto); } catch { cuerpo = null; } }
+  if (!Array.isArray(cuerpo?.items)) return res.status(r.status).type(r.headers.get("content-type") || "application/json").send(texto);
+  // Sin base (o si la consulta falla) el catálogo sale igual, sin los datos del POS.
+  try {
+    const { ventas, altas } = await datosDelPos(cuerpo.items.map((x) => x?.id));
+    cuerpo.items = cuerpo.items.map((x) => ({ ...x, vendidos30d: ventas.get(String(x?.id)) || 0, ...(altas.get(String(x?.id)) ? { alta: altas.get(String(x.id)) } : {}) }));
+  } catch { /* opcional */ }
+  return res.json(cuerpo);
+}
+
 // Cambiar credenciales o salir del ensayo: sólo super admin.
 function soloSuperAdmin(req, res, next) {
   const roles = req.access?.roles || [];
@@ -203,11 +249,13 @@ module.exports = {
   redes: (req, res) => redes(req, res, "GET"),
   guardarRedes: (req, res) => redes(req, res, "PUT", credenciales(req.body)),
   fuente: (req, res) => reenviar(req, res, "GET", "/fuente"),
-  productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
+  productos,
   voces,
   sonidos,
   recursos,
   cupo,
+  // Con campaña: { campana, ritmo, locutor, variante, items[] } pasan tal cual; el servicio
+  // devuelve además `textos` (portada, escenas, cierre, publicación y título).
   guion: (req, res) => reenviar(req, res, "POST", "/guion", req.body),
   listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
   crear: (req, res) => reenviar(req, res, "POST", "/piezas", req.body),
