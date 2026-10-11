@@ -157,8 +157,8 @@ async function sonidos(req, res) {
   });
 }
 
-// Lo habilitado para el comercio (voces, músicas, efectos, estilos, plantillas,
-// paquetes y mapa clásico), con todas las muestras en URL absoluta. Si el
+// Lo habilitado para el comercio (estilos de video, voces y músicas; antes también
+// efectos, plantillas, paquetes y mapa clásico), con muestras y miniaturas en URL absoluta. Si el
 // servicio todavía no tiene /recursos, su estado pasa tal cual (la pantalla
 // vuelve a los selectores de siempre).
 async function recursos(req, res) {
@@ -184,6 +184,8 @@ async function recursos(req, res) {
       ...(v.musicas ? { musicas: conMuestra(v.musicas) } : {}),
       ...(v.efectos ? { efectos: conMuestra(v.efectos) } : {}),
       ...(v.clasico ? { clasico: clasicoAbsoluto(v.clasico) } : {}),
+      // Estilos de video (paquete): muestra de música y efectos y miniatura 9:16, públicas.
+      ...(Array.isArray(v.estilos) ? { estilos: v.estilos.map((e) => (e && typeof e === "object" ? { ...e, ...(e.muestra ? { muestra: absoluta(e.muestra) } : {}), ...(e.miniatura ? { miniatura: absoluta(e.miniatura) } : {}) } : e)) } : {}),
     },
   });
 }
