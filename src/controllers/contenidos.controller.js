@@ -97,6 +97,25 @@ async function cupo(req, res) {
   if (!cuenta) return res.status(409).json({ ok: false, code: "CONTENIDOS_SIN_CUENTA", message: "El servicio no informa la cuenta del comercio." });
   return reenviar(req, res, "GET", `/cupo?cuenta=${encodeURIComponent(cuenta)}`);
 }
+// Las muestras son públicas en el servicio: se devuelven con la URL absoluta
+// para que el navegador las reproduzca directo, sin clave ni proxy.
+const absoluta = (m) => (typeof m === "string" && m.startsWith("/") ? `${BASE()}${m}` : m || null);
+const conMuestra = (l) => (Array.isArray(l) ? l.map((x) => ({ ...x, muestra: absoluta(x.muestra) })) : l);
+// Mapa del sonido de siempre por cinemática y momento: { cartel: { apertura: { nombre, muestra, sinLogo } } }.
+function clasicoAbsoluto(c) {
+  if (!c || typeof c !== "object") return undefined;
+  const out = {};
+  for (const [cin, momentos] of Object.entries(c)) {
+    out[cin] = {};
+    for (const [m, v] of Object.entries(momentos || {})) {
+      out[cin][m] = v && typeof v === "object"
+        ? { ...v, muestra: absoluta(v.muestra), ...(v.sinLogo ? { sinLogo: { ...v.sinLogo, muestra: absoluta(v.sinLogo.muestra) } } : {}) }
+        : v ?? null;
+    }
+  }
+  return out;
+}
+
 // Catálogo de voces. La muestra es pública en el servicio: se devuelve con la
 // URL absoluta para que el navegador la reproduzca directo, sin clave ni proxy.
 async function voces(req, res) {
@@ -112,12 +131,11 @@ async function voces(req, res) {
   let lista;
   try { lista = JSON.parse(texto); } catch { lista = null; }
   if (!Array.isArray(lista)) return res.status(502).json({ ok: false, code: "CONTENIDOS_RESPUESTA_INVALIDA", message: "El servicio de contenidos devolvió un catálogo inválido." });
-  const absoluta = (m) => (typeof m === "string" && m.startsWith("/") ? `${BASE()}${m}` : m || null);
-  return res.json(lista.map((v) => ({ ...v, muestra: absoluta(v.muestra) })));
+  return res.json(conMuestra(lista));
 }
 
-// Catálogo de sonidos (efectos, filtro y músicas) y el mapa del estilo viral.
-// Como las voces: la muestra es pública y va con la URL absoluta.
+// Catálogo de sonidos (efectos, filtro y músicas), el mapa del estilo viral y,
+// cuando el servicio los publica, los paquetes y el mapa clásico.
 async function sonidos(req, res) {
   if (!BASE() || !CLAVE()) return noConfigurado(res);
   let r;
@@ -131,8 +149,43 @@ async function sonidos(req, res) {
   let cuerpo;
   try { cuerpo = JSON.parse(texto); } catch { cuerpo = null; }
   if (!Array.isArray(cuerpo?.sonidos)) return res.status(502).json({ ok: false, code: "CONTENIDOS_RESPUESTA_INVALIDA", message: "El servicio de contenidos devolvió un catálogo inválido." });
-  const absoluta = (m) => (typeof m === "string" && m.startsWith("/") ? `${BASE()}${m}` : m || null);
-  return res.json({ sonidos: cuerpo.sonidos.map((s) => ({ ...s, muestra: absoluta(s.muestra) })), viral: cuerpo.viral || {} });
+  return res.json({
+    sonidos: conMuestra(cuerpo.sonidos),
+    viral: cuerpo.viral || {},
+    ...(Array.isArray(cuerpo.paquetes) ? { paquetes: cuerpo.paquetes } : {}),
+    ...(cuerpo.clasico ? { clasico: clasicoAbsoluto(cuerpo.clasico) } : {}),
+  });
+}
+
+// Lo habilitado para el comercio (voces, músicas, efectos, estilos, plantillas,
+// paquetes y mapa clásico), con todas las muestras en URL absoluta. Si el
+// servicio todavía no tiene /recursos, su estado pasa tal cual (la pantalla
+// vuelve a los selectores de siempre).
+async function recursos(req, res) {
+  if (!BASE() || !CLAVE()) return noConfigurado(res);
+  let cuenta, r;
+  try {
+    cuenta = await cuentaDelComercio();
+    r = await fetch(`${BASE()}/recursos?cuenta=${encodeURIComponent(cuenta)}`, { headers: { Authorization: `Bearer ${CLAVE()}` }, signal: AbortSignal.timeout(15000) });
+  } catch {
+    return res.status(502).json({ ok: false, code: "CONTENIDOS_SIN_RESPUESTA", message: "El servicio de contenidos no respondió." });
+  }
+  const texto = await r.text();
+  if (!r.ok) return res.status(r.status).type(r.headers.get("content-type") || "application/json").send(texto);
+  let cuerpo;
+  try { cuerpo = JSON.parse(texto); } catch { cuerpo = null; }
+  const v = cuerpo?.videos;
+  if (!v || typeof v !== "object") return res.status(502).json({ ok: false, code: "CONTENIDOS_RESPUESTA_INVALIDA", message: "El servicio de contenidos devolvió recursos inválidos." });
+  return res.json({
+    ...cuerpo,
+    videos: {
+      ...v,
+      ...(v.voces ? { voces: conMuestra(v.voces) } : {}),
+      ...(v.musicas ? { musicas: conMuestra(v.musicas) } : {}),
+      ...(v.efectos ? { efectos: conMuestra(v.efectos) } : {}),
+      ...(v.clasico ? { clasico: clasicoAbsoluto(v.clasico) } : {}),
+    },
+  });
 }
 
 // Cambiar credenciales o salir del ensayo: sólo super admin.
@@ -151,6 +204,7 @@ module.exports = {
   productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
   voces,
   sonidos,
+  recursos,
   cupo,
   guion: (req, res) => reenviar(req, res, "POST", "/guion", req.body),
   listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),

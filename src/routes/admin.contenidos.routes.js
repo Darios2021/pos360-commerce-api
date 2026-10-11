@@ -10,6 +10,7 @@ router.get("/fuente", ctrl.fuente);
 router.get("/productos", ctrl.productos);
 router.get("/voces", ctrl.voces);
 router.get("/sonidos", ctrl.sonidos);
+router.get("/recursos", ctrl.recursos);
 router.get("/cupo", ctrl.cupo);
 router.post("/guion", ctrl.guion);
 router.get("/piezas", ctrl.listar);
