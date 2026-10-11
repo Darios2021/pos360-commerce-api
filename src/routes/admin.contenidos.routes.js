@@ -9,6 +9,7 @@ router.use(ctrl.soloAdmin);
 router.get("/fuente", ctrl.fuente);
 router.get("/productos", ctrl.productos);
 router.get("/voces", ctrl.voces);
+router.get("/cupo", ctrl.cupo);
 router.post("/guion", ctrl.guion);
 router.get("/piezas", ctrl.listar);
 router.post("/piezas", ctrl.crear);

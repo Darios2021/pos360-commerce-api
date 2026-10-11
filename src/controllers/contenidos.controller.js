@@ -86,6 +86,17 @@ function credenciales(body) {
   if (b.whatsapp) out.whatsapp = par(b.whatsapp, "numero_id");
   return out;
 }
+// Videos del mes del comercio y su tope ({ limite, usados, quedan, nombreMes }).
+// El tope lo fija la plataforma en el servicio; al llegar, POST /piezas da 429.
+async function cupo(req, res) {
+  if (!BASE() || !CLAVE()) return noConfigurado(res);
+  let cuenta;
+  try { cuenta = await cuentaDelComercio(); } catch {
+    return res.status(502).json({ ok: false, code: "CONTENIDOS_SIN_RESPUESTA", message: "El servicio de contenidos no respondió." });
+  }
+  if (!cuenta) return res.status(409).json({ ok: false, code: "CONTENIDOS_SIN_CUENTA", message: "El servicio no informa la cuenta del comercio." });
+  return reenviar(req, res, "GET", `/cupo?cuenta=${encodeURIComponent(cuenta)}`);
+}
 // Cambiar credenciales o salir del ensayo: sólo super admin.
 function soloSuperAdmin(req, res, next) {
   const roles = req.access?.roles || [];
@@ -101,6 +112,7 @@ module.exports = {
   fuente: (req, res) => reenviar(req, res, "GET", "/fuente"),
   productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
   voces: (req, res) => reenviar(req, res, "GET", "/voces"),
+  cupo,
   guion: (req, res) => reenviar(req, res, "POST", "/guion", req.body),
   listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
   crear: (req, res) => reenviar(req, res, "POST", "/piezas", req.body),
