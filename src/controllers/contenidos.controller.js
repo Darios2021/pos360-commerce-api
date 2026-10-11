@@ -116,6 +116,25 @@ async function voces(req, res) {
   return res.json(lista.map((v) => ({ ...v, muestra: absoluta(v.muestra) })));
 }
 
+// Catálogo de sonidos (efectos, filtro y músicas) y el mapa del estilo viral.
+// Como las voces: la muestra es pública y va con la URL absoluta.
+async function sonidos(req, res) {
+  if (!BASE() || !CLAVE()) return noConfigurado(res);
+  let r;
+  try {
+    r = await fetch(`${BASE()}/sonidos`, { headers: { Authorization: `Bearer ${CLAVE()}` }, signal: AbortSignal.timeout(15000) });
+  } catch {
+    return res.status(502).json({ ok: false, code: "CONTENIDOS_SIN_RESPUESTA", message: "El servicio de contenidos no respondió." });
+  }
+  const texto = await r.text();
+  if (!r.ok) return res.status(r.status).type(r.headers.get("content-type") || "application/json").send(texto);
+  let cuerpo;
+  try { cuerpo = JSON.parse(texto); } catch { cuerpo = null; }
+  if (!Array.isArray(cuerpo?.sonidos)) return res.status(502).json({ ok: false, code: "CONTENIDOS_RESPUESTA_INVALIDA", message: "El servicio de contenidos devolvió un catálogo inválido." });
+  const absoluta = (m) => (typeof m === "string" && m.startsWith("/") ? `${BASE()}${m}` : m || null);
+  return res.json({ sonidos: cuerpo.sonidos.map((s) => ({ ...s, muestra: absoluta(s.muestra) })), viral: cuerpo.viral || {} });
+}
+
 // Cambiar credenciales o salir del ensayo: sólo super admin.
 function soloSuperAdmin(req, res, next) {
   const roles = req.access?.roles || [];
@@ -131,6 +150,7 @@ module.exports = {
   fuente: (req, res) => reenviar(req, res, "GET", "/fuente"),
   productos: (req, res) => reenviar(req, res, "GET", `/fuente/productos${q(req, ["buscar", "pagina", "todos"])}`),
   voces,
+  sonidos,
   cupo,
   guion: (req, res) => reenviar(req, res, "POST", "/guion", req.body),
   listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
