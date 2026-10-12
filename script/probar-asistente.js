@@ -37,7 +37,7 @@ const permiso = (rol, extra = {}, op = {}) => jwt.sign(
   { sis: "sjt", cuenta: "sanjuantecnologia", sub: String(USUARIO[rol]), rol, nombre: rol, alcance: "asistente:lectura", ...extra },
   op.secreto || SECRETO, { expiresIn: op.vence || "5m", audience: op.aud || "mostrador" });
 const hoy = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/San_Juan" }).format(new Date());
-const RUTAS = ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock"];
+const RUTAS = ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria"];
 const D = (r) => r.body && r.body.data;
 
 async function main() {
@@ -67,7 +67,7 @@ async function main() {
   const espera = {
     super_admin: Object.fromEntries(RUTAS.map((x) => [x, 200])),
     admin: { ...Object.fromEntries(RUTAS.map((x) => [x, 200])), arqueo: 200 },
-    cajero: { "caja-actual": 200, ventas: 200, cajas: 403, arqueo: 403, "mas-vendidos": 403, margenes: 403, stock: 200 },
+    cajero: { "caja-actual": 200, ventas: 200, cajas: 403, arqueo: 403, "mas-vendidos": 403, margenes: 403, stock: 200, auditoria: 403 },
     user: Object.fromEntries(RUTAS.map((x) => [x, 403])),
   };
   for (const [rol, rutas] of Object.entries(espera)) {
@@ -109,6 +109,32 @@ async function main() {
   r = await api(permiso("admin"), "GET", "/api/v1/asistente/datos/stock");
   check("admin de Rivadavia: stock sólo de su sucursal", (D(r)?.productos || []).every((p) => p.sucursal === "Rivadavia") && D(r).productos.length === 1, JSON.stringify(D(r)).slice(0, 200));
 
+  console.log("\nAuditoría (sólo administración; datos de script/ de la semilla de auditoría)");
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/auditoria");
+  const ev = D(r)?.eventos || [];
+  const que = (q) => ev.filter((e) => e.que === q);
+  check("super: ajuste de stock de Beto Admin en Rivadavia (-2 del kit)", que("ajuste de stock").some((e) => e.usuario === "Beto Admin" && e.sucursal === "Rivadavia" && e.cantidad === -2 && /KIT/.test(e.producto)), JSON.stringify(que("ajuste de stock")));
+  check("super: ingreso de mercadería de Ana Super (+5 cámaras)", que("ingreso de mercadería").some((e) => e.usuario === "Ana Super" && e.cantidad === 5), JSON.stringify(que("ingreso de mercadería")));
+  check("super: el movimiento de una venta no se lista como cambio de stock", !ev.some((e) => e.que === "venta"), JSON.stringify(ev.map((e) => e.que)));
+  check("super: la devolución con usuario y motivo", que("devolución").some((e) => e.usuario === "Cata Caja" && e.motivo === "Cliente arrepentido"), JSON.stringify(que("devolución")));
+  check("super: venta anulada con usuario 'no registrado' (no se inventa)", ev.some((e) => /venta anulada/.test(e.que) && e.usuario === "no registrado"), JSON.stringify(ev.filter((e) => /anulada/.test(e.que))));
+  check("super: aperturas y cierres de caja", que("caja abierta").length >= 2 && que("caja cerrada").length >= 1, JSON.stringify(ev.map((e) => e.que)));
+  check("super: no_registra declara precios, usuarios y quién anula", (D(r)?.no_registra || []).length === 3, JSON.stringify(D(r)?.no_registra));
+  r = await api(permiso("admin"), "GET", "/api/v1/asistente/datos/auditoria?tipo=stock");
+  check("admin de Rivadavia: sólo los movimientos de su sucursal", (D(r)?.eventos || []).length === 1 && D(r).eventos[0].sucursal === "Rivadavia", JSON.stringify(D(r)?.eventos));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/auditoria?producto=KIT");
+  check("filtro por producto: sólo lo del kit de alarma", (D(r)?.eventos || []).every((e) => /KIT/.test(e.producto || "")) && D(r).eventos.length >= 1, JSON.stringify(D(r)?.eventos));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/auditoria?tipo=ingresos");
+  check("tipo ingresos: sólo el ingreso", (D(r)?.eventos || []).length === 1 && D(r).eventos[0].que === "ingreso de mercadería", JSON.stringify(D(r)?.eventos));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/auditoria?usuario=Beto");
+  check("filtro por usuario: sólo Beto", (D(r)?.eventos || []).length >= 1 && D(r).eventos.every((e) => e.usuario === "Beto Admin"), JSON.stringify(D(r)?.eventos));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/auditoria?tipo=precios");
+  check("tipo precios: vacío y declarado como no registrado", D(r)?.cantidad === 0 && /precio/.test((D(r)?.no_registra || [])[0] || ""), JSON.stringify(D(r)));
+  for (const rol of ["cajero", "user"]) {
+    r = await api(permiso(rol), "GET", "/api/v1/asistente/datos/auditoria");
+    check(`${rol} auditoría: 403`, r.status === 403, `HTTP ${r.status}`);
+  }
+
   if (process.env.MOSTRADOR_URL) {
     console.log("\nPuente con mostrador (sesión del backoffice)");
     const entrar = async (u) => (await api(null, "POST", "/api/v1/auth/login", { identifier: u, password: "prueba1234" })).body;
@@ -116,7 +142,7 @@ async function main() {
     const tok = sa?.data?.accessToken || sa?.data?.access_token || sa?.accessToken || sa?.token;
     check("entra el super_admin", Boolean(tok), JSON.stringify(sa).slice(0, 200));
     r = await api(tok, "GET", "/api/v1/asistente/estado");
-    check("estado: 200 con 7 herramientas y gasto", r.status === 200 && r.body.puede?.length === 7 && r.body.gasto, `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+    check("estado: 200 con 8 herramientas y gasto", r.status === 200 && r.body.puede?.length === 8 && r.body.gasto, `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
     r = await api(tok, "POST", "/api/v1/asistente/mensaje", { texto: "¿Cómo viene la caja abierta?" });
     check("mensaje: usa estado_caja", r.status === 200 && r.body.herramientas?.includes("estado_caja"), `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
     const caja = await entrar("caja@prueba.local");

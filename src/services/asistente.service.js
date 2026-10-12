@@ -30,8 +30,8 @@ const CUENTA = () => process.env.ASISTENTE_CUENTA || "sanjuantecnologia";
  * allá decide qué herramientas ve el modelo; acá, qué datos se entregan.
  */
 const MATRIZ = {
-  super_admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock"],
-  admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock"],
+  super_admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria"],
+  admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria"],
   cajero: ["caja-actual", "ventas", "stock"],
   user: [],
 };
@@ -352,7 +352,116 @@ async function stock(u, q) {
   };
 }
 
+// ── Auditoría: quién hizo qué y cuándo (sólo administración) ──
+//
+// Con lo que POS 360 registra hoy, sin inventar:
+//   - stock_movements (+ items): entradas, salidas, ajustes y transferencias, con created_by.
+//   - sale_refunds (user_id, reason) y sale_exchanges (created_by): devoluciones y cambios.
+//   - cash_registers: aperturas (opened_by) y cierres (closed_by).
+// NO registra: quién anuló una venta (sales sólo guarda el estado y la última modificación),
+// los cambios de precio ni los cambios de usuarios y permisos. Se informa en `no_registra`.
+const QUE_STOCK = (m) => {
+  if (m.ref_type === "sale") return "venta";
+  if (m.ref_type === "sale_return") return "devolución de venta";
+  if (m.ref_type === "sale_exchange") return "cambio de producto en una venta";
+  if (m.ref_type === "ecom_order") return "pedido de la tienda online";
+  if (m.ref_type === "transfer_dispatch") return "transferencia enviada";
+  if (m.ref_type === "transfer_receive") return "transferencia recibida";
+  if (m.type === "adjustment") return "ajuste de stock";
+  if (m.type === "in") return "ingreso de mercadería";
+  if (m.type === "out") return "egreso manual";
+  return m.type;
+};
+const TIPOS_AUDITORIA = ["todo", "stock", "ingresos", "ajustes", "ventas", "precios", "caja", "usuarios"];
+const NO_REGISTRA = {
+  ventas: "quién anuló una venta (POS 360 guarda que está anulada y la última modificación, no el usuario)",
+  precios: "los cambios de precio (no hay historial de precios)",
+  usuarios: "los cambios de usuarios y permisos",
+};
+
+async function auditoria(u, q) {
+  const tipo = TIPOS_AUDITORIA.includes(q.tipo) ? q.tipo : "todo";
+  const r = q.desde || q.hasta ? rango(q) : rango({}, { defecto: 30 });
+  const producto = String(q.producto || "").trim().slice(0, 60);
+  const usuario = String(q.usuario || "").trim().slice(0, 60);
+  const eventos = [];
+  const quien = (a) => `COALESCE(NULLIF(TRIM(CONCAT(COALESCE(${a}.first_name,''),' ',COALESCE(${a}.last_name,''))),''), ${a}.username, ${a}.email)`;
+  const rep = reemplazos(u, { de: r.de, a: r.a, prod: `%${producto}%`, usu: `%${usuario}%` });
+  const filtroUsu = (a) => (usuario ? `AND ${quien(a)} LIKE :usu` : "");
+
+  // Movimientos de stock (sin los de venta: ésos se ven en ventas).
+  if (["todo", "stock", "ingresos", "ajustes"].includes(tipo)) {
+    const cond = tipo === "ingresos" ? "AND sm.type = 'in' AND COALESCE(sm.ref_type,'') NOT IN ('sale_return','sale_exchange','transfer_receive','ecom_order')"
+      : tipo === "ajustes" ? "AND sm.type = 'adjustment'"
+      : "AND COALESCE(sm.ref_type,'') NOT IN ('sale','ecom_order')";
+    const [filas] = await sequelize.query(
+      `SELECT sm.created_at, sm.type, sm.ref_type, sm.note, ${quien("us")} AS usuario, b.name AS sucursal,
+              p.name AS producto, smi.qty
+         FROM stock_movements sm
+         JOIN stock_movement_items smi ON smi.movement_id = sm.id
+         JOIN products p ON p.id = smi.product_id
+         LEFT JOIN users us ON us.id = sm.created_by
+         LEFT JOIN warehouses w ON w.id = COALESCE(sm.warehouse_id, sm.to_warehouse_id, sm.from_warehouse_id)
+         LEFT JOIN branches b ON b.id = w.branch_id
+        WHERE sm.created_at >= :de AND sm.created_at < :a ${cond}
+          ${producto ? "AND p.name LIKE :prod" : ""} ${filtroUsu("us")} ${filtroSucursal(u, "w.branch_id")}
+        ORDER BY sm.created_at DESC LIMIT 40`, { replacements: rep });
+    for (const f of filas) {
+      eventos.push({ cuando: f.created_at, usuario: f.usuario || "sin usuario registrado", que: QUE_STOCK(f), producto: f.producto, sucursal: f.sucursal || null, cantidad: n(f.qty), nota: f.note || undefined });
+    }
+  }
+
+  // Devoluciones, cambios y ventas anuladas.
+  if (["todo", "ventas"].includes(tipo)) {
+    const sf = filtroSucursal(u, "s.branch_id");
+    const [dev] = await sequelize.query(
+      `SELECT sr.created_at, sr.reason, ${quien("us")} AS usuario, s.id AS venta, s.total, b.name AS sucursal
+         FROM sale_refunds sr JOIN sales s ON s.id = sr.sale_id LEFT JOIN users us ON us.id = sr.user_id LEFT JOIN branches b ON b.id = s.branch_id
+        WHERE sr.created_at >= :de AND sr.created_at < :a ${sf} ${filtroUsu("us")}
+          ${producto ? "AND EXISTS (SELECT 1 FROM sale_items si WHERE si.sale_id = s.id AND si.product_name_snapshot LIKE :prod)" : ""}
+        ORDER BY sr.created_at DESC LIMIT 20`, { replacements: rep });
+    for (const f of dev) eventos.push({ cuando: f.created_at, usuario: f.usuario || "sin usuario registrado", que: "devolución", venta: Number(f.venta), total_venta: n(f.total), motivo: f.reason || undefined, sucursal: f.sucursal || null });
+    const [cam] = await sequelize.query(
+      `SELECT se.created_at, se.note, ${quien("us")} AS usuario, s.id AS venta, b.name AS sucursal
+         FROM sale_exchanges se JOIN sales s ON s.id = se.original_sale_id LEFT JOIN users us ON us.id = se.created_by LEFT JOIN branches b ON b.id = s.branch_id
+        WHERE se.created_at >= :de AND se.created_at < :a ${sf} ${filtroUsu("us")}
+        ORDER BY se.created_at DESC LIMIT 20`, { replacements: rep });
+    for (const f of cam) eventos.push({ cuando: f.created_at, usuario: f.usuario || "sin usuario registrado", que: "cambio de producto", venta: Number(f.venta), nota: f.note || undefined, sucursal: f.sucursal || null });
+    if (!usuario) {
+      const [anul] = await sequelize.query(
+        `SELECT s.id, s.total, s.updated_at, ${quien("us")} AS vendedor, b.name AS sucursal
+           FROM sales s LEFT JOIN users us ON us.id = s.user_id LEFT JOIN branches b ON b.id = s.branch_id
+          WHERE s.status = 'CANCELLED' AND s.updated_at >= :de AND s.updated_at < :a ${sf}
+            ${producto ? "AND EXISTS (SELECT 1 FROM sale_items si WHERE si.sale_id = s.id AND si.product_name_snapshot LIKE :prod)" : ""}
+          ORDER BY s.updated_at DESC LIMIT 20`, { replacements: rep });
+      for (const f of anul) eventos.push({ cuando: f.updated_at, usuario: "no registrado", que: "venta anulada (fecha de la última modificación)", venta: Number(f.id), total_venta: n(f.total), vendedor: f.vendedor || null, sucursal: f.sucursal || null });
+    }
+  }
+
+  // Aperturas y cierres de caja.
+  if (["todo", "caja"].includes(tipo) && !producto) {
+    const [cajasF] = await sequelize.query(
+      `SELECT c.id, c.opened_at, c.closed_at, c.opening_cash, c.closing_cash, c.difference_cash, b.name AS sucursal,
+              ${quien("uo")} AS abrio, ${quien("uc")} AS cerro
+         FROM cash_registers c LEFT JOIN users uo ON uo.id = c.opened_by LEFT JOIN users uc ON uc.id = c.closed_by LEFT JOIN branches b ON b.id = c.branch_id
+        WHERE ((c.opened_at >= :de AND c.opened_at < :a) OR (c.closed_at >= :de AND c.closed_at < :a)) ${filtroSucursal(u, "c.branch_id")}
+          ${usuario ? `AND (${quien("uo")} LIKE :usu OR ${quien("uc")} LIKE :usu)` : ""}
+        ORDER BY COALESCE(c.closed_at, c.opened_at) DESC LIMIT 20`, { replacements: rep });
+    for (const f of cajasF) {
+      eventos.push({ cuando: f.opened_at, usuario: f.abrio || "sin usuario registrado", que: "caja abierta", caja: Number(f.id), fondo_inicial: n(f.opening_cash), sucursal: f.sucursal || null });
+      if (f.closed_at) eventos.push({ cuando: f.closed_at, usuario: f.cerro || "sin usuario registrado", que: "caja cerrada", caja: Number(f.id), contado: n(f.closing_cash), diferencia: n(f.difference_cash), sucursal: f.sucursal || null });
+    }
+  }
+
+  const fecha = (x) => (x instanceof Date ? x.toISOString() : String(x || ""));
+  for (const e of eventos) e.cuando = fecha(e.cuando);
+  eventos.sort((a, b) => b.cuando.localeCompare(a.cuando));
+  const noRegistra = tipo === "todo" ? Object.values(NO_REGISTRA) : (NO_REGISTRA[tipo] ? [NO_REGISTRA[tipo]] : []);
+  return { desde: r.desde, hasta: r.hasta, tipo, cantidad: eventos.length, eventos: eventos.slice(0, 40), no_registra: noRegistra };
+}
+
 module.exports = {
+  auditoria,
   MATRIZ, rolPrincipal, ErrorAsistente, configurado, firmarPermiso, pedirAMostrador, exigirPermiso, exigirRol, hoy,
   cajaActual, ventas, cajas, arqueo, masVendidos, margenes, stock,
 };

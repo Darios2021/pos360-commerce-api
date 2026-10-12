@@ -50,5 +50,6 @@ dato("arqueo", svc.arqueo);
 dato("mas-vendidos", svc.masVendidos);
 dato("margenes", svc.margenes);
 dato("stock", svc.stock);
+dato("auditoria", svc.auditoria);
 
 module.exports = { asistente, asistenteDatos };
