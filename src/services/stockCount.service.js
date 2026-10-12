@@ -175,7 +175,8 @@ async function getCountById(id, actor, transaction) {
         include: [{
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "barcode", "code", "is_active"],
+          // category_id / subcategory_id: el filtro Rubro del conteo en el teléfono.
+          attributes: ["id", "name", "sku", "barcode", "code", "is_active", "category_id", "subcategory_id"],
           include: [{ model: ProductImage, as: "images", attributes: ["url", "sort_order"] }],
         }],
       },
@@ -324,7 +325,25 @@ async function submitCount(id, { motivo } = {}, actor) {
     }, { transaction: t });
   });
 
-  return getCountById(id, null);
+  const json = await getCountById(id, null);
+
+  // Aviso push al dueño y al administrador de la sucursal
+  // (services/avisosPush.service.js). Post-commit y sin await: el envío del
+  // conteo no espera ni falla por el aviso.
+  try {
+    require("./avisosPush.service")
+      .avisarConteoEnviado({
+        id: json.id,
+        number: json.number,
+        branch_id: json.branch_id,
+        sucursal: json.warehouse?.branch?.name || json.warehouse?.name || "",
+        productos: json.summary?.items || 0,
+        con_diferencia: json.summary?.with_diff || 0,
+      })
+      .catch(() => {});
+  } catch (_) {}
+
+  return json;
 }
 
 // ─── APPLY (administrador) ──────────────────────────────────────────────────

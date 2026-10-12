@@ -4,7 +4,8 @@
 //
 // La APK del backoffice registra el token de su telefono en POST /me/devices.
 // Cuando pasa algo que el dueño quiere saber en el momento (una venta, un
-// pedido web, una derivacion, un cierre de caja con diferencia) se le manda
+// pedido web, una derivacion, un cierre de caja con diferencia, un conteo de
+// stock enviado para aprobar) se le manda
 // un aviso a cada telefono registrado. Tocar el aviso abre el listado.
 //
 // Quien recibe:
@@ -267,6 +268,23 @@ function avisarCierreConDiferencia({ cash_register_id, diferencia, branch_id }) 
   });
 }
 
+/** Conteo de stock enviado para aprobar (POST /stock/counts/:id/submit). */
+function avisarConteoEnviado({ id, number, branch_id, sucursal, productos, con_diferencia }) {
+  const n = Number(productos) || 0;
+  const d = Number(con_diferencia) || 0;
+  const partes = [
+    n === 1 ? "1 producto" : `${n} productos`,
+    d ? (d === 1 ? "1 con diferencia" : `${d} con diferencia`) : "sin diferencias",
+  ];
+  return enviar({
+    tipo: "conteo",
+    titulo: `Conteo ${number || `#${id}`} para aprobar${sucursal ? ` · ${sucursal}` : ""}`,
+    cuerpo: partes.join(" · "),
+    ruta: `/app/conteo?id=${id}`,
+    branch_id,
+  });
+}
+
 module.exports = {
   registrarDispositivo,
   quitarDispositivo,
@@ -275,4 +293,5 @@ module.exports = {
   avisarPedidoWeb,
   avisarDerivacion,
   avisarCierreConDiferencia,
+  avisarConteoEnviado,
 };
