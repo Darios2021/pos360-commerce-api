@@ -39,6 +39,9 @@ const EXTENDED_COLUMNS = [
   // Condiciones de pago, entrega y garantía con las que arranca cada
   // presupuesto nuevo. Se editan después dentro del presupuesto.
   ["budget_notes_default", "TEXT NULL"],
+  // Variantes del logo para fondo claro y fondo oscuro. Vacías: se usa logo_url.
+  ["logo_light_url",      "VARCHAR(500) NULL"],
+  ["logo_dark_url",       "VARCHAR(500) NULL"],
 ];
 
 // Texto con el que arranca cada presupuesto nuevo. Se siembra una sola vez, al
@@ -159,51 +162,66 @@ async function updateBranding(req, res, next) {
   }
 }
 
-async function uploadLogo(req, res, next) {
-  try {
-    await ensureRow();
+// Imágenes de la marca: cada una tiene su columna y su kind de subida.
+const IMAGENES = {
+  logo: "logo_url",
+  "logo-light": "logo_light_url",
+  "logo-dark": "logo_dark_url",
+  favicon: "favicon_url",
+};
 
-    const file = req.file;
-    if (!file)
-      return res
-        .status(400)
-        .json({ ok: false, code: "FILE_REQUIRED", message: "Falta el archivo (file)." });
+function subirImagen(kind) {
+  const col = IMAGENES[kind];
+  return async function (req, res, next) {
+    try {
+      await ensureRow();
 
-    const up = await uploadShopAsset({ file, kind: "logo" });
+      const file = req.file;
+      if (!file)
+        return res
+          .status(400)
+          .json({ ok: false, code: "FILE_REQUIRED", message: "Falta el archivo (file)." });
 
-    await sequelize.query(`UPDATE shop_branding SET logo_url=?, updated_at=NOW() WHERE id=1`, {
-      replacements: [up.url],
-    });
+      const up = await uploadShopAsset({ file, kind });
 
-    const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
-    return res.json({ ok: true, item: rows?.[0] || null });
-  } catch (e) {
-    return next(e);
-  }
+      await sequelize.query(`UPDATE shop_branding SET ${col}=?, updated_at=NOW() WHERE id=1`, {
+        replacements: [up.url],
+      });
+      invalidateEmailBrandingCache();
+
+      const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
+      return res.json({ ok: true, item: rows?.[0] || null });
+    } catch (e) {
+      if (e?.statusCode) {
+        return res.status(e.statusCode).json({ ok: false, code: "VALIDATION", message: e.message });
+      }
+      return next(e);
+    }
+  };
 }
 
-async function uploadFavicon(req, res, next) {
-  try {
-    await ensureRow();
-
-    const file = req.file;
-    if (!file)
-      return res
-        .status(400)
-        .json({ ok: false, code: "FILE_REQUIRED", message: "Falta el archivo (file)." });
-
-    const up = await uploadShopAsset({ file, kind: "favicon" });
-
-    await sequelize.query(`UPDATE shop_branding SET favicon_url=?, updated_at=NOW() WHERE id=1`, {
-      replacements: [up.url],
-    });
-
-    const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
-    return res.json({ ok: true, item: rows?.[0] || null });
-  } catch (e) {
-    return next(e);
-  }
+function quitarImagen(kind) {
+  const col = IMAGENES[kind];
+  return async function (req, res, next) {
+    try {
+      await ensureRow();
+      await sequelize.query(`UPDATE shop_branding SET ${col}=NULL, updated_at=NOW() WHERE id=1`);
+      invalidateEmailBrandingCache();
+      const [rows] = await sequelize.query(`SELECT * FROM shop_branding WHERE id=1 LIMIT 1`);
+      return res.json({ ok: true, item: rows?.[0] || null });
+    } catch (e) {
+      return next(e);
+    }
+  };
 }
+
+const uploadLogo = subirImagen("logo");
+const uploadLogoLight = subirImagen("logo-light");
+const uploadLogoDark = subirImagen("logo-dark");
+const uploadFavicon = subirImagen("favicon");
+const removeLogoLight = quitarImagen("logo-light");
+const removeLogoDark = quitarImagen("logo-dark");
+const removeFavicon = quitarImagen("favicon");
 
 // 🇦🇷 Decoración estacional sobre el logo. Acepta GIF/PNG/JPG/WebP/MP4/WebM/MOV.
 async function uploadHolidayOverlay(req, res, next) {
@@ -416,7 +434,12 @@ module.exports = {
   getBranding,
   updateBranding,
   uploadLogo,
+  uploadLogoLight,
+  uploadLogoDark,
+  removeLogoLight,
+  removeLogoDark,
   uploadFavicon,
+  removeFavicon,
   uploadOgImage,
   uploadHolidayOverlay,
   removeHolidayOverlay,

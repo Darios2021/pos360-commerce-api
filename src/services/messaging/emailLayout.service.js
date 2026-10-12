@@ -16,7 +16,8 @@
 //   1) Tabla `shop_branding` (id=1) → name, logo_url, address, maps_url,
 //      phone_display, business_hours, tagline, accent_color, bg_color,
 //      footer_note
-//   2) Tabla `shop_settings` (key='theme') → primary, secondary
+//   2) Tabla `shop_settings` (key='theme') → primary, accent (o secondary en
+//      bases viejas). El acento de la vista Marca manda sobre accent_color.
 //   3) Tabla `shop_links` (kind=instagram/facebook/whatsapp/website/...)
 //   4) Tabla `branding_assets` (íconos custom de redes sociales)
 //   5) Env vars como fallback final.
@@ -44,7 +45,7 @@ async function loadBrandingFromDb() {
   } catch (_) {}
 
   // shop_settings: theme
-  let primary = null, secondary = null;
+  let primary = null, accent = null;
   try {
     const [rows] = await sequelize.query(
       `SELECT value_json FROM shop_settings WHERE \`key\` = 'theme' LIMIT 1`
@@ -53,7 +54,8 @@ async function loadBrandingFromDb() {
     if (v) {
       const parsed = typeof v === "string" ? JSON.parse(v) : v;
       primary = parsed?.primary || null;
-      secondary = parsed?.secondary || null;
+      // `accent` desde la vista Marca; bases viejas lo tienen en `secondary`.
+      accent = parsed?.accent || parsed?.secondary || null;
     }
   } catch (_) {}
 
@@ -109,7 +111,7 @@ async function loadBrandingFromDb() {
     accentDb:   row.accent_color || null,
     bgDb:       row.bg_color || null,
     footerNoteDb: row.footer_note || null,
-    primary, secondary, links, customIcons,
+    primary, accent, links, customIcons,
   };
 }
 
@@ -190,7 +192,7 @@ async function getBranding() {
     whatsappContact: db.whatsappContact || s(process.env.BUSINESS_WHATSAPP_DISPLAY),
 
     primary: normalizeHex(db.primary || process.env.BRAND_PRIMARY_COLOR, "#02498b"),
-    accent:  normalizeHex(db.accentDb || db.secondary || process.env.BRAND_ACCENT_COLOR, "#0ea5e9"),
+    accent:  normalizeHex(db.accent || db.accentDb || process.env.BRAND_ACCENT_COLOR, "#0ea5e9"),
     bg:      normalizeHex(db.bgDb || process.env.BRAND_BG_COLOR, "#f4f6fa"),
 
     footerNote: db.footerNoteDb || s(process.env.EMAIL_FOOTER_NOTE),

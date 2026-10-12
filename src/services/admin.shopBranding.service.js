@@ -115,7 +115,12 @@ async function uploadShopAsset({ file, kind }) {
   let contentType = file.mimetype || "application/octet-stream";
   let cacheControl = "public, max-age=31536000, immutable";
 
-  if (safeKind === "favicon") {
+  if (safeKind === "favicon" && /icon/i.test(String(file.mimetype || ""))) {
+    // ICO: sharp no lo lee, se guarda tal cual.
+    contentType = "image/x-icon";
+    cacheControl = "public, max-age=3600";
+    key = `shop/${ts}-favicon.ico`;
+  } else if (safeKind === "favicon") {
     outBuf = await buildFavicon64Png(file.buffer);
     contentType = "image/png";
     cacheControl = "public, max-age=3600"; // cambia cuando lo reemplazás
@@ -125,9 +130,9 @@ async function uploadShopAsset({ file, kind }) {
     contentType = "image/jpeg";
     cacheControl = "public, max-age=3600";
     key = "shop/og-default.jpg"; // ✅ estable (SIN bucket)
-  } else if (safeKind === "logo") {
+  } else if (safeKind === "logo" || safeKind === "logo-light" || safeKind === "logo-dark") {
     const ext = extFromMime(file.mimetype);
-    key = `shop/${ts}-logo.${ext}`; // versionado
+    key = `shop/${ts}-${safeKind}.${ext}`; // versionado
   } else if (safeKind === "holiday-overlay") {
     if (!isAllowedHolidayOverlayMime(file.mimetype)) {
       const e = new Error(

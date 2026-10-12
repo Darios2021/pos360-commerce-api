@@ -1,0 +1,15 @@
+[
+  { "id": "archivo-condensada", "nombre": "Archivo condensada", "familia": "Archivo", "roles": ["titulares"], "peso": { "titulares": 900 }, "ancho": "72%" },
+  { "id": "archivo", "nombre": "Archivo", "familia": "Archivo", "roles": ["titulares"], "peso": { "titulares": 800 }, "ancho": "100%" },
+  { "id": "oswald", "nombre": "Oswald", "familia": "Oswald", "roles": ["titulares"], "peso": { "titulares": 700 } },
+  { "id": "barlow-condensed", "nombre": "Barlow Condensed", "familia": "Barlow Condensed", "roles": ["titulares"], "peso": { "titulares": 800 } },
+  { "id": "bebas-neue", "nombre": "Bebas Neue", "familia": "Bebas Neue", "roles": ["titulares"], "peso": { "titulares": 400 } },
+  { "id": "anton", "nombre": "Anton", "familia": "Anton", "roles": ["titulares"], "peso": { "titulares": 400 } },
+  { "id": "montserrat", "nombre": "Montserrat", "familia": "Montserrat", "roles": ["titulares"], "peso": { "titulares": 800 } },
+  { "id": "inter", "nombre": "Inter", "familia": "Inter", "roles": ["titulares", "texto"], "peso": { "titulares": 800, "texto": 500 } },
+  { "id": "roboto", "nombre": "Roboto", "familia": "Roboto", "roles": ["texto"], "peso": { "texto": 400 } },
+  { "id": "open-sans", "nombre": "Open Sans", "familia": "Open Sans", "roles": ["texto"], "peso": { "texto": 400 } },
+  { "id": "lato", "nombre": "Lato", "familia": "Lato", "roles": ["texto"], "peso": { "texto": 400 } },
+  { "id": "dm-sans", "nombre": "DM Sans", "familia": "DM Sans", "roles": ["texto"], "peso": { "texto": 400 } },
+  { "id": "nunito-sans", "nombre": "Nunito Sans", "familia": "Nunito Sans", "roles": ["texto"], "peso": { "texto": 400 } }
+]

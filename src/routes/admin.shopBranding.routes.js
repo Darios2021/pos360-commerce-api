@@ -6,7 +6,9 @@
 // GET    /api/v1/admin/shop/branding
 // PUT    /api/v1/admin/shop/branding
 // POST   /api/v1/admin/shop/branding/logo
-// POST   /api/v1/admin/shop/branding/favicon
+// POST   /api/v1/admin/shop/branding/logo-light   (DELETE la quita)
+// POST   /api/v1/admin/shop/branding/logo-dark    (DELETE la quita)
+// POST   /api/v1/admin/shop/branding/favicon      (DELETE lo quita)
 // POST   /api/v1/admin/shop/branding/og-image
 
 const router = require("express").Router();
@@ -36,7 +38,12 @@ function mustFn(fn, name) {
 mustFn(ctrl.getBranding, "getBranding");
 mustFn(ctrl.updateBranding, "updateBranding");
 mustFn(ctrl.uploadLogo, "uploadLogo");
+mustFn(ctrl.uploadLogoLight, "uploadLogoLight");
+mustFn(ctrl.uploadLogoDark, "uploadLogoDark");
+mustFn(ctrl.removeLogoLight, "removeLogoLight");
+mustFn(ctrl.removeLogoDark, "removeLogoDark");
 mustFn(ctrl.uploadFavicon, "uploadFavicon");
+mustFn(ctrl.removeFavicon, "removeFavicon");
 mustFn(ctrl.uploadOgImage, "uploadOgImage");
 mustFn(ctrl.uploadHolidayOverlay, "uploadHolidayOverlay");
 mustFn(ctrl.removeHolidayOverlay, "removeHolidayOverlay");
@@ -45,7 +52,12 @@ router.get("/branding", ctrl.getBranding);
 router.put("/branding", ctrl.updateBranding);
 
 router.post("/branding/logo", upload.single("file"), ctrl.uploadLogo);
+router.post("/branding/logo-light", upload.single("file"), ctrl.uploadLogoLight);
+router.delete("/branding/logo-light", ctrl.removeLogoLight);
+router.post("/branding/logo-dark", upload.single("file"), ctrl.uploadLogoDark);
+router.delete("/branding/logo-dark", ctrl.removeLogoDark);
 router.post("/branding/favicon", upload.single("file"), ctrl.uploadFavicon);
+router.delete("/branding/favicon", ctrl.removeFavicon);
 router.post("/branding/og-image", upload.single("file"), ctrl.uploadOgImage);
 
 // 🇦🇷 Decoración estacional sobre el logo (GIF/PNG/MP4)

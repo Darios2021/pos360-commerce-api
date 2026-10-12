@@ -843,29 +843,30 @@ module.exports = {
 
   async getShopBranding() {
     // Pedimos campos extendidos en cascada para mantener compat con DBs viejas.
+    const CAMPOS = [
+      "id, name, logo_url, logo_light_url, logo_dark_url, favicon_url, holiday_overlay_url, updated_at",
+      "id, name, logo_url, favicon_url, holiday_overlay_url, updated_at",
+      "id, name, logo_url, favicon_url, updated_at",
+    ];
     let r = null;
-    try {
-      const [rows] = await sequelize.query(`
-        SELECT id, name, logo_url, favicon_url, holiday_overlay_url, updated_at
-        FROM shop_branding
-        WHERE id = 1
-        LIMIT 1
-      `);
-      r = rows?.[0] || null;
-    } catch (_) {
-      const [rows] = await sequelize.query(`
-        SELECT id, name, logo_url, favicon_url, updated_at
-        FROM shop_branding
-        WHERE id = 1
-        LIMIT 1
-      `);
-      r = rows?.[0] || null;
+    for (let i = 0; i < CAMPOS.length; i++) {
+      try {
+        const [rows] = await sequelize.query(
+          `SELECT ${CAMPOS[i]} FROM shop_branding WHERE id = 1 LIMIT 1`
+        );
+        r = rows?.[0] || null;
+        break;
+      } catch (e) {
+        if (i === CAMPOS.length - 1) throw e;
+      }
     }
 
     if (!r) {
       return {
         name: "San Juan Tecnología",
         logo_url: "",
+        logo_light_url: "",
+        logo_dark_url: "",
         favicon_url: "",
         holiday_overlay_url: "",
         updated_at: new Date().toISOString(),
@@ -875,6 +876,8 @@ module.exports = {
     return {
       name: r.name || "San Juan Tecnología",
       logo_url: r.logo_url || "",
+      logo_light_url: r.logo_light_url || "",
+      logo_dark_url: r.logo_dark_url || "",
       favicon_url: r.favicon_url || "",
       holiday_overlay_url: r.holiday_overlay_url || "",
       updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
