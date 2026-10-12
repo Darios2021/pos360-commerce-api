@@ -46,6 +46,8 @@ const StockMovement = require("./StockMovement")(sequelize, DataTypes);
 const StockMovementItem = require("./StockMovementItem")(sequelize, DataTypes);
 const StockTransfer = require("./StockTransfer")(sequelize, DataTypes);
 const StockTransferItem = require("./StockTransferItem")(sequelize, DataTypes);
+const StockCount = require("./StockCount")(sequelize, DataTypes);
+const StockCountItem = require("./StockCountItem")(sequelize, DataTypes);
 
 // ===== ProductVideo (opcional) =====
 let ProductVideo = null;
@@ -400,6 +402,15 @@ safeHasMany(StockTransfer, StockTransferItem, { foreignKey: "transfer_id", as: "
 safeBelongsTo(StockTransferItem, StockTransfer, { foreignKey: "transfer_id", as: "transfer" });
 safeBelongsTo(StockTransferItem, Product, { foreignKey: "product_id", as: "product" });
 
+// StockCount ↔ Warehouse / Users / Items (conteos de stock)
+safeBelongsTo(StockCount, Warehouse, { foreignKey: "warehouse_id", as: "warehouse" });
+safeBelongsTo(StockCount, User, { foreignKey: "created_by",   as: "creator" });
+safeBelongsTo(StockCount, User, { foreignKey: "submitted_by", as: "submitter" });
+safeBelongsTo(StockCount, User, { foreignKey: "applied_by",   as: "applier" });
+safeHasMany(StockCount, StockCountItem, { foreignKey: "count_id", as: "items" });
+safeBelongsTo(StockCountItem, StockCount, { foreignKey: "count_id", as: "stockCount" });
+safeBelongsTo(StockCountItem, Product, { foreignKey: "product_id", as: "product" });
+
 // POS: Sale
 safeBelongsTo(Sale, Branch, { foreignKey: "branch_id", as: "branch" });
 safeBelongsTo(Sale, User, { foreignKey: "user_id", as: "user" });
@@ -628,6 +639,8 @@ const models = {
   StockMovementItem,
   StockTransfer,
   StockTransferItem,
+  StockCount,
+  StockCountItem,
 
   // POS
   Sale,

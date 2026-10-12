@@ -351,6 +351,63 @@ columnSteps.push({
   def:    "DECIMAL(12,2) NULL COMMENT 'Costo unitario en pesos al momento de la venta'",
 });
 
+// ── Conteos de stock (teléfono como cargador) ───────────────────────────
+// El conteo vive en el servidor para retomarlo en otro teléfono o contar
+// entre dos personas. Al aplicarlo fija el stock y deja un movimiento
+// `adjustment` por diferencia. Contrato: docs/conteos-y-codigo.md.
+// Sin FK a products/warehouses a propósito (como budget_items): un tipo de
+// columna distinto en una base vieja no puede impedir crear la tabla.
+tableSteps.push({
+  id:    "stock_counts",
+  table: "stock_counts",
+  sql: `
+    CREATE TABLE IF NOT EXISTS stock_counts (
+      id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      number        VARCHAR(32) NOT NULL COMMENT 'CON-AAAA-NNNNNN',
+      warehouse_id  BIGINT UNSIGNED NOT NULL COMMENT 'Deposito contado (warehouses.id)',
+      branch_id     BIGINT UNSIGNED NOT NULL COMMENT 'Sucursal del deposito, para el ambito',
+      status        ENUM('draft','pending','applied','cancelled') NOT NULL DEFAULT 'draft',
+      motivo        VARCHAR(255) NULL COMMENT 'Motivo del ajuste',
+      created_by    BIGINT UNSIGNED NOT NULL,
+      submitted_by  BIGINT UNSIGNED NULL,
+      submitted_at  DATETIME NULL,
+      applied_by    BIGINT UNSIGNED NULL,
+      applied_at    DATETIME NULL,
+      cancelled_by  BIGINT UNSIGNED NULL,
+      cancelled_at  DATETIME NULL,
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_stock_counts_number (number),
+      KEY ix_stock_counts_branch_status (branch_id, status),
+      KEY ix_stock_counts_warehouse (warehouse_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Conteos de stock por deposito';
+  `,
+});
+tableSteps.push({
+  id:    "stock_count_items",
+  table: "stock_count_items",
+  sql: `
+    CREATE TABLE IF NOT EXISTS stock_count_items (
+      id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      count_id     BIGINT UNSIGNED NOT NULL,
+      product_id   BIGINT UNSIGNED NOT NULL,
+      counted_qty  DECIMAL(14,3) NOT NULL DEFAULT 0.000 COMMENT 'Cantidad contada',
+      system_qty   DECIMAL(14,3) NULL COMMENT 'Stock del sistema al aplicar (NULL mientras esta abierto)',
+      diff_qty     DECIMAL(14,3) NULL COMMENT 'counted_qty - system_qty al aplicar, con signo',
+      updated_by   BIGINT UNSIGNED NULL COMMENT 'Ultimo usuario que cargo el renglon',
+      created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_sci_count_product (count_id, product_id),
+      KEY ix_sci_product (product_id),
+      CONSTRAINT fk_sci_count FOREIGN KEY (count_id) REFERENCES stock_counts (id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Renglones de un conteo de stock';
+  `,
+});
+
 async function columnExists(sequelize, table, column) {
   try {
     const rows = await sequelize.query(

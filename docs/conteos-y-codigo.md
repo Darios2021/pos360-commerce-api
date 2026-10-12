@@ -86,7 +86,7 @@ administrador aplica directo, sin enviar), `draft|pending -> cancelled`.
       "diff_qty": "-2.000",
       "updated_by": 7,
       "updated_at": "2026-10-12T14:05:40.000Z",
-      "product": { "id": 15, "name": "Cargador 20 W USB-C", "sku": "CAR-020", "barcode": "7790000000155", "code": "P00015", "images": [{ "url": "...", "sort_order": 0 }] }
+      "product": { "id": 15, "name": "Cargador 20 W USB-C", "sku": "CAR-020", "barcode": "7790000000155", "code": "P00015", "is_active": true, "images": [{ "url": "...", "sort_order": 0 }] }
     }
   ],
   "summary": { "items": 1, "with_diff": 1, "equal": 0 }
@@ -100,6 +100,8 @@ administrador aplica directo, sin enviar), `draft|pending -> cancelled`.
   para la pantalla de diferencias. Al aplicar se congela el stock que había en
   ese momento y ya no cambia.
 - La lista (`GET /stock/counts`) no trae `items`: trae `items_count`.
+- `product.images` trae a lo sumo una imagen (la de menor `sort_order`).
+- Los renglones vienen ordenados por última carga (el más reciente primero).
 
 ### `POST /stock/counts`
 
@@ -229,4 +231,16 @@ Errores: `403 { code: "FORBIDDEN" }` (no es administrador),
 
 Las crea el runner de arranque (`src/migrations/runner.js`, `tableSteps`) con
 `CREATE TABLE IF NOT EXISTS`: `stock_counts` y `stock_count_items`. El SQL está
-en el runner.
+en el runner. Al desplegar, el runner las crea solo en el primer arranque;
+para crearlas antes a mano, correr ese mismo SQL.
+
+## 4. Prueba
+
+`script/probar-conteos.js` recorre todo por HTTP contra una MySQL descartable
+en docker (el encabezado del script tiene el comando). Se niega a correr si la
+base no es local o su nombre no contiene `prueba`. Cubre: código exacto
+(barcode, SKU, code, inactivo, parcial, fuera de ámbito), crear, sumar entre
+dos usuarios a la vez, reemplazar, quitar, validaciones, ámbito por sucursal,
+enviar, cajero que no puede aplicar, aplicar (stock fijado, `system_qty`
+congelado contra el stock del momento, movimientos `adjustment` con autor,
+motivo y signo), aplicar directo desde borrador y cancelar.
