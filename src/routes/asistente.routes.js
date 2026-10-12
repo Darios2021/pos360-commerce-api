@@ -29,13 +29,38 @@ asistente.get("/estado", envolver(async (req, res) => {
   res.status(r.status).json(r.cuerpo);
 }));
 
+// Con `Accept: text/event-stream` reenvía el flujo de mostrador tal cual llega (pasos de las
+// herramientas y bloques a medida que salen); sin eso, el JSON entero de siempre (cliente viejo).
+const pideFlujo = (req) => String(req.get("accept") || "").includes("text/event-stream");
+
 asistente.post("/mensaje", envolver(async (req, res) => {
   const texto = String(req.body?.texto || "").trim().slice(0, 2000);
   if (!texto) return res.status(400).json({ ok: false, error: "Falta el texto" });
   const conversacion = req.body?.conversacion ? String(req.body.conversacion).slice(0, 40) : undefined;
   const permiso = await svc.firmarPermiso(usuarioDe(req));
-  const r = await svc.pedirAMostrador("/interno/mensajes", { permiso, texto, conversacion });
-  res.status(r.status).json(r.cuerpo);
+  if (!pideFlujo(req)) {
+    const r = await svc.pedirAMostrador("/interno/mensajes", { permiso, texto, conversacion });
+    return res.status(r.status).json(r.cuerpo);
+  }
+  const corte = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) corte.abort(); });
+  const r = await svc.abrirFlujoDeMostrador("/interno/mensajes", { permiso, texto, conversacion }, corte.signal);
+  // Antes de empezar (permiso, tope, comercio apagado) mostrador contesta JSON con su estado.
+  if (!String(r.headers.get("content-type") || "").includes("text/event-stream")) {
+    const t = await r.text();
+    let j;
+    try { j = JSON.parse(t); } catch { j = { error: t.slice(0, 300) }; }
+    return res.status(r.status).json(j);
+  }
+  res.status(200).set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+  res.flushHeaders();
+  try {
+    for await (const trozo of r.body) res.write(trozo);
+  } catch (e) {
+    // El navegador se fue (corte) o mostrador cortó a mitad: se avisa si todavía hay a quién.
+    if (!corte.signal.aborted && !res.writableEnded) res.write(`event: error\ndata: ${JSON.stringify({ error: "Se cortó la respuesta del asistente." })}\n\n`);
+  }
+  if (!res.writableEnded) res.end();
 }));
 
 const asistenteDatos = express.Router();

@@ -106,6 +106,24 @@ async function pedirAMostrador(ruta, cuerpo, { espera = 90000 } = {}) {
   return { status: r.status, cuerpo: json };
 }
 
+/**
+ * Igual que pedirAMostrador pero pidiendo el flujo (SSE): devuelve la respuesta de fetch sin leer el
+ * cuerpo, para reenviarlo tal cual llega. `senal` corta el pedido si el navegador se va.
+ */
+async function abrirFlujoDeMostrador(ruta, cuerpo, senal) {
+  configurado();
+  try {
+    return await fetch(`${String(process.env.MOSTRADOR_URL).replace(/\/+$/, "")}${ruta}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.MOSTRADOR_CLAVE}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(cuerpo),
+      signal: AbortSignal.any([senal, AbortSignal.timeout(180000)]),
+    });
+  } catch {
+    throw new ErrorAsistente(502, "El asistente no respondió.");
+  }
+}
+
 /** Middleware de /asistente/datos: permiso válido, usuario activo con el mismo rol. */
 async function exigirPermiso(req, res, next) {
   try {
@@ -462,6 +480,6 @@ async function auditoria(u, q) {
 
 module.exports = {
   auditoria,
-  MATRIZ, rolPrincipal, ErrorAsistente, configurado, firmarPermiso, pedirAMostrador, exigirPermiso, exigirRol, hoy,
+  MATRIZ, rolPrincipal, ErrorAsistente, configurado, firmarPermiso, pedirAMostrador, abrirFlujoDeMostrador, exigirPermiso, exigirRol, hoy,
   cajaActual, ventas, cajas, arqueo, masVendidos, margenes, stock,
 };
