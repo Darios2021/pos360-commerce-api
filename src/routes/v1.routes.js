@@ -375,6 +375,18 @@ if (cashRegistersRoutes) {
   safeUse("/pos/cash-registers", requireAuth, attachAccessContext, branchContext, cashRegistersRoutes);
 }
 
+// ✅ ASISTENTE INTERNO (mostrador, chat.cingulado.org): ver src/services/asistente.service.js.
+// /asistente/datos va PRIMERO y sin requireAuth: lo llama mostrador con el permiso delegado
+// (otro secreto, otra audiencia). El resto, con la sesión de siempre.
+try {
+  const { asistente, asistenteDatos } = require("./asistente.routes");
+  safeUse("/asistente/datos", asistenteDatos);
+  safeUse("/asistente", requireAuth, attachAccessContext, asistente);
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.log("⚠️ asistente no cargado:", e?.message || e);
+}
+
 // ✅ NUEVO: REPORTES (franquicia — ventas, stock, cajas)
 if (reportsRoutes) {
   safeUse("/reports", requireAuth, attachAccessContext, branchContext, reportsRoutes);
