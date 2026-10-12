@@ -135,11 +135,11 @@ router.get("/suggestions", safeFn("listSuggestionsForPos", listSuggestionsForPos
  */
 router.post("/sales", safeFn("createPosSale", createPosSale));
 
-/**
- * Backoffice sale create (si lo querés)
- * (puede exigir warehouse_id por item según tu controller)
- */
-router.post("/sales/backoffice", safeFn("posSalesController.createSale", posSalesController.createSale));
+// POST /sales/backoffice se quitó: apuntaba a posSalesController.createSale,
+// que no existe desde b99a064 (2026-03-04, el alta de venta vive sólo en
+// pos.controller.js). La ruta respondía siempre 501 y dejaba en cada arranque
+// "❌ [pos.routes] Handler inválido: posSalesController.createSale". Ningún
+// cliente la usa: la venta entra por POST /sales (arriba).
 
 // ---- SALES MODULE
 router.get("/sales", safeFn("listSales", listSales));
