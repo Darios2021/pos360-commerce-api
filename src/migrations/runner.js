@@ -351,6 +351,15 @@ columnSteps.push({
   def:    "DECIMAL(12,2) NULL COMMENT 'Costo unitario en pesos al momento de la venta'",
 });
 
+// ── Anulación de venta: motivo y observación ────────────────────────────
+// DELETE /pos/sales/:id (anulación suave) guarda el motivo elegido y la
+// observación libre que manda la vista "Anular venta". NULL = venta no
+// anulada o anulada antes de estas columnas (el escritorio no manda motivo).
+columnSteps.push(
+  { id: "sales__cancel_reason", table: "sales", column: "cancel_reason", def: "VARCHAR(80) NULL COMMENT 'Motivo de la anulacion'" },
+  { id: "sales__cancel_note",   table: "sales", column: "cancel_note",   def: "VARCHAR(500) NULL COMMENT 'Observacion de la anulacion'" },
+);
+
 // ── Conteos de stock (teléfono como cargador) ───────────────────────────
 // El conteo vive en el servidor para retomarlo en otro teléfono o contar
 // entre dos personas. Al aplicarlo fija el stock y deja un movimiento

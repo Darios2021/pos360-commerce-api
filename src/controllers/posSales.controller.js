@@ -858,7 +858,19 @@ async function getSaleById(req, res, next) {
       });
     }
 
-    return res.json({ ok: true, data: { sale, refunds, exchanges } });
+    // Motivo y observación de la anulación (columnas del runner, fuera del modelo).
+    let cancellation = null;
+    if (String(sale.status) === "CANCELLED") {
+      try {
+        const [rows] = await sequelize.query(
+          "SELECT cancel_reason, cancel_note FROM sales WHERE id = :id",
+          { replacements: { id } }
+        );
+        if (rows?.[0]) cancellation = { reason: rows[0].cancel_reason ?? null, note: rows[0].cancel_note ?? null };
+      } catch (_) { /* columnas aún no creadas */ }
+    }
+
+    return res.json({ ok: true, data: { sale, refunds, exchanges, cancellation } });
   } catch (e) {
     next(e);
   }
@@ -1745,9 +1757,15 @@ async function deleteSale(req, res, next) {
     if (!force) {
       // SOFT-CANCEL por defecto: preserva la venta para auditoría y arqueo.
       const cancelledBy = req.user?.id ?? null;
+      // Motivo y observación (opcionales: el escritorio no los manda).
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const cancelReason = String(body.reason ?? "").trim().slice(0, 80) || null;
+      const cancelNote = String(body.note ?? "").trim().slice(0, 500) || null;
       const note = [
         sale.note,
         `ANULADA por usuario #${cancelledBy} el ${new Date().toISOString()}`,
+        cancelReason ? `Motivo: ${cancelReason}` : null,
+        cancelNote ? `Observación: ${cancelNote}` : null,
       ].filter(Boolean).join(" | ");
 
       await sale.update(
@@ -1755,11 +1773,27 @@ async function deleteSale(req, res, next) {
         { transaction: t, fields: ["status", "note"] }
       );
 
+      // Columnas del runner (sales.cancel_reason / cancel_note). Si faltaran,
+      // MySQL revierte sólo esta sentencia: la anulación sigue y el motivo
+      // queda igual en `note`.
+      if (cancelReason || cancelNote) {
+        try {
+          await sequelize.query(
+            "UPDATE sales SET cancel_reason = :r, cancel_note = :n WHERE id = :id",
+            { replacements: { r: cancelReason, n: cancelNote, id }, transaction: t }
+          );
+        } catch (e) {
+          console.warn("[posSales.deleteSale] no se guardó el motivo en columnas:", e.message);
+        }
+      }
+
       await t.commit();
       return res.json({
         ok: true,
         message: "Venta anulada. El stock fue restaurado.",
         cancelled_by: cancelledBy,
+        cancel_reason: cancelReason,
+        cancel_note: cancelNote,
         stock: stockReport,
       });
     }
