@@ -176,6 +176,16 @@ async function dispatchTransfer(transfer_id, { dispatched_by }) {
     tg.notifyTransferDispatched({ transfer_id: result.id }).catch((e) =>
       console.warn("[stockTransfer.dispatchTransfer] notifyTransferDispatched error:", e?.message)
     );
+    // Aviso push a la APK (services/avisosPush.service.js).
+    require("./avisosPush.service")
+      .avisarDerivacion({
+        id: result.id,
+        estado: "despachada",
+        origen: result.fromWarehouse?.branch?.name,
+        destino: result.toWarehouse?.branch?.name,
+        branch_id: result.toWarehouse?.branch?.id || null,
+      })
+      .catch(() => {});
   } catch (e) {
     console.warn("[stockTransfer.dispatchTransfer] no se pudo cargar notifier:", e?.message);
   }
@@ -279,6 +289,10 @@ async function receiveTransfer(transfer_id, { receptions = [], received_by }) {
     tg.notifyTransferReceived({ transfer_id: result.id }).catch((e) =>
       console.warn("[stockTransfer.receiveTransfer] notifyTransferReceived error:", e?.message)
     );
+    // Aviso push a la APK (services/avisosPush.service.js).
+    require("./avisosPush.service")
+      .avisarDerivacion({ id: result.id, estado: "recibida", branch_id: result.fromWarehouse?.branch?.id || null })
+      .catch(() => {});
   } catch (e) {
     console.warn("[stockTransfer.receiveTransfer] no se pudo cargar notifier:", e?.message);
   }

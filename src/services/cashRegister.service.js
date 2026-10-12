@@ -855,7 +855,17 @@ async function closeCashRegister({
     // Hook de notificaciones (Telegram). Post-commit para no notificar si la txn falla.
     try {
       const tg = require("./telegramNotifier.service");
-      const fire = () => tg.notifyCashRegisterClose({ cash_register_id: id }).catch(() => {});
+      const fire = () => {
+        tg.notifyCashRegisterClose({ cash_register_id: id }).catch(() => {});
+        // Aviso push a la APK si la caja cerro con diferencia (services/avisosPush.service.js).
+        require("./avisosPush.service")
+          .avisarCierreConDiferencia({
+            cash_register_id: id,
+            diferencia: updatedCashRegister?.difference_cash,
+            branch_id: updatedCashRegister?.branch_id,
+          })
+          .catch(() => {});
+      };
       if (transaction && typeof transaction.afterCommit === "function") {
         transaction.afterCommit(fire);
       } else {

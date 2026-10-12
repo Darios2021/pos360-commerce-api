@@ -948,6 +948,18 @@ async function checkout(req, res) {
         shipping,
         items,
       }).catch((e) => console.warn("[ecomCheckout] telegram notify falló:", e?.message));
+
+      // Aviso push a la APK (services/avisosPush.service.js).
+      try {
+        require("../services/avisosPush.service")
+          .avisarPedidoWeb({
+            codigo: result.order.public_code || result.order.id,
+            total: result.order.total,
+            entrega: fulfillment_type === "delivery" ? "Envío" : "Retiro",
+            branch_id: result.order.branch_id || pickup_branch_id || null,
+          })
+          .catch(() => {});
+      } catch (_) {}
     }
 
     return res.json({ ok: true, request_id, ...result });

@@ -34,4 +34,9 @@ router.put("/signature", sig.upsertSignature);
 router.post("/signature/photo", upload.single("file"), sig.uploadPhoto);
 router.delete("/signature/photo", sig.deletePhoto);
 
+// ✅ Telefonos con la APK (avisos push)
+const devices = require("../controllers/me.devices.controller");
+router.post("/devices", devices.registrar);
+router.delete("/devices/:id", devices.quitar);
+
 module.exports = router;

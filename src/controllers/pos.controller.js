@@ -1995,6 +1995,24 @@ async function createSale(req, res) {
 
     await t.commit();
 
+    // Aviso push a la APK de los dueños (services/avisosPush.service.js).
+    // Post-commit y sin await: la venta no espera ni falla por el aviso.
+    try {
+      const metodoPrincipal = (Array.isArray(req.body?.payments) ? req.body.payments : [])
+        .slice()
+        .sort((a, b) => Number(b?.amount || 0) - Number(a?.amount || 0))
+        .map((p) => p?.method_name || p?.name || p?.method || p?.method_code || "")[0];
+      require("../services/avisosPush.service")
+        .avisarVenta({
+          sale_id: sale.id,
+          sale_number: sale.sale_number,
+          total: sale.total,
+          branch_id: sale.branch_id,
+          metodo: metodoPrincipal,
+        })
+        .catch(() => {});
+    } catch (_) {}
+
     logPos(req, "info", "createSale done", {
       sale_id: sale.id,
       cash_register_id: sale.cash_register_id || null,
