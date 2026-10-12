@@ -144,6 +144,8 @@ async function main() {
   }
   r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/ventas-por?agrupar=vendedor");
   check("por vendedor: anuladas, descuentos y que no se registra quién anuló", r.body?.data?.grupos?.every((g) => g.anuladas && g.descuentos) && /anul/.test(r.body?.data?.no_registra || ""), JSON.stringify(r.body).slice(0, 200));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/ventas-por?agrupar=sucursal&desde=2026-03-01&hasta=2026-03-31&comparar=mes_anterior");
+  check("comparar con el mes anterior: 01/02 al 28/02", r.body?.data?.periodo_anterior?.desde === "2026-02-01" && r.body.data.periodo_anterior.hasta === "2026-02-28", JSON.stringify(r.body?.data?.periodo_anterior));
   r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/ventas-por?agrupar=cualquiera");
   check("agrupar inválido: 400", r.status === 400, `HTTP ${r.status}`);
   r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/rotacion?modo=en_baja&dias=30");

@@ -486,5 +486,5 @@ module.exports = {
   MATRIZ, rolPrincipal, ErrorAsistente, configurado, firmarPermiso, pedirAMostrador, abrirFlujoDeMostrador, exigirPermiso, exigirRol, hoy,
   cajaActual, ventas, cajas, arqueo, masVendidos, margenes, stock,
   // Para asistenteAnalisis.service.js
-  rango, filtroSucursal, reemplazos, n, nombreUsuario, inicioDia, COSTO_ACTUAL,
+  rango, filtroSucursal, reemplazos, n, nombreUsuario, inicioDia, finDia, COSTO_ACTUAL,
 };

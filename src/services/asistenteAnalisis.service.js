@@ -20,12 +20,26 @@ const DIAS = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "
 const MEDIO = { CASH: "efectivo", TRANSFER: "transferencia", CARD: "tarjeta", QR: "QR", MERCADOPAGO: "Mercado Pago", CREDIT_SJT: "Crédito SJT", OTHER: "otros" };
 const HORA_AR = "CONVERT_TZ(s.sold_at,'+00:00','-03:00')";
 
-/** El período anterior de la misma cantidad de días, terminando el día antes de `desde`. */
-function anteriorDe(r) {
+/** El mismo día del mes anterior (el 31/03 pasa a 28/02 o 29/02). */
+function mesAntes(f) {
+  const [a, m, d] = f.split("-").map(Number);
+  const am = m === 1 ? a - 1 : a, mm = m === 1 ? 12 : m - 1;
+  const ultimo = new Date(Date.UTC(am, mm, 0)).getUTCDate();
+  return `${am}-${String(mm).padStart(2, "0")}-${String(Math.min(d, ultimo)).padStart(2, "0")}`;
+}
+/**
+ * Contra qué se compara: por defecto el período anterior de la misma cantidad de días, terminando
+ * el día antes de `desde`; con `comparar=mes_anterior`, los mismos días del mes anterior.
+ */
+function anteriorDe(r, comparar) {
+  if (comparar === "mes_anterior") {
+    const desde = mesAntes(r.desde), hasta = mesAntes(r.hasta);
+    return { desde, hasta, de: inicioDia(desde), a: base.finDia(hasta), criterio: "mismos días del mes anterior" };
+  }
   const dias = Math.round((Date.parse(r.hasta) - Date.parse(r.desde)) / 86400000) + 1;
   const hasta = new Date(Date.parse(r.desde) - 86400000).toISOString().slice(0, 10);
   const desde = new Date(Date.parse(r.desde) - dias * 86400000).toISOString().slice(0, 10);
-  return { desde, hasta, de: inicioDia(desde), a: inicioDia(r.desde), dias };
+  return { desde, hasta, de: inicioDia(desde), a: inicioDia(r.desde), criterio: `los ${dias} días anteriores` };
 }
 const variacion = (actual, antes) => (antes > 0 ? Math.round(((actual - antes) / antes) * 1000) / 10 : null);
 const rangoAnalisis = (q, defecto) => (q.desde || q.hasta ? rango(q) : rango({}, { defecto }));
@@ -105,7 +119,7 @@ async function ventasPor(u, q) {
   const agrupar = AGRUPAR.includes(q.agrupar) ? q.agrupar : null;
   if (!agrupar) throw new ErrorAsistente(400, `agrupar: ${AGRUPAR.join(", ")}`);
   const r = rangoAnalisis(q, 29);
-  const ant = anteriorDe(r);
+  const ant = anteriorDe(r, q.comparar);
   const [act, prev] = await Promise.all([agrupado(agrupar, u, r.de, r.a), agrupado(agrupar, u, ant.de, ant.a)]);
   const antes = new Map(prev.map((f) => [f.clave, f]));
   const grupos = act.map((f) => {
@@ -125,7 +139,7 @@ async function ventasPor(u, q) {
   const suma = (l, k) => l.reduce((s, f) => s + (Number(f[k]) || 0), 0);
   const total = n(suma(act, "total")), totalAntes = n(suma(prev, "total"));
   return {
-    agrupar, desde: r.desde, hasta: r.hasta, periodo_anterior: { desde: ant.desde, hasta: ant.hasta },
+    agrupar, desde: r.desde, hasta: r.hasta, periodo_anterior: { desde: ant.desde, hasta: ant.hasta, criterio: ant.criterio },
     total: { total, anterior: totalAntes, variacion_pct: variacion(total, totalAntes) },
     grupos: grupos.slice(0, 40),
     nota: NOTAS[agrupar], no_registra: NO_REGISTRA_VENTAS[agrupar], moneda: "ARS",
@@ -221,4 +235,4 @@ async function clientes(u, q) {
   };
 }
 
-module.exports = { AGRUPAR, ventasPor, rotacion, clientes, anteriorDe };
+module.exports = { AGRUPAR, ventasPor, rotacion, clientes, anteriorDe, mesAntes };
