@@ -499,7 +499,8 @@ async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], sta
         { model: User, as: "creator",    attributes: ["id","first_name","last_name"] },
         { model: User, as: "dispatcher", attributes: ["id","first_name","last_name"] },
         { model: User, as: "receiver",   attributes: ["id","first_name","last_name"] },
-        { model: StockTransferItem, as: "items", attributes: ["id"] },
+        // qty_sent para sumar units_total; los ítems siguen trayendo id como antes.
+        { model: StockTransferItem, as: "items", attributes: ["id", "qty_sent"] },
       ],
       order: [["created_at", "DESC"]],
       limit: cleanLimit,
@@ -523,8 +524,17 @@ async function listTransfers({ branchId, warehouseId, allowedBranchIds = [], sta
   }
   const total_all = Object.values(count_by_status).reduce((a, b) => a + b, 0);
 
+  // units_total: suma de qty_sent de la derivación (número, hasta 3 decimales).
+  // Se agrega a cada fila; el resto de la respuesta no cambia.
+  const transfers = page_result.rows.map((row) => {
+    const plain = row.toJSON();
+    const sum = (plain.items || []).reduce((a, it) => a + toDecimal(it.qty_sent), 0);
+    plain.units_total = Math.round(sum * 1000) / 1000;
+    return plain;
+  });
+
   return {
-    transfers: page_result.rows,
+    transfers,
     total: page_result.count,
     total_all,
     count_by_status,
