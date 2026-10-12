@@ -5,6 +5,7 @@
 //   asistenteDatos   /api/v1/asistente/datos  con el permiso delegado: lo llama mostrador, nunca el navegador
 const express = require("express");
 const svc = require("../services/asistente.service");
+const analisis = require("../services/asistenteAnalisis.service");
 
 const envolver = (fn) => async (req, res, next) => {
   try {
@@ -76,5 +77,8 @@ dato("mas-vendidos", svc.masVendidos);
 dato("margenes", svc.margenes);
 dato("stock", svc.stock);
 dato("auditoria", svc.auditoria);
+dato("ventas-por", analisis.ventasPor);
+dato("rotacion", analisis.rotacion);
+dato("clientes", analisis.clientes);
 
 module.exports = { asistente, asistenteDatos };

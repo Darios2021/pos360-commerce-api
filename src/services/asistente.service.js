@@ -30,8 +30,8 @@ const CUENTA = () => process.env.ASISTENTE_CUENTA || "sanjuantecnologia";
  * allá decide qué herramientas ve el modelo; acá, qué datos se entregan.
  */
 const MATRIZ = {
-  super_admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria"],
-  admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria"],
+  super_admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria", "ventas-por", "rotacion", "clientes"],
+  admin: ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria", "ventas-por", "rotacion", "clientes"],
   cajero: ["caja-actual", "ventas", "stock"],
   user: [],
 };
@@ -322,14 +322,16 @@ async function masVendidos(u, q) {
 const COSTO_ACTUAL = "CASE WHEN UPPER(COALESCE(p.cost_currency,'')) = 'USD' THEN COALESCE(p.cost,0) * COALESCE(p.fx_rate,0) ELSE COALESCE(p.cost,0) END";
 async function margenes(u, q) {
   const r = q.desde || q.hasta ? rango(q) : rango({}, { defecto: 30 });
+  const porCategoria = q.agrupar === "categoria";
   const [filas] = await sequelize.query(
-    `SELECT MAX(si.product_name_snapshot) AS producto, SUM(si.quantity) AS unidades, SUM(si.line_total) AS vendido,
+    `SELECT ${porCategoria ? "COALESCE(MAX(c.name), 'sin categoría')" : "MAX(si.product_name_snapshot)"} AS producto, SUM(si.quantity) AS unidades, SUM(si.line_total) AS vendido,
             SUM(si.quantity * COALESCE(si.unit_cost, ${COSTO_ACTUAL})) AS costo,
             SUM(CASE WHEN si.unit_cost IS NULL THEN si.quantity ELSE 0 END) AS estimadas,
             SUM(CASE WHEN COALESCE(si.unit_cost, ${COSTO_ACTUAL}) <= 0 THEN si.quantity ELSE 0 END) AS sin_costo
        FROM sale_items si JOIN sales s ON s.id = si.sale_id LEFT JOIN products p ON p.id = si.product_id
+       ${porCategoria ? "LEFT JOIN categories c ON c.id = p.category_id" : ""}
       WHERE s.status = 'PAID' AND s.sold_at >= :de AND s.sold_at < :a ${filtroSucursal(u, "s.branch_id")}
-      GROUP BY si.product_id ORDER BY vendido DESC`,
+      GROUP BY ${porCategoria ? "p.category_id" : "si.product_id"} ORDER BY vendido DESC`,
     { replacements: reemplazos(u, { de: r.de, a: r.a }) }
   );
   const suma = (k) => filas.reduce((s, f) => s + (Number(f[k]) || 0), 0);
@@ -340,9 +342,10 @@ async function margenes(u, q) {
     total: { vendido: n(vendido), costo: n(costo), margen: n(margen), margen_pct: vendido ? Math.round((margen / vendido) * 1000) / 10 : null },
     unidades_con_costo_estimado: suma("estimadas"), unidades_sin_costo: suma("sin_costo"),
     nota: "Margen bruto sobre precio de venta con IVA, sin impuestos ni comisiones. Las unidades sin costo cargado cuentan como costo 0.",
-    productos: filas.slice(0, 10).map((f) => {
+    agrupar: porCategoria ? "categoria" : "producto",
+    [porCategoria ? "categorias" : "productos"]: filas.slice(0, porCategoria ? 20 : 10).map((f) => {
       const v = Number(f.vendido) || 0, c = Number(f.costo) || 0;
-      return { producto: f.producto, unidades: n(f.unidades), vendido: n(v), costo: n(c), margen: n(v - c), margen_pct: v ? Math.round(((v - c) / v) * 1000) / 10 : null };
+      return { [porCategoria ? "categoria" : "producto"]: f.producto, unidades: n(f.unidades), vendido: n(v), costo: n(c), margen: n(v - c), margen_pct: v ? Math.round(((v - c) / v) * 1000) / 10 : null };
     }),
     moneda: "ARS",
   };
@@ -482,4 +485,6 @@ module.exports = {
   auditoria,
   MATRIZ, rolPrincipal, ErrorAsistente, configurado, firmarPermiso, pedirAMostrador, abrirFlujoDeMostrador, exigirPermiso, exigirRol, hoy,
   cajaActual, ventas, cajas, arqueo, masVendidos, margenes, stock,
+  // Para asistenteAnalisis.service.js
+  rango, filtroSucursal, reemplazos, n, nombreUsuario, inicioDia, COSTO_ACTUAL,
 };

@@ -37,7 +37,7 @@ const permiso = (rol, extra = {}, op = {}) => jwt.sign(
   { sis: "sjt", cuenta: "sanjuantecnologia", sub: String(USUARIO[rol]), rol, nombre: rol, alcance: "asistente:lectura", ...extra },
   op.secreto || SECRETO, { expiresIn: op.vence || "5m", audience: op.aud || "mostrador" });
 const hoy = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/San_Juan" }).format(new Date());
-const RUTAS = ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria"];
+const RUTAS = ["caja-actual", "ventas", "cajas", "arqueo", "mas-vendidos", "margenes", "stock", "auditoria", "ventas-por", "rotacion", "clientes"];
 const D = (r) => r.body && r.body.data;
 
 async function main() {
@@ -67,13 +67,13 @@ async function main() {
   const espera = {
     super_admin: Object.fromEntries(RUTAS.map((x) => [x, 200])),
     admin: { ...Object.fromEntries(RUTAS.map((x) => [x, 200])), arqueo: 200 },
-    cajero: { "caja-actual": 200, ventas: 200, cajas: 403, arqueo: 403, "mas-vendidos": 403, margenes: 403, stock: 200, auditoria: 403 },
+    cajero: { "caja-actual": 200, ventas: 200, cajas: 403, arqueo: 403, "mas-vendidos": 403, margenes: 403, stock: 200, auditoria: 403, "ventas-por": 403, rotacion: 403, clientes: 403 },
     user: Object.fromEntries(RUTAS.map((x) => [x, 403])),
   };
   for (const [rol, rutas] of Object.entries(espera)) {
     const p = permiso(rol);
     for (const ruta of RUTAS) {
-      r = await api(p, "GET", `/api/v1/asistente/datos/${ruta}${ruta === "arqueo" && rol === "admin" ? "?caja=2" : ""}`);
+      r = await api(p, "GET", `/api/v1/asistente/datos/${ruta}${ruta === "arqueo" && rol === "admin" ? "?caja=2" : ruta === "ventas-por" ? "?agrupar=vendedor" : ""}`);
       check(`${rol} ${ruta}: ${rutas[ruta]}`, r.status === rutas[ruta], `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 140)}`);
     }
   }
@@ -135,6 +135,24 @@ async function main() {
     check(`${rol} auditoría: 403`, r.status === 403, `HTTP ${r.status}`);
   }
 
+  console.log("\nAnálisis para el dueño");
+  for (const a of ["vendedor", "sucursal", "categoria", "hora", "dia_semana", "medio", "canal"]) {
+    r = await api(permiso("super_admin"), "GET", `/api/v1/asistente/datos/ventas-por?agrupar=${a}`);
+    const d = r.body?.data;
+    check(`ventas por ${a}: grupos con período anterior`, r.status === 200 && Array.isArray(d?.grupos) && d.periodo_anterior?.desde && d.total && "variacion_pct" in d.total,
+      `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+  }
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/ventas-por?agrupar=vendedor");
+  check("por vendedor: anuladas, descuentos y que no se registra quién anuló", r.body?.data?.grupos?.every((g) => g.anuladas && g.descuentos) && /anul/.test(r.body?.data?.no_registra || ""), JSON.stringify(r.body).slice(0, 200));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/ventas-por?agrupar=cualquiera");
+  check("agrupar inválido: 400", r.status === 400, `HTTP ${r.status}`);
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/rotacion?modo=en_baja&dias=30");
+  check("en baja: con período anterior", r.status === 200 && r.body.data.modo === "en_baja" && r.body.data.periodo_anterior, JSON.stringify(r.body).slice(0, 160));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/clientes");
+  check("clientes: sólo nombre, compras y total", r.status === 200 && (r.body.data.clientes || []).every((c) => Object.keys(c).sort().join() === "cliente,compras,ticket_promedio,total"), JSON.stringify(r.body).slice(0, 200));
+  r = await api(permiso("super_admin"), "GET", "/api/v1/asistente/datos/margenes?agrupar=categoria");
+  check("márgenes por categoría", r.status === 200 && Array.isArray(r.body.data.categorias), JSON.stringify(r.body).slice(0, 160));
+
   if (process.env.MOSTRADOR_URL) {
     console.log("\nPuente con mostrador (sesión del backoffice)");
     const entrar = async (u) => (await api(null, "POST", "/api/v1/auth/login", { identifier: u, password: "prueba1234" })).body;
@@ -142,7 +160,7 @@ async function main() {
     const tok = sa?.data?.accessToken || sa?.data?.access_token || sa?.accessToken || sa?.token;
     check("entra el super_admin", Boolean(tok), JSON.stringify(sa).slice(0, 200));
     r = await api(tok, "GET", "/api/v1/asistente/estado");
-    check("estado: 200 con 8 herramientas y gasto", r.status === 200 && r.body.puede?.length === 8 && r.body.gasto, `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+    check("estado: 200 con 11 herramientas y gasto", r.status === 200 && r.body.puede?.length === 11 && r.body.gasto, `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
     r = await api(tok, "POST", "/api/v1/asistente/mensaje", { texto: "¿Cómo viene la caja abierta?" });
     check("mensaje: usa estado_caja", r.status === 200 && r.body.herramientas?.includes("estado_caja"), `HTTP ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
     const caja = await entrar("caja@prueba.local");
