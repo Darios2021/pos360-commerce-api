@@ -1293,6 +1293,43 @@ async function getOne(req, res, next) {
 }
 
 // =====================
+// GET /api/v1/products/by-code/:code
+// =====================
+// Coincidencia EXACTA por barcode, SKU o code (incluye inactivos). Resuelve el
+// id y delega en getOne: misma respuesta y mismo ámbito por sucursal.
+// Si varios productos comparten el código: barcode > sku > code, después id menor.
+async function getByCode(req, res, next) {
+  try {
+    const code = String(req.params.code ?? "").trim();
+    if (!code || code.length > 64) {
+      return res.status(400).json({ ok: false, code: "VALIDATION", message: "Código inválido" });
+    }
+
+    const [[row]] = await sequelize.query(
+      `
+      SELECT id
+      FROM products
+      WHERE barcode = :code OR sku = :code OR code = :code
+      ORDER BY
+        CASE WHEN barcode = :code THEN 0 WHEN sku = :code THEN 1 ELSE 2 END,
+        id ASC
+      LIMIT 1
+      `,
+      { replacements: { code } }
+    );
+
+    if (!row?.id) {
+      return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "No hay un producto con ese código" });
+    }
+
+    req.params.id = String(row.id);
+    return getOne(req, res, next);
+  } catch (e) {
+    next(e);
+  }
+}
+
+// =====================
 // GET /api/v1/products/:id/stock
 // =====================
 async function getStock(req, res, next) {
@@ -2117,6 +2154,7 @@ async function resumeAllPromos(req, res, next) {
 }
 
 module.exports = {
+  getByCode,
   list,
   create,
   getOne,
