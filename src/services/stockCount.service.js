@@ -280,7 +280,7 @@ async function updateCount(id, { mode, items, remove_product_ids, motivo }, acto
       throw httpErr(403, "FORBIDDEN", "El conteo ya se envió para aprobar: sólo un administrador lo corrige.");
     }
 
-    await validateProducts(rows.filter((r) => m !== "sumar" || r.counted_qty > 0).map((r) => r.product_id), t);
+    await validateProducts(rows.map((r) => r.product_id), t);
 
     if (m === "reemplazar_todo") {
       const keep = rows.map((r) => r.product_id);

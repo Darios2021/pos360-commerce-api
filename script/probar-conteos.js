@@ -218,6 +218,8 @@ async function main() {
     ok(r.status === 422 && r.body?.code === "PRODUCT_NO_STOCK_TRACK", "producto sin control de stock: 422", r.body);
     r = await api("cajero", "PUT", `/stock/counts/${c1.id}`, { items: [{ product_id: 999, counted_qty: 1 }] });
     ok(r.status === 404 && r.body?.code === "PRODUCT_NOT_FOUND", "producto inexistente: 404", r.body);
+    r = await api("cajero", "PUT", `/stock/counts/${c1.id}`, { mode: "sumar", items: [{ product_id: 999, counted_qty: 0 }] });
+    ok(r.status === 404 && r.body?.code === "PRODUCT_NOT_FOUND", "sumar 0 sobre un producto inexistente también: 404", r.body);
     r = await api("cajero", "PUT", `/stock/counts/${c1.id}`, { items: [{ product_id: 105, counted_qty: 3 }], remove_product_ids: [105] });
     ok(r.status === 200 && !r.body?.count?.items?.some((i) => i.product_id === 105), "remove_product_ids quita renglones");
 
