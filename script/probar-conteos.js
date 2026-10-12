@@ -2,7 +2,10 @@
 // script/probar-conteos.js
 //
 // Prueba de punta a punta de los conteos de stock y de GET /products/by-code
-// contra una MySQL DESCARTABLE. Arma las tablas base con Sequelize, crea las
+// contra una MySQL DESCARTABLE. También cubre los ajustes del cargador:
+// units_total en GET /stock/transfers, motivo y observación al anular una
+// venta, aviso push al enviar un conteo, rubro en los renglones del conteo y
+// el arranque de las rutas del POS sin handlers inválidos. Arma las tablas base con Sequelize, crea las
 // de conteos con el runner de migraciones, levanta la app real y la recorre
 // por HTTP con tokens firmados con el JWT_SECRET de prueba.
 //
@@ -25,6 +28,11 @@ if (!["127.0.0.1", "localhost"].includes(host) || !/prueba/i.test(dbName)) {
   console.error("Sólo corre contra una MySQL local descartable (DB_HOST local y DB_NAME con 'prueba').");
   process.exit(2);
 }
+
+// Antes de cargar la app: junta los console.error del arranque de las rutas.
+const erroresArranque = [];
+const consoleErrorOriginal = console.error;
+console.error = (...a) => { erroresArranque.push(a.map(String).join(" ")); consoleErrorOriginal(...a); };
 
 const http = require("http");
 const jwt = require("jsonwebtoken");
@@ -61,6 +69,7 @@ async function prepararBase() {
     "Branch", "User", "Role", "UserRole", "UserBranch", "Permission", "RolePermission",
     "Category", "Subcategory", "Product", "ProductImage", "Warehouse",
     "StockMovement", "StockMovementItem",
+    "StockTransfer", "StockTransferItem", "Sale", "SaleItem", "Payment", "SaleRefund", "SaleExchange",
   ];
   const qi = sequelize.getQueryInterface();
   for (const n of orden) {
@@ -93,6 +102,10 @@ async function prepararBase() {
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at DATETIME NULL,
     PRIMARY KEY (product_id, branch_id))`);
+  // deleteSale cuenta devoluciones antes de anular.
+  await q(`CREATE TABLE sale_returns (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    sale_id BIGINT UNSIGNED NOT NULL)`);
 
   // Tablas nuevas: las crea el runner, igual que al arrancar en el servidor.
   await runStartupMigrations(sequelize);
@@ -148,6 +161,9 @@ async function main() {
   ok(tablas.length === 2, "el runner creó stock_counts y stock_count_items", tablas);
 
   const app = createApp();
+  console.error = consoleErrorOriginal;
+  const invalidos = erroresArranque.filter((e) => /\[pos\.routes\] Handler inv/.test(e));
+  ok(invalidos.length === 0, "las rutas del POS arrancan sin handlers inválidos", invalidos);
   const server = http.createServer(app);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}/api/v1`;
@@ -232,8 +248,25 @@ async function main() {
     ok(r.status === 403 && r.body?.code === "FORBIDDEN", "cajero NO aplica (403)", r.body);
     ok(await stock(10, 101) === 10, "el stock no cambió tras el intento del cajero");
 
-    r = await api("cajero", "POST", `/stock/counts/${c1.id}/submit`, { motivo: "Conteo de góndola, pasillo 3" });
-    ok(r.status === 200 && r.body?.count?.status === "pending" && r.body?.count?.submitted_by === 2, "cajero envía para aprobar (pending)", r.body);
+    r = await api("cajero", "GET", `/stock/counts/${c1.id}`);
+    ok((r.body?.count?.items || []).length > 0 && r.body.count.items.every((i) => Number(i.product?.category_id) === 1),
+      "los renglones traen product.category_id (filtro Rubro)", r.body?.count?.items?.map((i) => i.product));
+
+    // Aviso push: se reemplaza por un espía que nunca resuelve. Si submit lo
+    // esperara, el pedido no volvería.
+    const avisos = require("../src/services/avisosPush.service");
+    const avisoOriginal = avisos.avisarConteoEnviado;
+    const avisosLlamados = [];
+    avisos.avisarConteoEnviado = (x) => { avisosLlamados.push(x); return new Promise(() => {}); };
+    r = await Promise.race([
+      api("cajero", "POST", `/stock/counts/${c1.id}/submit`, { motivo: "Conteo de góndola, pasillo 3" }),
+      new Promise((res) => setTimeout(() => res({ status: "timeout" }), 5000)),
+    ]);
+    avisos.avisarConteoEnviado = avisoOriginal;
+    ok(r.status === 200 && r.body?.count?.status === "pending" && r.body?.count?.submitted_by === 2, "cajero envía para aprobar (pending) sin esperar el aviso", r.body || r);
+    const av = avisosLlamados[0];
+    ok(avisosLlamados.length === 1 && av?.number === c1.number && Number(av?.branch_id) === 1 && av?.productos === 3 && av?.sucursal === "Centro",
+      "submit dispara el aviso push al dueño/administrador con número, sucursal y productos", avisosLlamados);
     r = await api("cajero", "PUT", `/stock/counts/${c1.id}`, { items: [{ product_id: 101, counted_qty: 1 }] });
     ok(r.status === 403, "cajero ya no edita un conteo pendiente", r.body);
     r = await api("cajero", "POST", `/stock/counts/${c1.id}/submit`);
@@ -303,6 +336,45 @@ async function main() {
       "count_by_status del ámbito", r.body?.count_by_status);
     r = await api("ajeno", "GET", "/stock/counts");
     ok(r.status === 200 && r.body?.total_all === 0, "otra sucursal no ve conteos de Centro", r.body);
+
+    // ── derivaciones: units_total ──────────────────────────────────────────
+    console.log("\nGET /stock/transfers: units_total");
+    await q(`INSERT INTO stock_transfers (id, number, from_warehouse_id, to_warehouse_id, to_branch_id, status, created_by, created_at, updated_at)
+             VALUES (700,'DER-2026-000700',10,20,2,'dispatched',1,NOW(),NOW()),(701,'DER-2026-000701',10,20,2,'draft',1,NOW(),NOW())`);
+    await q(`INSERT INTO stock_transfer_items (transfer_id, product_id, qty_sent)
+             VALUES (700,101,3),(700,102,2.5)`);
+    r = await api("admin", "GET", "/stock/transfers");
+    const t700 = (r.body?.transfers || []).find((t) => t.id === 700);
+    const t701 = (r.body?.transfers || []).find((t) => t.id === 701);
+    ok(r.status === 200 && t700?.units_total === 5.5, "units_total suma qty_sent (3 + 2,5)", t700);
+    ok(t701?.units_total === 0 && Array.isArray(t701?.items), "sin renglones: units_total 0", t701);
+    ok(t700?.items?.length === 2 && t700.items.every((i) => i.id) && r.body?.count_by_status && r.body?.total === 2,
+      "el resto de la respuesta no cambia (items con id, total, count_by_status)", r.body);
+
+    // ── anular venta: motivo y observación ────────────────────────────────
+    console.log("\nDELETE /pos/sales/:id: motivo y observación");
+    const cols = await q("SHOW COLUMNS FROM sales WHERE Field IN ('cancel_reason','cancel_note')");
+    ok(cols.length === 2, "el runner creó sales.cancel_reason y sales.cancel_note", cols);
+    for (const sid of [500, 501]) {
+      await models.Sale.create({ id: sid, branch_id: 1, user_id: 2, status: "PAID", subtotal: 100, total: 100, paid_total: 100, sold_at: new Date(), note: "venta de prueba" });
+      await models.SaleItem.create({ sale_id: sid, product_id: 102, warehouse_id: 10, quantity: 1, unit_price: 100, discount_amount: 0, tax_amount: 0, line_total: 100 });
+    }
+    const antes = await stock(10, 102);
+    r = await api("cajero", "DELETE", "/pos/sales/500", { reason: "Error de carga", note: "Se cobró otro producto" });
+    ok(r.status === 200 && r.body?.ok && r.body?.cancel_reason === "Error de carga", "cajero anula su venta con motivo", r.body);
+    const [v500] = await q("SELECT status, note, cancel_reason, cancel_note FROM sales WHERE id = 500");
+    ok(v500?.status === "CANCELLED" && v500?.cancel_reason === "Error de carga" && v500?.cancel_note === "Se cobró otro producto",
+      "motivo y observación guardados en sus columnas", v500);
+    ok(/venta de prueba \| ANULADA por usuario #2 .* \| Motivo: Error de carga \| Observación: Se cobró otro producto$/.test(v500?.note || ""),
+      "y también en la nota de la venta", v500?.note);
+    ok(await stock(10, 102) === antes + 1, "el stock se restauró como antes");
+    r = await api("cajero", "GET", "/pos/sales/500");
+    ok(r.body?.data?.cancellation?.reason === "Error de carga" && r.body?.data?.cancellation?.note === "Se cobró otro producto",
+      "GET /pos/sales/:id devuelve cancellation", r.body?.data?.cancellation);
+    r = await api("admin", "DELETE", "/pos/sales/501");
+    const [v501] = await q("SELECT status, note, cancel_reason, cancel_note FROM sales WHERE id = 501");
+    ok(r.status === 200 && v501?.status === "CANCELLED" && v501?.cancel_reason === null && !/Motivo/.test(v501?.note || ""),
+      "sin cuerpo (escritorio) anula igual que antes", { body: r.body, v501 });
   } finally {
     server.close();
     await sequelize.close();

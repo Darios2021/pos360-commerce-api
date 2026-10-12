@@ -86,7 +86,7 @@ administrador aplica directo, sin enviar), `draft|pending -> cancelled`.
       "diff_qty": "-2.000",
       "updated_by": 7,
       "updated_at": "2026-10-12T14:05:40.000Z",
-      "product": { "id": 15, "name": "Cargador 20 W USB-C", "sku": "CAR-020", "barcode": "7790000000155", "code": "P00015", "is_active": true, "images": [{ "url": "...", "sort_order": 0 }] }
+      "product": { "id": 15, "name": "Cargador 20 W USB-C", "sku": "CAR-020", "barcode": "7790000000155", "code": "P00015", "is_active": true, "category_id": 4, "subcategory_id": 12, "images": [{ "url": "...", "sort_order": 0 }] }
     }
   ],
   "summary": { "items": 1, "with_diff": 1, "equal": 0 }
@@ -101,6 +101,8 @@ administrador aplica directo, sin enviar), `draft|pending -> cancelled`.
   ese momento y ya no cambia.
 - La lista (`GET /stock/counts`) no trae `items`: trae `items_count`.
 - `product.images` trae a lo sumo una imagen (la de menor `sort_order`).
+- `product.category_id` y `product.subcategory_id`: rubro y subrubro del
+  producto, para el filtro Rubro del conteo en el teléfono.
 - Los renglones vienen ordenados por última carga (el más reciente primero).
 
 ### `POST /stock/counts`
@@ -186,6 +188,12 @@ renglón (`422 { code: "COUNT_EMPTY" }`) y motivo (el que ya tenga o el que veng
 en el cuerpo; si falta, `400 { code: "MOTIVO_REQUIRED" }`). Respuesta
 `{ ok: true, count }`.
 
+Después de confirmar, manda un aviso push a la APK del dueño y del
+administrador de la sucursal (`avisosPush.service.js`,
+`avisarConteoEnviado`): "Conteo CON-2026-000012 para aprobar · Centro",
+cuerpo "4 productos · 2 con diferencia", al tocarlo abre `/app/conteo?id=12`.
+Es post-commit y sin `await`: el envío no espera ni falla por el aviso.
+
 ### `POST /stock/counts/:id/apply`
 
 Sólo administrador. Cuerpo opcional `{ "motivo": "..." }`. Desde `draft` o
@@ -234,7 +242,46 @@ Las crea el runner de arranque (`src/migrations/runner.js`, `tableSteps`) con
 en el runner. Al desplegar, el runner las crea solo en el primer arranque;
 para crearlas antes a mano, correr ese mismo SQL.
 
-## 4. Prueba
+## 4. Otros ajustes del cargador
+
+### `GET /stock/transfers`: `units_total`
+
+Cada derivación del listado trae `units_total`: suma de `qty_sent` de sus
+renglones, como **número** (hasta 3 decimales; `0` si no tiene renglones). Los
+`items` del listado traen ahora `id` y `qty_sent` (antes sólo `id`). El resto
+de la respuesta no cambia.
+
+### `DELETE /pos/sales/:id`: motivo y observación
+
+Cuerpo opcional `{ "reason": "Error de carga", "note": "Se cobró otro producto" }`
+(lo manda la vista "Anular venta" del teléfono; el escritorio no manda cuerpo y
+anula igual que antes). En la anulación suave:
+
+- `reason` (hasta 80) y `note` (hasta 500) se guardan en `sales.cancel_reason`
+  y `sales.cancel_note`, y también se agregan a `sales.note`
+  (`... | ANULADA por usuario #N el <fecha> | Motivo: ... | Observación: ...`).
+- La respuesta suma `cancel_reason` y `cancel_note`.
+- `GET /pos/sales/:id` trae `data.cancellation = { reason, note }` si la venta
+  está anulada (`null` si no).
+
+Las columnas las crea el runner (`columnSteps`). Para crearlas antes a mano:
+
+```sql
+ALTER TABLE `sales` ADD COLUMN `cancel_reason` VARCHAR(80) NULL COMMENT 'Motivo de la anulacion';
+ALTER TABLE `sales` ADD COLUMN `cancel_note` VARCHAR(500) NULL COMMENT 'Observacion de la anulacion';
+```
+
+Si faltaran, la anulación no falla: el motivo queda sólo en `note`.
+
+### `POST /pos/sales/backoffice` quitada
+
+Apuntaba a `posSalesController.createSale`, que no existe desde b99a064
+(2026-03-04): respondía siempre 501 y dejaba en cada arranque
+`❌ [pos.routes] Handler inválido: posSalesController.createSale -> undefined`.
+Ningún cliente la usaba. La venta del POS entra por `POST /pos/sales`
+(`pos.controller.js`, `createSale`), que no cambió.
+
+## 5. Prueba
 
 `script/probar-conteos.js` recorre todo por HTTP contra una MySQL descartable
 en docker (el encabezado del script tiene el comando). Se niega a correr si la
@@ -243,4 +290,9 @@ base no es local o su nombre no contiene `prueba`. Cubre: código exacto
 dos usuarios a la vez, reemplazar, quitar, validaciones, ámbito por sucursal,
 enviar, cajero que no puede aplicar, aplicar (stock fijado, `system_qty`
 congelado contra el stock del momento, movimientos `adjustment` con autor,
-motivo y signo), aplicar directo desde borrador y cancelar.
+motivo y signo), aplicar directo desde borrador y cancelar. También: rubro en
+los renglones, aviso push al enviar (con un espía que nunca resuelve, para
+probar que el envío no lo espera), `units_total` del listado de derivaciones,
+anular una venta con y sin motivo (columnas, nota, stock restaurado,
+`cancellation` en el detalle) y que las rutas del POS arranquen sin handlers
+inválidos.
