@@ -16,6 +16,8 @@ router.post("/guion", ctrl.guion);
 router.get("/piezas", ctrl.listar);
 router.post("/piezas", ctrl.crear);
 router.get("/piezas/:id", ctrl.ver);
+router.get("/piezas/:id/encargo", ctrl.encargo);
+router.post("/piezas/:id/recuperar", ctrl.recuperar);
 router.patch("/piezas/:id", ctrl.editar);
 router.delete("/piezas/:id", ctrl.borrar);
 router.post("/piezas/:id/cancelar", ctrl.cancelar);

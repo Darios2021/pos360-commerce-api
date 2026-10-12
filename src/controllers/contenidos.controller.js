@@ -260,6 +260,10 @@ module.exports = {
   listar: (req, res) => reenviar(req, res, "GET", `/piezas${q(req, ["cuenta", "limite"])}`),
   crear: (req, res) => reenviar(req, res, "POST", "/piezas", req.body),
   ver: (req, res) => reenviar(req, res, "GET", `/piezas/${id(req)}`),
+  // Lo que se mandó al crear el video, para abrir el creador precargado y editarlo.
+  encargo: (req, res) => reenviar(req, res, "GET", `/piezas/${id(req)}/encargo`),
+  // Vuelve a la versión anterior de un video editado (no gasta edición).
+  recuperar: (req, res) => reenviar(req, res, "POST", `/piezas/${id(req)}/recuperar`),
   // Título y descripción del video (sólo se reenvían esos dos campos).
   editar: (req, res) => reenviar(req, res, "PATCH", `/piezas/${id(req)}`, { titulo: req.body?.titulo, descripcion: req.body?.descripcion }),
   borrar: (req, res) => reenviar(req, res, "DELETE", `/piezas/${id(req)}`),
