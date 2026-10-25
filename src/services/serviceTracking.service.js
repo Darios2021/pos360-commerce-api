@@ -242,7 +242,14 @@ async function avisarPorWhatsApp(orden, { tipo, numero, req }) {
     ? textoComprobante(orden, numero, comercio)
     : textoEstado(orden, numero, comercio);
 
-  const r = await waSvc.sendWhatsApp({ to: telefono, body });
+  let r = await waSvc.sendWhatsApp({ to: telefono, body });
+  // Con Cloud API, Meta rechaza un texto libre si el cliente no escribio en
+  // las ultimas 24 h (que es el caso normal de un aviso del taller). Ahi se
+  // cae al link wa.me, como dice whatsapp.service.js: el aviso no se pierde.
+  if (!r.ok && r.code !== "INVALID_PHONE" && waSvc.isCloudApiConfigured()) {
+    console.warn("[servicio-tecnico] Cloud API rechazo el aviso, se usa wa.me:", r.code || r.error_message);
+    r = await waSvc.sendWhatsApp({ to: telefono, body, preferLink: true });
+  }
   if (!r.ok) {
     return { ok: false, code: r.code || "WHATSAPP_ERROR", message: r.error_message || "No se pudo enviar." };
   }
