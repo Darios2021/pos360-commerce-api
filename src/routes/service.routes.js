@@ -10,6 +10,9 @@ router.get("/prices", ctrl.prices);
 // Crea (o reusa) el producto de catalogo para poder cobrar la reparacion por POS.
 router.post("/prices/:id/espejo", ctrl.mirrorPrice);
 
+// Buscador de clientes del ingreso (cualquier usuario: es el cajero el que recibe)
+router.get("/clientes", ctrl.customers);
+
 // Tecnicos: la lista para derivar y la marca de quien es tecnico (admin).
 router.get("/technicians", ctrl.technicians);
 router.get("/technicians/usuarios", ctrl.technicianUsers);

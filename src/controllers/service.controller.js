@@ -61,6 +61,32 @@ const VALID_STATUS = [
 ];
 const VALID_KIND = ["repuesto", "mano_obra", "otro"];
 
+// Las vistas del listado. Cada una es un filtro, y la tarjeta que la abre
+// cuenta con el MISMO where: si se armaran por separado, el numero de la
+// tarjeta y las filas que muestra terminarian sin coincidir.
+const DIAS_SIN_RETIRAR = 15;
+function whereGrupo(grupo) {
+  const limite = new Date(Date.now() - DIAS_SIN_RETIRAR * 86400000);
+  switch (grupo) {
+    case "taller":
+      return { status: { [Op.in]: ["recibido", "diagnostico", "presupuestado", "aprobado", "en_reparacion"] } };
+    case "aprobacion":
+      return { status: "presupuestado" };
+    case "listos":
+      return { status: "reparado", updated_at: { [Op.gte]: limite } };
+    case "sin_retirar":
+      return {
+        [Op.or]: [
+          { status: "no_retirado" },
+          { status: "reparado", updated_at: { [Op.lt]: limite } },
+        ],
+      };
+    default:
+      return null;
+  }
+}
+const GRUPOS = ["taller", "aprobacion", "listos", "sin_retirar"];
+
 function toNum(v, d = 0) {
   const n = Number(String(v ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : d;
@@ -222,6 +248,11 @@ exports.list = async (req, res, next) => {
     const owner = ownerFilter(req);
     if (owner !== null) y.push(owner);
 
+    const grupo = s(req.query.grupo);
+    const wGrupo = whereGrupo(grupo);
+    if (wGrupo) y.push(wGrupo);
+    if (["1", "true"].includes(s(req.query.sin_derivar))) where.technician_id = null;
+
     // ?mios=1 es la cola del tecnico: lo que le derivaron a quien mira.
     if (["1", "true"].includes(s(req.query.mios))) {
       where.technician_id = toInt(req.user?.id, 0) || -1;
@@ -231,8 +262,11 @@ exports.list = async (req, res, next) => {
     if (y.length) where[Op.and] = y;
 
     // Por defecto no se muestran las 645 migradas: el mostrador quiere ver el
-    // trabajo del dia, no el historico. Se piden con ?incluir_historico=1.
-    if (!["1", "true"].includes(s(req.query.incluir_historico))) {
+    // trabajo del dia, no el historico. Entran al buscar (el cliente vuelve
+    // preguntando por su equipo con el numero del papel), al pedir una vista
+    // (un equipo del libro que sigue en el taller es trabajo pendiente) o con
+    // ?incluir_historico=1.
+    if (!q && !wGrupo && !["1", "true"].includes(s(req.query.incluir_historico))) {
       where.source = "app";
     }
 
@@ -282,20 +316,24 @@ exports.stats = async (req, res, next) => {
       total += Number(r.n || 0);
     }
 
-    // Lo que importa en el mostrador: cuantos equipos hay en el taller ahora y
-    // cuantos estan listos esperando que el cliente los venga a buscar.
-    const enTaller =
-      porEstado.recibido + porEstado.diagnostico + porEstado.presupuestado +
-      porEstado.aprobado + porEstado.en_reparacion;
+    // Las tarjetas del listado: el mismo where que filtra cada vista, sobre
+    // todas las ordenes (las del libro que siguen abiertas tambien cuentan).
+    const grupos = {};
+    for (const g of GRUPOS) {
+      const w = { ...where, [Op.and]: [whereGrupo(g)] };
+      delete w.source;
+      grupos[g] = await ServiceOrder.count({ where: w });
+    }
 
     return res.json({
       ok: true,
       data: {
         total,
         por_estado: porEstado,
-        en_taller: enTaller,
-        para_entregar: porEstado.reparado,
-        sin_retirar: porEstado.no_retirado,
+        grupos,
+        en_taller: grupos.taller,
+        para_entregar: grupos.listos,
+        sin_retirar: grupos.sin_retirar,
       },
     });
   } catch (e) {
@@ -589,6 +627,41 @@ exports.whatsapp = async (req, res, next) => {
 };
 
 // ============================================================
+// CLIENTES (buscador del ingreso)
+// ============================================================
+// El ingreso lo hace el cajero, y /admin/customers es de admin: este buscador
+// devuelve lo justo para reconocer al cliente (nombre, telefono, cuantas
+// reparaciones tiene) y nada del resto de la ficha.
+exports.customers = async (req, res, next) => {
+  try {
+    const q = s(req.query.q);
+    if (q.length < 3) return res.json({ ok: true, data: [] });
+
+    const digitos = q.replace(/\D/g, "");
+    const filas = await sequelize.query(
+      `SELECT c.id, c.display_name, c.phone, c.email, c.doc_number,
+              (SELECT COUNT(*) FROM service_orders so WHERE so.customer_id = c.id) AS reparaciones
+         FROM customers c
+        WHERE COALESCE(c.is_active, 1) = 1
+          AND (c.display_name LIKE :like
+               ${digitos.length >= 3 ? "OR REPLACE(REPLACE(REPLACE(c.phone, ' ', ''), '-', ''), '+', '') LIKE :tel" : ""})
+        ORDER BY reparaciones DESC, c.display_name
+        LIMIT 8`,
+      {
+        replacements: { like: `%${q}%`, tel: `%${digitos}%` },
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
+    return res.json({
+      ok: true,
+      data: filas.map((c) => ({ ...c, reparaciones: Number(c.reparaciones || 0) })),
+    });
+  } catch (e) {
+    next(e);
+  }
+};
+
+// ============================================================
 // TECNICOS
 // ============================================================
 exports.technicians = async (req, res, next) => {
@@ -753,7 +826,12 @@ exports.prices = async (req, res, next) => {
     const limit = Math.min(100, Math.max(1, toInt(req.query.limit, 30)));
 
     const where = { is_active: true };
-    if (q) where.model = { [Op.like]: `%${q}%` };
+    // Por palabras: "samsung a04" encuentra "SAMSUNG A04 / A04E". Las
+    // palabras sueltas de una letra no filtran (ruido del dictado o tipeo).
+    const palabras = q.split(/\s+/).filter((w) => w.length > 1).slice(0, 5);
+    if (palabras.length) {
+      where[Op.and] = palabras.map((w) => ({ model: { [Op.like]: `%${w}%` } }));
+    }
     if (s(req.query.repair_type)) where.repair_type = s(req.query.repair_type);
 
     const rows = await ServiceRepairPrice.findAll({

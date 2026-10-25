@@ -20,13 +20,13 @@ function s(v) {
 // Mismos textos que SERVICE_STATUS del front: es lo que lee el cliente.
 const STATUS_LABEL = {
   recibido: "Recibido",
-  diagnostico: "En diagnostico",
+  diagnostico: "En diagnóstico",
   presupuestado: "Presupuestado",
   aprobado: "Aprobado",
-  en_reparacion: "En reparacion",
+  en_reparacion: "En reparación",
   reparado: "Reparado, listo para retirar",
   entregado: "Entregado",
-  sin_solucion: "Sin solucion",
+  sin_solucion: "Sin solución",
   no_retirado: "Sin retirar",
 };
 
@@ -180,7 +180,7 @@ function renglones(lista) {
 function textoComprobante(o, numero, comercio) {
   const saldo = Math.max(0, Number(o.quoted_amount || 0) - Number(o.deposit || 0));
   return renglones([
-    `*${comercio || "Servicio tecnico"}*`,
+    `*${comercio || "Servicio técnico"}*`,
     "Comprobante de ingreso de equipo",
     "",
     `Orden: *${numero}*`,
@@ -195,8 +195,8 @@ function textoComprobante(o, numero, comercio) {
     Number(o.quoted_amount) > 0 ? `Saldo: ${money(saldo)}` : null,
     o.estimated_pickup ? `Retiro probable: ${fechaCorta(o.estimated_pickup)}` : null,
     "",
-    "Para consultar por el equipo, indicar el numero de orden.",
-    "Pasados 15 dias de la fecha pactada de entrega tendra un cargo diario. Pasados 45 dias sera considerado abandono (arts. 2375 / 2225 / 2524 CCyC).",
+    "Para consultar por el equipo, indicar el número de orden.",
+    "Pasados 15 días de la fecha pactada de entrega tendrá un cargo diario. Pasados 45 días será considerado abandono (arts. 2375 / 2225 / 2524 CCyC).",
   ]);
 }
 
@@ -209,20 +209,20 @@ function textoEstado(o, numero, comercio) {
       ? `Presupuesto: ${money(o.quoted_amount)}. Responder este mensaje para aprobarlo.`
       : "Responder este mensaje para conocer el presupuesto.",
     reparado: renglones([
-      "El equipo esta listo para retirar.",
+      "El equipo está listo para retirar.",
       saldo > 0 ? `Saldo a pagar: ${money(saldo)}.` : null,
     ]),
-    sin_solucion: "El equipo no tiene reparacion. Ya se puede pasar a retirar.",
+    sin_solucion: "El equipo no tiene reparación. Ya se puede pasar a retirar.",
     entregado: "Gracias por confiar en nosotros.",
   }[o.status];
 
   return renglones([
-    `*${comercio || "Servicio tecnico"}*`,
+    `*${comercio || "Servicio técnico"}*`,
     `Orden *${numero}* · ${equipoDe(o)}`,
     "",
     `Estado: *${statusLabel(o.status)}*`,
     s(o.technical_report) && ["presupuestado", "reparado", "sin_solucion"].includes(o.status)
-      ? `Diagnostico: ${s(o.technical_report)}`
+      ? `Diagnóstico: ${s(o.technical_report)}`
       : null,
     extra || null,
   ]);
