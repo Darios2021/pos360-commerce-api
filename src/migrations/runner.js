@@ -296,6 +296,136 @@ const tableSteps = [
         COMMENT='Renglones de presupuesto';
     `,
   },
+
+  // ── Servicio tecnico ──────────────────────────────────────────────────────
+  // Reemplaza el libro SERV_TEC.xlsm que se llevaba a mano en el mostrador.
+  // Sigue la forma del presupuestador: cabecera con estados + renglones, FK
+  // opcional a customers y snapshot congelado del cliente, y sale_id cuando se
+  // cobra por el POS.
+  //
+  // Dos series de numeracion conviven a proposito:
+  //   - `number`: la serie nueva del sistema, arranca en 1, unica.
+  //   - `legacy_number`: el numero del papel del Excel (van del 644 al 1287).
+  //     No es unico (hay dos repetidos en el libro) y las ordenes migradas
+  //     entran con `number` en NULL, asi las dos series nunca chocan.
+  {
+    id:     "service_orders",
+    table:  "service_orders",
+    sql: `
+      CREATE TABLE IF NOT EXISTS service_orders (
+        id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        number            INT UNSIGNED NULL COMMENT 'Numero de la serie nueva (NULL en las migradas del Excel)',
+        legacy_number     INT UNSIGNED NULL COMMENT 'Numero de orden del libro SERV_TEC (historico)',
+        branch_id         BIGINT UNSIGNED NULL COMMENT 'Sucursal que recibe el equipo',
+        user_id           BIGINT UNSIGNED NULL COMMENT 'Usuario que la dio de alta',
+        received_by       VARCHAR(180) NULL COMMENT 'Quien recibio el equipo en el mostrador',
+        customer_id       BIGINT UNSIGNED NULL COMMENT 'FK customers (opcional)',
+        customer_name     VARCHAR(180) NOT NULL DEFAULT 'Consumidor Final',
+        customer_phone    VARCHAR(60) NULL,
+        customer_email    VARCHAR(180) NULL,
+        customer_address  VARCHAR(255) NULL,
+        customer_doc      VARCHAR(40) NULL,
+        device_brand      VARCHAR(80) NULL COMMENT 'Marca del equipo',
+        device_model      VARCHAR(160) NULL COMMENT 'Modelo',
+        device_imei       VARCHAR(40) NULL,
+        device_serial     VARCHAR(60) NULL,
+        device_unlock     VARCHAR(60) NULL COMMENT 'PIN o patron que deja el cliente para poder probar',
+        device_accessories VARCHAR(255) NULL COMMENT 'Que quedo con el equipo (funda, chip, SD)',
+        intake_condition  VARCHAR(180) NULL COMMENT 'Estado general al ingresar',
+        reported_fault    TEXT NULL COMMENT 'Falla que informa el cliente',
+        technical_report  TEXT NULL COMMENT 'Diagnostico y trabajo del tecnico',
+        suggestions       TEXT NULL COMMENT 'Sugerencias al cliente',
+        technician_id     BIGINT UNSIGNED NULL,
+        technician_name   VARCHAR(180) NULL COMMENT 'Tecnico asignado (congelado)',
+        status            ENUM('recibido','diagnostico','presupuestado','aprobado','en_reparacion','reparado','entregado','sin_solucion','no_retirado') NOT NULL DEFAULT 'recibido',
+        quoted_amount     DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Presupuesto informado al cliente',
+        deposit           DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Senia',
+        balance           DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Saldo a cobrar al retirar',
+        parts_cost        DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Costo de los repuestos usados',
+        total_charged     DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT 'Total efectivamente cobrado',
+        commission_technician DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        commission_seller     DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        commission_shop       DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        estimated_pickup  DATE NULL COMMENT 'Fecha probable de retiro que se le promete al cliente',
+        delivered_at      DATETIME NULL,
+        delivered_by      VARCHAR(180) NULL,
+        paid_at           DATETIME NULL,
+        sale_id           BIGINT UNSIGNED NULL COMMENT 'Venta del POS generada al entregar',
+        source            ENUM('app','import') NOT NULL DEFAULT 'app' COMMENT 'app = creada en el sistema; import = migrada del Excel',
+        created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_service_number (number),
+        KEY ix_so_legacy (legacy_number),
+        KEY ix_so_customer (customer_id),
+        KEY ix_so_branch (branch_id),
+        KEY ix_so_status (status),
+        KEY ix_so_technician (technician_id),
+        KEY ix_so_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Ordenes de servicio tecnico';
+    `,
+  },
+  // Repuestos y manos de obra de una orden. product_id NULL = renglon libre,
+  // igual que en budget_items: no todo repuesto esta en el catalogo.
+  {
+    id:     "service_order_items",
+    table:  "service_order_items",
+    sql: `
+      CREATE TABLE IF NOT EXISTS service_order_items (
+        id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        order_id      BIGINT UNSIGNED NOT NULL,
+        product_id    BIGINT UNSIGNED NULL COMMENT 'NULL = renglon libre (repuesto suelto)',
+        kind          ENUM('repuesto','mano_obra','otro') NOT NULL DEFAULT 'repuesto',
+        sku           VARCHAR(80) NULL,
+        description   VARCHAR(500) NOT NULL DEFAULT '',
+        qty           DECIMAL(12,3) NOT NULL DEFAULT 1.000,
+        cost          DECIMAL(14,4) NOT NULL DEFAULT 0.0000 COMMENT 'Costo congelado al agregar',
+        unit_price    DECIMAL(14,4) NOT NULL DEFAULT 0.0000,
+        line_total    DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        stock_moved   TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Si ya descontó stock del deposito',
+        sort_order    INT UNSIGNED NOT NULL DEFAULT 0,
+        created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY ix_soi_order (order_id),
+        KEY ix_soi_product (product_id),
+        CONSTRAINT fk_soi_order FOREIGN KEY (order_id) REFERENCES service_orders (id) ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Renglones de una orden de servicio tecnico';
+    `,
+  },
+  // Lista de precios de reparacion (hoja MODULOS del Excel). Es tabla propia y
+  // no producto del catalogo porque guarda el desglose que el catalogo no
+  // tiene: cuanto va al repuesto, al tecnico, al local y al vendedor. De ahi
+  // salen las comisiones de la orden.
+  {
+    id:     "service_repair_prices",
+    table:  "service_repair_prices",
+    sql: `
+      CREATE TABLE IF NOT EXISTS service_repair_prices (
+        id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        model             VARCHAR(180) NOT NULL COMMENT 'Modelo del equipo tal como se busca en el mostrador',
+        repair_type       VARCHAR(60) NOT NULL DEFAULT 'modulo' COMMENT 'modulo, pin_carga, bateria, otro',
+        parts_cost        DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        technician_cost   DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        shop_margin       DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        seller_commission DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        total_price       DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        installment_3     DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '3 cuotas fijas (total * 1.43 / 3)',
+        installment_6     DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '6 cuotas fijas (total * 1.62 / 6)',
+        product_id        BIGINT UNSIGNED NULL COMMENT 'Producto espejo del catalogo, para cobro rapido por POS',
+        is_active         TINYINT(1) NOT NULL DEFAULT 1,
+        created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_srp_model_type (model, repair_type),
+        KEY ix_srp_active (is_active),
+        KEY ix_srp_product (product_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Lista de precios de reparacion por modelo';
+    `,
+  },
 ];
 
 // ── Alta de producto: proveedor, compra, unidad y stock mínimo ──────────

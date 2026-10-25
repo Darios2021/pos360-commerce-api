@@ -256,6 +256,7 @@ const dashboardRoutes = loadRoute("./dashboard.routes", { optional: false });
 const analyticsRoutes = loadRoute("./analytics.routes", { optional: true });
 const customersRoutes = loadRoute("./customers.routes", { optional: true });
 const budgetsRoutes = loadRoute("./budgets.routes", { optional: true });
+const serviceRoutes = loadRoute("./service.routes", { optional: true });
 const messagingRoutes = loadRoute("./messaging.routes", { optional: true });
 const posRoutes = loadRoute("./pos.routes", { optional: false });
 const meRoutes = loadRoute("./me.routes", { optional: false });
@@ -406,6 +407,14 @@ if (customersRoutes) {
 }
 if (budgetsRoutes) {
   safeUse("/admin/budgets", requireAuth, attachAccessContext, budgetsRoutes);
+}
+// Servicio tecnico: ordenes de reparacion + lista de precios.
+//
+// Sin branchContext, igual que presupuestos: ese middleware exige un deposito
+// activo en la sucursal y aca no hace falta, porque recibir un equipo no mueve
+// stock. El scope que acota lo que ve un cajero sale de attachAccessContext.
+if (serviceRoutes) {
+  safeUse("/admin/service", requireAuth, attachAccessContext, serviceRoutes);
 }
 if (messagingRoutes) {
   safeUse("/admin/messaging", requireAuth, attachAccessContext, messagingRoutes);

@@ -88,6 +88,21 @@ try {
   BudgetItem = null;
 }
 
+// ===== SERVICIO TECNICO =====
+let ServiceOrder = null;
+let ServiceOrderItem = null;
+let ServiceRepairPrice = null;
+try {
+  ServiceOrder = require("./ServiceOrder")(sequelize, DataTypes);
+  ServiceOrderItem = require("./ServiceOrderItem")(sequelize, DataTypes);
+  ServiceRepairPrice = require("./ServiceRepairPrice")(sequelize, DataTypes);
+} catch (e) {
+  console.log("⚠️ ServiceOrder no cargado:", e?.message);
+  ServiceOrder = null;
+  ServiceOrderItem = null;
+  ServiceRepairPrice = null;
+}
+
 // ===== CRM: plantillas + log de mensajes =====
 let MessageTemplate = null;
 try {
@@ -290,6 +305,25 @@ if (Budget && BudgetItem) {
   }
   safeBelongsTo(Budget, User, { as: "user", foreignKey: "user_id" });
   safeBelongsTo(Budget, Branch, { as: "branch", foreignKey: "branch_id" });
+}
+
+// Servicio tecnico: orden ↔ renglones ↔ cliente ↔ tecnico
+if (ServiceOrder && ServiceOrderItem) {
+  safeHasMany(ServiceOrder, ServiceOrderItem, { as: "items", foreignKey: "order_id", onDelete: "CASCADE" });
+  safeBelongsTo(ServiceOrderItem, ServiceOrder, { as: "order", foreignKey: "order_id" });
+  safeBelongsTo(ServiceOrderItem, Product, { as: "product", foreignKey: "product_id" });
+  if (Customer) {
+    safeBelongsTo(ServiceOrder, Customer, { as: "customer", foreignKey: "customer_id" });
+    // El historial de reparaciones del cliente: es lo que se mira cuando
+    // alguien vuelve al mostrador preguntando por un equipo.
+    safeHasMany(Customer, ServiceOrder, { as: "service_orders", foreignKey: "customer_id" });
+  }
+  safeBelongsTo(ServiceOrder, User, { as: "user", foreignKey: "user_id" });
+  safeBelongsTo(ServiceOrder, User, { as: "technician", foreignKey: "technician_id" });
+  safeBelongsTo(ServiceOrder, Branch, { as: "branch", foreignKey: "branch_id" });
+}
+if (ServiceRepairPrice && Product) {
+  safeBelongsTo(ServiceRepairPrice, Product, { as: "product", foreignKey: "product_id" });
 }
 
 // Auth: Users ↔ Roles
@@ -670,6 +704,11 @@ const models = {
   // Presupuestador
   Budget,
   BudgetItem,
+
+  // Servicio tecnico
+  ServiceOrder,
+  ServiceOrderItem,
+  ServiceRepairPrice,
 
   // CRM
   MessageTemplate,

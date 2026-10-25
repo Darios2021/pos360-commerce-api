@@ -1,0 +1,11 @@
+# Los JSON que genera extraer-excel.py tienen nombres, telefonos y equipos de
+# clientes reales: 594 personas. Este repo va a GitHub, asi que los datos NO se
+# versionan. Se regeneran cuando hagan falta:
+#
+#   python3 script/servtec/extraer-excel.py <ruta al SERV_TEC.xlsm>
+#
+# El Excel de origen tampoco va al repo: vive en la maquina de quien importa.
+datos/
+*.xlsm
+*.xls
+*.rar
