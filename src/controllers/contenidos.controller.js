@@ -236,6 +236,36 @@ async function productos(req, res) {
   return res.json(cuerpo);
 }
 
+// Campaña a medida (2026-10-25): las campañas que arma el propio comercio y su
+// estrategia. La cuenta la pone SIEMPRE este servidor (la del comercio, de /fuente);
+// lo que mande el navegador como cuenta se ignora. Si la plataforma no le habilitó
+// la autonomía, el servicio contesta 403 con codigo autonomia_inactiva.
+const idCampana = (req) => (/^p-[0-9a-f]{6,20}$/.test(String(req.params.id || "")) ? req.params.id : null);
+async function conCuenta(req, res, fn) {
+  if (!BASE() || !CLAVE()) return noConfigurado(res);
+  let cuenta;
+  try { cuenta = await cuentaDelComercio(); } catch {
+    return res.status(502).json({ ok: false, code: "CONTENIDOS_SIN_RESPUESTA", message: "El servicio de contenidos no respondió." });
+  }
+  if (!cuenta) return res.status(409).json({ ok: false, code: "CONTENIDOS_SIN_CUENTA", message: "El servicio no informa la cuenta del comercio." });
+  return fn(cuenta);
+}
+const campanaInexistente = (res) => res.status(404).json({ ok: false, code: "CAMPANA_INEXISTENTE", message: "La campaña no existe." });
+const campanas = {
+  listar: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "GET", `/campanas?cuenta=${encodeURIComponent(c)}`)),
+  // Sólo el pedido, la muestra del catálogo y la versión: nada más del cuerpo viaja.
+  borrador: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "POST", "/campanas/borrador", {
+    cuenta: c, pedido: String(req.body?.pedido || "").slice(0, 300),
+    productos: Array.isArray(req.body?.productos) ? req.body.productos.slice(0, 30).map((p) => ({ titulo: String(p?.titulo || "").slice(0, 80), categoria: p?.categoria ? String(p.categoria).slice(0, 40) : null })) : [],
+    variante: Number.isInteger(req.body?.variante) ? req.body.variante : 0,
+  })),
+  crear: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "POST", "/campanas", { cuenta: c, campana: req.body?.campana })),
+  guardar: (req, res) => (idCampana(req) ? conCuenta(req, res, (c) => reenviar(req, res, "PUT", `/campanas/${idCampana(req)}`, { cuenta: c, campana: req.body?.campana })) : campanaInexistente(res)),
+  borrar: (req, res) => (idCampana(req) ? conCuenta(req, res, (c) => reenviar(req, res, "DELETE", `/campanas/${idCampana(req)}?cuenta=${encodeURIComponent(c)}`)) : campanaInexistente(res)),
+  perfil: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "GET", `/perfil?cuenta=${encodeURIComponent(c)}`)),
+  guardarPerfil: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "PUT", "/perfil", { cuenta: c, perfil: req.body?.perfil })),
+};
+
 // Cambiar credenciales o salir del ensayo: sólo super admin.
 function soloSuperAdmin(req, res, next) {
   const roles = req.access?.roles || [];
@@ -244,6 +274,7 @@ function soloSuperAdmin(req, res, next) {
 }
 
 module.exports = {
+  campanas,
   soloAdmin,
   soloSuperAdmin,
   redes: (req, res) => redes(req, res, "GET"),

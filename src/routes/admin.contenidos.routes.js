@@ -22,6 +22,14 @@ router.patch("/piezas/:id", ctrl.editar);
 router.delete("/piezas/:id", ctrl.borrar);
 router.post("/piezas/:id/cancelar", ctrl.cancelar);
 router.post("/piezas/:id/publicaciones", ctrl.publicar);
+// Campaña a medida: las campañas del propio comercio y su estrategia.
+router.get("/campanas", ctrl.campanas.listar);
+router.post("/campanas/borrador", ctrl.campanas.borrador);
+router.post("/campanas", ctrl.campanas.crear);
+router.put("/campanas/:id", ctrl.campanas.guardar);
+router.delete("/campanas/:id", ctrl.campanas.borrar);
+router.get("/perfil", ctrl.campanas.perfil);
+router.put("/perfil", ctrl.campanas.guardarPerfil);
 router.get("/redes", ctrl.redes);
 router.put("/redes", ctrl.soloSuperAdmin, ctrl.guardarRedes);
 
