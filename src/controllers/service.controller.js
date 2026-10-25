@@ -11,6 +11,11 @@
 //   - POST   /admin/service/orders/:id/items  → agregar repuesto o mano de obra
 //   - PUT    /admin/service/orders/:id/items/:itemId
 //   - DELETE /admin/service/orders/:id/items/:itemId
+//   - POST   /admin/service/orders/:id/notes  → nota interna en el seguimiento
+//   - POST   /admin/service/orders/:id/whatsapp → comprobante o aviso de estado
+//   - GET    /admin/service/technicians       → tecnicos para derivar
+//   - GET    /admin/service/technicians/usuarios → usuarios con su marca (admin)
+//   - PUT    /admin/service/technicians/:userId  → marcar / desmarcar (admin)
 //   - GET    /admin/service/prices            → lista de precios por modelo
 //   - POST   /admin/service/prices/:id/espejo → crea el producto de catalogo
 //                                               para cobrar la reparacion por POS
@@ -22,6 +27,10 @@
 // Numeracion: la serie del sistema (`number`) arranca en 1 y es unica. Las 645
 // ordenes migradas del Excel viven con `number` en NULL y el numero del papel
 // en `legacy_number`, asi las dos series conviven sin pisarse.
+//
+// Seguimiento: el alta, cada cambio de estado, cada derivacion a un tecnico,
+// las notas y los avisos al cliente quedan en service_order_events
+// (services/serviceTracking.service.js). Las ordenes migradas no tienen.
 
 "use strict";
 
@@ -37,6 +46,7 @@ const {
   Branch,
 } = require("../models");
 const access = require("../utils/accessScope");
+const seguimiento = require("../services/serviceTracking.service");
 
 const VALID_STATUS = [
   "recibido",
@@ -142,11 +152,37 @@ async function loadFull(id) {
   });
 }
 
-// Un cajero ve solo las ordenes que recibio el. Un admin ve toda la sucursal.
+// La orden con su numero visible y el seguimiento, que es lo que devuelven el
+// detalle, el alta y la edicion.
+async function respuestaCompleta(id) {
+  const full = await loadFull(id);
+  if (!full) return null;
+  const events = await seguimiento.historial(id);
+  return { ...full.toJSON(), numero_visible: numeroVisible(full), events };
+}
+
+// Un cajero ve las ordenes que recibio el y las que le derivaron como tecnico.
+// Un admin ve toda la sucursal.
 function ownerFilter(req) {
   const scope = access.getAccessScope(req);
   if (scope.kind !== "user") return null;
-  return scope.userId || -1;
+  const yo = scope.userId || -1;
+  return { [Op.or]: [{ user_id: yo }, { technician_id: yo }] };
+}
+
+// Derivar a un tecnico: el id tiene que ser un usuario marcado como tecnico, y
+// el nombre se congela del usuario, no del body. Devuelve null si no se deriva
+// a nadie (id vacio) y lanza si el id no es tecnico.
+async function resolverTecnico(rawId, t) {
+  const id = toInt(rawId, 0) || null;
+  if (!id) return { technician_id: null, technician_name: null };
+  if (!(await seguimiento.esTecnico(id, t))) {
+    const err = new Error("El usuario elegido no esta marcado como tecnico.");
+    err.status = 400;
+    err.code = "NO_ES_TECNICO";
+    throw err;
+  }
+  return { technician_id: id, technician_name: await seguimiento.userName(id, t) };
 }
 
 // ============================================================
@@ -182,8 +218,17 @@ exports.list = async (req, res, next) => {
       }
     }
 
+    const y = [];
     const owner = ownerFilter(req);
-    if (owner !== null) where.user_id = owner;
+    if (owner !== null) y.push(owner);
+
+    // ?mios=1 es la cola del tecnico: lo que le derivaron a quien mira.
+    if (["1", "true"].includes(s(req.query.mios))) {
+      where.technician_id = toInt(req.user?.id, 0) || -1;
+    } else if (s(req.query.technician_id)) {
+      where.technician_id = toInt(req.query.technician_id, 0) || null;
+    }
+    if (y.length) where[Op.and] = y;
 
     // Por defecto no se muestran las 645 migradas: el mostrador quiere ver el
     // trabajo del dia, no el historico. Se piden con ?incluir_historico=1.
@@ -218,7 +263,8 @@ exports.stats = async (req, res, next) => {
   try {
     const where = {};
     const owner = ownerFilter(req);
-    if (owner !== null) where.user_id = owner;
+    if (owner !== null) Object.assign(where, owner);
+    if (["1", "true"].includes(s(req.query.mios))) where.technician_id = toInt(req.user?.id, 0) || -1;
     if (!["1", "true"].includes(s(req.query.incluir_historico))) where.source = "app";
 
     const rows = await ServiceOrder.findAll({
@@ -266,10 +312,10 @@ exports.getById = async (req, res, next) => {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ ok: false, code: "BAD_ID" });
 
-    const row = await loadFull(id);
-    if (!row) return notFound(res);
+    const data = await respuestaCompleta(id);
+    if (!data) return notFound(res);
 
-    return res.json({ ok: true, data: { ...row.toJSON(), numero_visible: numeroVisible(row) } });
+    return res.json({ ok: true, data });
   } catch (e) {
     next(e);
   }
@@ -303,6 +349,7 @@ exports.create = async (req, res, next) => {
 
     const quoted = toNum(b.quoted_amount, 0);
     const deposit = toNum(b.deposit, 0);
+    const tecnico = await resolverTecnico(b.technician_id, t);
 
     const orden = await ServiceOrder.create(
       {
@@ -329,8 +376,8 @@ exports.create = async (req, res, next) => {
         intake_condition: s(b.intake_condition) || null,
         reported_fault: s(b.reported_fault) || null,
 
-        technician_id: toInt(b.technician_id, 0) || null,
-        technician_name: s(b.technician_name) || null,
+        technician_id: tecnico.technician_id,
+        technician_name: tecnico.technician_name,
 
         status: VALID_STATUS.includes(s(b.status)) ? s(b.status) : "recibido",
         quoted_amount: quoted,
@@ -342,14 +389,24 @@ exports.create = async (req, res, next) => {
       { transaction: t }
     );
 
+    await seguimiento.registrar(
+      { order_id: orden.id, kind: "ingreso", to_status: orden.status, note: s(b.nota) || null },
+      { req, t }
+    );
+    if (tecnico.technician_id) {
+      await seguimiento.registrar(
+        { order_id: orden.id, kind: "tecnico", ...tecnico },
+        { req, t }
+      );
+    }
+
     await t.commit();
-    const full = await loadFull(orden.id);
-    return res.status(201).json({
-      ok: true,
-      data: { ...full.toJSON(), numero_visible: numeroVisible(full) },
-    });
+    return res.status(201).json({ ok: true, data: await respuestaCompleta(orden.id) });
   } catch (e) {
     await t.rollback();
+    if (e?.code === "NO_ES_TECNICO") {
+      return res.status(400).json({ ok: false, code: e.code, message: e.message });
+    }
     next(e);
   }
 };
@@ -380,13 +437,26 @@ exports.update = async (req, res, next) => {
       "device_brand", "device_model", "device_imei", "device_serial",
       "device_unlock", "device_accessories",
       "intake_condition", "reported_fault", "technical_report", "suggestions",
-      "technician_id", "technician_name", "estimated_pickup", "delivered_by",
+      "estimated_pickup", "delivered_by",
     ];
     const patch = {};
     for (const c of campos) {
       if (b[c] === undefined) continue;
-      if (c === "customer_id" || c === "technician_id") patch[c] = toInt(b[c], 0) || null;
+      if (c === "customer_id") patch[c] = toInt(b[c], 0) || null;
       else patch[c] = s(b[c]) || null;
+    }
+
+    // El tecnico se deriva por id: el nombre sale del usuario y no se acepta
+    // del body. Las ordenes migradas traen solo el nombre del Excel y lo
+    // conservan mientras nadie las derive a un usuario.
+    let derivado = null;
+    if (b.technician_id !== undefined) {
+      const tecnico = await resolverTecnico(b.technician_id, t);
+      const antes = toInt(orden.technician_id, 0) || null;
+      if (tecnico.technician_id !== antes) {
+        Object.assign(patch, tecnico);
+        derivado = tecnico;
+      }
     }
 
     if (b.quoted_amount !== undefined) patch.quoted_amount = toNum(b.quoted_amount, 0);
@@ -420,12 +490,39 @@ exports.update = async (req, res, next) => {
     patch.balance = recalcSaldo(futura);
 
     await ServiceOrder.update(patch, { where: { id }, transaction: t });
-    await t.commit();
 
-    const full = await loadFull(id);
-    return res.json({ ok: true, data: { ...full.toJSON(), numero_visible: numeroVisible(full) } });
+    const nota = s(b.nota) || null;
+    const cambioEstado = patch.status !== undefined && patch.status !== orden.status;
+    if (cambioEstado) {
+      await seguimiento.registrar(
+        { order_id: id, kind: "estado", from_status: orden.status, to_status: patch.status, note: nota },
+        { req, t }
+      );
+    }
+    if (derivado) {
+      await seguimiento.registrar(
+        {
+          order_id: id,
+          kind: "tecnico",
+          ...derivado,
+          note: cambioEstado ? null : nota,
+        },
+        { req, t }
+      );
+    }
+
+    await t.commit();
+    return res.json({
+      ok: true,
+      data: await respuestaCompleta(id),
+      // El front ofrece avisar al cliente solo cuando el estado cambio.
+      cambio_estado: cambioEstado,
+    });
   } catch (e) {
     await t.rollback();
+    if (e?.code === "NO_ES_TECNICO") {
+      return res.status(400).json({ ok: false, code: e.code, message: e.message });
+    }
     next(e);
   }
 };
@@ -444,7 +541,87 @@ exports.remove = async (req, res, next) => {
     if (!orden) return notFound(res);
 
     await orden.destroy();
+    await sequelize.query("DELETE FROM service_order_events WHERE order_id = :id", {
+      replacements: { id },
+    }).catch(() => {});
     return res.json({ ok: true, data: { id } });
+  } catch (e) {
+    next(e);
+  }
+};
+
+// ============================================================
+// SEGUIMIENTO: NOTAS Y AVISOS
+// ============================================================
+exports.addNote = async (req, res, next) => {
+  if (!ServiceOrder) return unavailable(res);
+  try {
+    const id = toInt(req.params.id, 0);
+    const orden = id ? await ServiceOrder.findByPk(id, { attributes: ["id"] }) : null;
+    if (!orden) return notFound(res);
+
+    const nota = s(req.body?.nota);
+    if (!nota) return res.status(400).json({ ok: false, code: "SIN_NOTA", message: "Falta el texto de la nota." });
+
+    await seguimiento.registrar({ order_id: id, kind: "nota", note: nota.slice(0, 2000) }, { req });
+    return res.status(201).json({ ok: true, data: await seguimiento.historial(id) });
+  } catch (e) {
+    next(e);
+  }
+};
+
+// tipo = comprobante (al recibir el equipo) | estado (el estado actual).
+exports.whatsapp = async (req, res, next) => {
+  if (!ServiceOrder) return unavailable(res);
+  try {
+    const id = toInt(req.params.id, 0);
+    const orden = id ? await ServiceOrder.findByPk(id) : null;
+    if (!orden) return notFound(res);
+
+    const tipo = s(req.body?.tipo) === "comprobante" ? "comprobante" : "estado";
+    const r = await seguimiento.avisarPorWhatsApp(orden, { tipo, numero: numeroVisible(orden), req });
+    if (!r.ok) return res.status(400).json(r);
+
+    return res.json({ ok: true, data: { ...r, events: await seguimiento.historial(id) } });
+  } catch (e) {
+    next(e);
+  }
+};
+
+// ============================================================
+// TECNICOS
+// ============================================================
+exports.technicians = async (req, res, next) => {
+  try {
+    return res.json({ ok: true, data: await seguimiento.listarTecnicos() });
+  } catch (e) {
+    next(e);
+  }
+};
+
+exports.technicianUsers = async (req, res, next) => {
+  try {
+    if (!access.isBranchAdmin(req)) {
+      return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo administradores." });
+    }
+    return res.json({ ok: true, data: await seguimiento.listarUsuariosConMarca() });
+  } catch (e) {
+    next(e);
+  }
+};
+
+exports.setTechnician = async (req, res, next) => {
+  try {
+    if (!access.isBranchAdmin(req)) {
+      return res.status(403).json({ ok: false, code: "FORBIDDEN", message: "Solo administradores." });
+    }
+    const userId = toInt(req.params.userId, 0);
+    if (!userId) return res.status(400).json({ ok: false, code: "BAD_ID" });
+    const u = User ? await User.findByPk(userId, { attributes: ["id"] }) : null;
+    if (!u) return res.status(404).json({ ok: false, code: "NOT_FOUND", message: "Usuario no encontrado." });
+
+    await seguimiento.marcarTecnico(userId, req.body?.es_tecnico !== false);
+    return res.json({ ok: true, data: await seguimiento.listarUsuariosConMarca() });
   } catch (e) {
     next(e);
   }

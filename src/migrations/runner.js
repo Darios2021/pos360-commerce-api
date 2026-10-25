@@ -426,6 +426,50 @@ const tableSteps = [
         COMMENT='Lista de precios de reparacion por modelo';
     `,
   },
+  // Seguimiento de la orden: cada ingreso, cambio de estado, derivacion a un
+  // tecnico, nota y aviso al cliente queda como un renglon. El `status` de la
+  // cabecera se pisa en cada cambio; esto es lo que dice cuando y quien.
+  // Sin FK a service_orders a proposito (como budget_items): borrar una orden
+  // es de admin y el historial se limpia en el mismo DELETE.
+  {
+    id:     "service_order_events",
+    table:  "service_order_events",
+    sql: `
+      CREATE TABLE IF NOT EXISTS service_order_events (
+        id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        order_id        BIGINT UNSIGNED NOT NULL,
+        kind            ENUM('ingreso','estado','tecnico','nota','aviso') NOT NULL,
+        from_status     VARCHAR(30) NULL,
+        to_status       VARCHAR(30) NULL,
+        technician_id   BIGINT UNSIGNED NULL,
+        technician_name VARCHAR(180) NULL COMMENT 'Tecnico al que se derivo (congelado)',
+        channel         VARCHAR(20) NULL COMMENT 'Aviso: whatsapp',
+        note            TEXT NULL,
+        user_id         BIGINT UNSIGNED NULL,
+        user_name       VARCHAR(180) NULL COMMENT 'Quien hizo el cambio (congelado)',
+        created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY ix_soe_order (order_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Seguimiento de las ordenes de servicio tecnico';
+    `,
+  },
+  // Usuarios que trabajan como tecnicos. Tabla aparte y no una columna en
+  // users: el modelo User entra en el login, y una columna que faltara dejaria
+  // a nadie entrar. Tampoco es un rol: los roles deciden el alcance (cajero ve
+  // lo suyo, admin la sucursal) y un tecnico puede ser cualquiera de los dos.
+  {
+    id:     "service_technicians",
+    table:  "service_technicians",
+    sql: `
+      CREATE TABLE IF NOT EXISTS service_technicians (
+        user_id     BIGINT UNSIGNED NOT NULL,
+        created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        COMMENT='Usuarios que reciben equipos derivados del servicio tecnico';
+    `,
+  },
 ];
 
 // ── Alta de producto: proveedor, compra, unidad y stock mínimo ──────────

@@ -10,6 +10,11 @@ router.get("/prices", ctrl.prices);
 // Crea (o reusa) el producto de catalogo para poder cobrar la reparacion por POS.
 router.post("/prices/:id/espejo", ctrl.mirrorPrice);
 
+// Tecnicos: la lista para derivar y la marca de quien es tecnico (admin).
+router.get("/technicians", ctrl.technicians);
+router.get("/technicians/usuarios", ctrl.technicianUsers);
+router.put("/technicians/:userId", ctrl.setTechnician);
+
 // Cabecera
 router.get("/orders", ctrl.list);
 // Antes de /orders/:id: si no, "stats" se lee como un id y rompe.
@@ -18,6 +23,10 @@ router.post("/orders", ctrl.create);
 router.get("/orders/:id", ctrl.getById);
 router.put("/orders/:id", ctrl.update);
 router.delete("/orders/:id", ctrl.remove);
+
+// Seguimiento: notas internas y avisos al cliente por WhatsApp
+router.post("/orders/:id/notes", ctrl.addNote);
+router.post("/orders/:id/whatsapp", ctrl.whatsapp);
 
 // Renglones: repuestos y mano de obra
 router.post("/orders/:id/items", ctrl.addItem);

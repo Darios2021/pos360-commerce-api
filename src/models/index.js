@@ -92,15 +92,18 @@ try {
 let ServiceOrder = null;
 let ServiceOrderItem = null;
 let ServiceRepairPrice = null;
+let ServiceOrderEvent = null;
 try {
   ServiceOrder = require("./ServiceOrder")(sequelize, DataTypes);
   ServiceOrderItem = require("./ServiceOrderItem")(sequelize, DataTypes);
   ServiceRepairPrice = require("./ServiceRepairPrice")(sequelize, DataTypes);
+  ServiceOrderEvent = require("./ServiceOrderEvent")(sequelize, DataTypes);
 } catch (e) {
   console.log("⚠️ ServiceOrder no cargado:", e?.message);
   ServiceOrder = null;
   ServiceOrderItem = null;
   ServiceRepairPrice = null;
+  ServiceOrderEvent = null;
 }
 
 // ===== CRM: plantillas + log de mensajes =====
@@ -321,6 +324,9 @@ if (ServiceOrder && ServiceOrderItem) {
   safeBelongsTo(ServiceOrder, User, { as: "user", foreignKey: "user_id" });
   safeBelongsTo(ServiceOrder, User, { as: "technician", foreignKey: "technician_id" });
   safeBelongsTo(ServiceOrder, Branch, { as: "branch", foreignKey: "branch_id" });
+}
+if (ServiceOrder && ServiceOrderEvent) {
+  safeHasMany(ServiceOrder, ServiceOrderEvent, { as: "events", foreignKey: "order_id" });
 }
 if (ServiceRepairPrice && Product) {
   safeBelongsTo(ServiceRepairPrice, Product, { as: "product", foreignKey: "product_id" });
@@ -709,6 +715,7 @@ const models = {
   ServiceOrder,
   ServiceOrderItem,
   ServiceRepairPrice,
+  ServiceOrderEvent,
 
   // CRM
   MessageTemplate,
