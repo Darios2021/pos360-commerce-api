@@ -256,7 +256,12 @@ const campanas = {
   // Sólo el pedido, la muestra del catálogo y la versión: nada más del cuerpo viaja.
   borrador: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "POST", "/campanas/borrador", {
     cuenta: c, pedido: String(req.body?.pedido || "").slice(0, 300),
-    productos: Array.isArray(req.body?.productos) ? req.body.productos.slice(0, 30).map((p) => ({ titulo: String(p?.titulo || "").slice(0, 80), categoria: p?.categoria ? String(p.categoria).slice(0, 40) : null })) : [],
+    // Los del stock que pueden servir, con id, precio y unidades: la IA elige por id.
+    productos: Array.isArray(req.body?.productos) ? req.body.productos.slice(0, 40).map((p) => ({
+      id: p?.id != null ? String(p.id).slice(0, 40) : undefined, titulo: String(p?.titulo || "").slice(0, 80), categoria: p?.categoria ? String(p.categoria).slice(0, 40) : null,
+      precio: Number.isFinite(Number(p?.precio)) ? Number(p.precio) : null, stock: Number.isFinite(Number(p?.stock)) ? Number(p.stock) : null, coincide: Boolean(p?.coincide),
+    })) : [],
+    quiere: ["productos", "kit"].includes(req.body?.quiere) ? req.body.quiere : "ia",
     variante: Number.isInteger(req.body?.variante) ? req.body.variante : 0,
   })),
   crear: (req, res) => conCuenta(req, res, (c) => reenviar(req, res, "POST", "/campanas", { cuenta: c, campana: req.body?.campana })),
