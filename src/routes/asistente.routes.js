@@ -64,6 +64,24 @@ asistente.post("/mensaje", envolver(async (req, res) => {
   if (!res.writableEnded) res.end();
 }));
 
+/* ── Historial (2026-10-31, como Alade): las conversaciones de quien está logueado.
+   Se reenvían a mostrador con el permiso firmado acá; el dueño sale del permiso. ── */
+const reenviar = async (req, res, ruta, extra = {}) => {
+  const permiso = await svc.firmarPermiso(usuarioDe(req));
+  const r = await svc.pedirAMostrador(ruta, { permiso, ...extra }, { espera: 15000 });
+  res.status(r.status === 401 ? 502 : r.status).json(r.cuerpo);
+};
+const idOk = (id) => /^[0-9a-f-]{36}$/i.test(String(id || ""));
+const exigirId = (req) => { if (!idOk(req.params.id)) throw new svc.ErrorAsistente(404, "No existe esa conversación."); };
+asistente.get("/conversaciones", envolver((req, res) =>
+  reenviar(req, res, "/interno/conversaciones", { buscar: String(req.query?.buscar || "").slice(0, 80) })));
+asistente.get("/conversaciones/:id", envolver((req, res) => { exigirId(req); return reenviar(req, res, `/interno/conversaciones/${req.params.id}`); }));
+asistente.patch("/conversaciones/:id", envolver((req, res) => {
+  exigirId(req);
+  return reenviar(req, res, `/interno/conversaciones/${req.params.id}/nombre`, { titulo: String(req.body?.titulo ?? "").slice(0, 120) });
+}));
+asistente.delete("/conversaciones/:id", envolver((req, res) => { exigirId(req); return reenviar(req, res, `/interno/conversaciones/${req.params.id}/borrar`); }));
+
 const asistenteDatos = express.Router();
 asistenteDatos.use(sinCache, svc.exigirPermiso);
 const dato = (ruta, fn) => asistenteDatos.get(`/${ruta}`, svc.exigirRol(ruta), envolver(async (req, res) => {
