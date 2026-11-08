@@ -152,7 +152,7 @@ async function rotacion(u, q) {
   if (modo === "sin_rotacion") {
     const desde = new Date(Date.parse(base.hoy()) - (dias - 1) * 86400000).toISOString().slice(0, 10);
     const [filas] = await sequelize.query(
-      `SELECT p.name AS producto, p.sku, COALESCE(c.name, 'sin categoría') AS categoria, SUM(sb.qty) AS existencia,
+      `SELECT p.id, p.name AS producto, p.sku, COALESCE(c.name, 'sin categoría') AS categoria, SUM(sb.qty) AS existencia,
               SUM(sb.qty) * MAX(${base.COSTO_ACTUAL}) AS valor_costo,
               (SELECT MAX(s2.sold_at) FROM sale_items si2 JOIN sales s2 ON s2.id = si2.sale_id
                 WHERE si2.product_id = p.id AND s2.status = 'PAID') AS ultima_venta
@@ -170,10 +170,10 @@ async function rotacion(u, q) {
     return {
       modo, dias, desde, cantidad: filas.length,
       valor_al_costo: n(filas.reduce((s, f) => s + (Number(f.valor_costo) || 0), 0)),
-      productos: filas.slice(0, 30).map((f) => ({
-        producto: f.producto, sku: f.sku, categoria: f.categoria, existencia: n(f.existencia), valor_costo: n(f.valor_costo),
+      productos: await base.conFotos(filas.slice(0, 30).map((f) => ({
+        id: n(f.id), producto: f.producto, sku: f.sku, categoria: f.categoria, existencia: n(f.existencia), valor_costo: n(f.valor_costo),
         ultima_venta: f.ultima_venta ? new Date(`${String(f.ultima_venta instanceof Date ? f.ultima_venta.toISOString() : f.ultima_venta).replace(" ", "T").slice(0, 19)}Z`).toISOString() : null,
-      })),
+      }))),
       nota: "Con stock y sin ventas pagadas en el período, ordenados por lo inmovilizado al costo actual (0 si no tiene costo).",
       moneda: "ARS",
     };
@@ -195,11 +195,11 @@ async function rotacion(u, q) {
   const lista = [...antes.entries()].filter(([, p]) => Number(p.unidades) >= MINIMO).map(([id, p]) => {
     const x = ahora.get(id);
     const uAntes = n(p.unidades), uAhora = n(x?.unidades);
-    return { producto: p.producto, unidades: uAhora, unidades_antes: uAntes, facturado: n(x?.facturado), facturado_antes: n(p.facturado), variacion_pct: variacion(uAhora, uAntes) };
+    return { id, producto: p.producto, unidades: uAhora, unidades_antes: uAntes, facturado: n(x?.facturado), facturado_antes: n(p.facturado), variacion_pct: variacion(uAhora, uAntes) };
   }).filter((p) => p.unidades < p.unidades_antes).sort((a, b) => a.variacion_pct - b.variacion_pct || b.unidades_antes - a.unidades_antes);
   return {
     modo, dias, desde: r.desde, hasta: r.hasta, periodo_anterior: { desde: ant.desde, hasta: ant.hasta },
-    cantidad: lista.length, productos: lista.slice(0, 20),
+    cantidad: lista.length, productos: await base.conFotos(lista.slice(0, 20)),
     nota: `En unidades, sólo productos con ${MINIMO} o más unidades vendidas en el período anterior.`,
     moneda: "ARS",
   };

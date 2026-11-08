@@ -304,17 +304,63 @@ async function arqueo(u, q) {
   };
 }
 
+// ── Fotos de producto (2026-11-08) ──
+// La foto principal (menor sort_order) de cada producto, como URL pública absoluta
+// tal como la guarda la carga de imágenes. Mostrador sólo deja pasar a la pantalla
+// las URL que vinieron en estos resultados: el modelo no puede inventar una.
+async function fotos(ids) {
+  const lista = [...new Set((ids || []).map(Number).filter((x) => Number.isInteger(x) && x > 0))];
+  if (!lista.length) return new Map();
+  const [filas] = await sequelize.query(
+    `SELECT pi.product_id AS id, pi.url
+       FROM product_images pi
+       JOIN (SELECT product_id, MIN(sort_order * 1000000 + id) AS orden FROM product_images
+              WHERE product_id IN (:ids) GROUP BY product_id) m
+         ON m.product_id = pi.product_id AND pi.sort_order * 1000000 + pi.id = m.orden`,
+    { replacements: { ids: lista } }
+  );
+  return new Map(filas.filter((f) => /^https?:\/\//i.test(String(f.url || ""))).map((f) => [Number(f.id), String(f.url)]));
+}
+/** Agrega `id` y `foto` (si tiene) a cada producto de una lista con product_id. */
+async function conFotos(items, idDe = (x) => x.id) {
+  const mapa = await fotos(items.map(idDe));
+  return items.map((x) => {
+    const f = mapa.get(Number(idDe(x)));
+    return f ? { ...x, foto: f } : x;
+  });
+}
+
+// Búsqueda por palabras: cada palabra tiene que estar en el nombre, el SKU o el código.
+// Se prueba también el singular ("cargadores" -> "cargador", "cables" -> "cable"),
+// porque el personal pregunta en plural y los productos se cargan en singular.
+function singular(w) {
+  if (w.length > 4 && /[^aeiou]es$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && /s$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+function filtroPalabras(consulta) {
+  const palabras = String(consulta || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/).filter((w) => w.length >= 2).slice(0, 5);
+  const rep = {};
+  const partes = palabras.map((w, i) => {
+    rep[`w${i}`] = `%${singular(w)}%`;
+    return `(p.name LIKE :w${i} OR p.sku LIKE :w${i} OR p.barcode LIKE :w${i})`;
+  });
+  return { sql: partes.length ? `AND ${partes.join(" AND ")}` : "", rep };
+}
+
 async function masVendidos(u, q) {
   const r = q.desde || q.hasta ? rango(q) : rango({}, { defecto: 30 });
   const limite = Math.min(30, Math.max(1, parseInt(q.limite, 10) || 10));
   const [filas] = await sequelize.query(
-    `SELECT MAX(si.product_name_snapshot) AS producto, SUM(si.quantity) AS unidades, SUM(si.line_total) AS facturado
+    `SELECT si.product_id AS id, MAX(si.product_name_snapshot) AS producto, SUM(si.quantity) AS unidades, SUM(si.line_total) AS facturado
        FROM sale_items si JOIN sales s ON s.id = si.sale_id
       WHERE s.status = 'PAID' AND s.sold_at >= :de AND s.sold_at < :a ${filtroSucursal(u, "s.branch_id")}
       GROUP BY si.product_id ORDER BY facturado DESC LIMIT ${limite}`,
     { replacements: reemplazos(u, { de: r.de, a: r.a }) }
   );
-  return { desde: r.desde, hasta: r.hasta, productos: filas.map((f) => ({ producto: f.producto, unidades: n(f.unidades), facturado: n(f.facturado) })), moneda: "ARS" };
+  const productos = await conFotos(filas.map((f) => ({ id: n(f.id), producto: f.producto, unidades: n(f.unidades), facturado: n(f.facturado) })));
+  return { desde: r.desde, hasta: r.hasta, productos, moneda: "ARS" };
 }
 
 // Mismo cálculo que reports.controller.js getGananciaReport: costo guardado en la venta o,
@@ -351,25 +397,61 @@ async function margenes(u, q) {
   };
 }
 
+// Stock (2026-11-08). Antes traía 40 filas ordenadas por existencia y nombre: con muchos
+// productos en 0, los que estaban por agotarse no entraban y la respuesta salía cortada.
+// Ahora: con `solo_bajos`, dos listas separadas (sin stock y bajo el mínimo, con
+// existencia > 0) con su total cada una; sin filtro, el total de lo que coincide.
+// Cada fila trae el id del producto y su foto.
+const STOCK_SQL = (u, filtro, having, orden, limite) => `
+  SELECT p.id, p.name AS producto, p.sku, b.name AS sucursal, SUM(sb.qty) AS existencia, MAX(p.min_stock) AS minimo
+    FROM stock_balances sb
+    JOIN products p ON p.id = sb.product_id
+    JOIN warehouses w ON w.id = sb.warehouse_id
+    LEFT JOIN branches b ON b.id = w.branch_id
+   WHERE p.is_active = 1 AND COALESCE(p.track_stock, 1) = 1 ${filtro} ${filtroSucursal(u, "w.branch_id")}
+   GROUP BY p.id, b.name
+   ${having}
+   ORDER BY ${orden} ${limite ? `LIMIT ${limite}` : ""}`;
+const filaStock = (f) => ({ id: n(f.id), producto: f.producto, sku: f.sku, sucursal: f.sucursal, existencia: n(f.existencia), minimo: f.minimo === null ? null : n(f.minimo) });
+async function contarStock(u, filtro, having, rep) {
+  const [[c]] = await sequelize.query(`SELECT COUNT(*) AS n FROM (${STOCK_SQL(u, filtro, having, "1", 0)}) t`, { replacements: rep });
+  return n(c?.n);
+}
+
 async function stock(u, q) {
   const consulta = String(q.consulta || "").trim().slice(0, 60);
   const bajos = String(q.solo_bajos) === "true";
-  const [filas] = await sequelize.query(
-    `SELECT p.name AS producto, p.sku, b.name AS sucursal, SUM(sb.qty) AS existencia, MAX(p.min_stock) AS minimo
-       FROM stock_balances sb
-       JOIN products p ON p.id = sb.product_id
-       JOIN warehouses w ON w.id = sb.warehouse_id
-       LEFT JOIN branches b ON b.id = w.branch_id
-      WHERE p.is_active = 1 AND COALESCE(p.track_stock, 1) = 1 ${consulta ? "AND (p.name LIKE :q OR p.sku LIKE :q)" : ""}
-        ${filtroSucursal(u, "w.branch_id")}
-      GROUP BY p.id, b.name
-      ${bajos ? "HAVING SUM(sb.qty) <= COALESCE(MAX(p.min_stock), 3)" : ""}
-      ORDER BY existencia ASC, p.name LIMIT 40`,
-    { replacements: reemplazos(u, { q: `%${consulta}%` }) }
-  );
+  const { sql: filtro, rep: repPalabras } = filtroPalabras(consulta);
+  const rep = reemplazos(u, repPalabras);
+
+  if (bajos) {
+    const SIN = "HAVING SUM(sb.qty) <= 0";
+    const BAJO = "HAVING SUM(sb.qty) > 0 AND SUM(sb.qty) <= COALESCE(MAX(p.min_stock), 3)";
+    const [[sin], [bajo], totalSin, totalBajo] = await Promise.all([
+      sequelize.query(STOCK_SQL(u, filtro, SIN, "p.name", 30), { replacements: rep }),
+      sequelize.query(STOCK_SQL(u, filtro, BAJO, "existencia ASC, p.name", 30), { replacements: rep }),
+      contarStock(u, filtro, SIN, rep),
+      contarStock(u, filtro, BAJO, rep),
+    ]);
+    const [sinStock, bajoMinimo] = await Promise.all([conFotos(sin.map(filaStock)), conFotos(bajo.map(filaStock))]);
+    return {
+      consulta: consulta || undefined,
+      bajo_minimo: { total: totalBajo, mostrados: bajoMinimo.length, productos: bajoMinimo },
+      sin_stock: { total: totalSin, mostrados: sinStock.length, productos: sinStock },
+      nota: "Una fila por producto y sucursal. bajo_minimo: con existencia mayor a 0 y en o bajo el mínimo del producto (3 si no tiene). sin_stock: existencia 0 o menos. Si total es mayor que mostrados, decí cuántos quedan afuera.",
+    };
+  }
+
+  const orden = consulta ? "p.name, b.name" : "existencia ASC, p.name";
+  const [[filas], total] = await Promise.all([
+    sequelize.query(STOCK_SQL(u, filtro, "", orden, 40), { replacements: rep }),
+    contarStock(u, filtro, "", rep),
+  ]);
+  const productos = await conFotos(filas.map(filaStock));
   return {
-    productos: filas.map((f) => ({ producto: f.producto, sku: f.sku, sucursal: f.sucursal, existencia: n(f.existencia), minimo: f.minimo === null ? null : n(f.minimo) })),
-    nota: bajos ? "Bajo mínimo: con el mínimo del producto, o 3 si no tiene." : undefined,
+    consulta: consulta || undefined, total, mostrados: productos.length, productos,
+    nota: total > productos.length ? `Una fila por producto y sucursal. Coinciden ${total}; se muestran ${productos.length}.` : "Una fila por producto y sucursal.",
+    sin_resultados: consulta && !total ? `Ningún producto activo con "${consulta}" en el nombre, el SKU o el código (también se buscó en singular).` : undefined,
   };
 }
 
@@ -486,5 +568,5 @@ module.exports = {
   MATRIZ, rolPrincipal, ErrorAsistente, configurado, firmarPermiso, pedirAMostrador, abrirFlujoDeMostrador, exigirPermiso, exigirRol, hoy,
   cajaActual, ventas, cajas, arqueo, masVendidos, margenes, stock,
   // Para asistenteAnalisis.service.js
-  rango, filtroSucursal, reemplazos, n, nombreUsuario, inicioDia, finDia, COSTO_ACTUAL,
+  rango, filtroSucursal, reemplazos, n, nombreUsuario, inicioDia, finDia, COSTO_ACTUAL, conFotos,
 };
